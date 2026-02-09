@@ -1,0 +1,10 @@
+[
+  {
+    "name": "enforcer_enforcer",
+    "target": "//enforcer:enforcer"
+  },
+  {
+    "name": "enforcer_enforcer_tar",
+    "target": "//enforcer:enforcer_tar"
+  }
+]

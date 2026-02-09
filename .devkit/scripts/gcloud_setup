@@ -1,0 +1,168 @@
+#!/bin/bash
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+#
+# Sets up gcloud for usage with devkit.
+#
+
+set -o errexit
+set -o nounset
+
+function usage() {
+  local -i exitval=${1-1}
+  cat &>/dev/stdout << USAGE
+usage: $(basename "${BASH_SOURCE[0]}") [--help] --account ACCOUNT
+
+Sets up gcloud for usage with devkit.
+
+Options:
+  --help                Show this help message and exit.
+  --account             The gcloud account to use.
+USAGE
+  exit ${exitval}
+}
+
+function log_sep() {
+  printf "%.s=" {1..20}
+  printf "\n"
+  if [[ $# -gt 0 ]]; then
+    echo "$@"
+  fi
+}
+
+function get_config_value() {
+  local -r key="$1"
+  local -r config_path="$2"
+  local value
+
+  value="$(python3 - "${key}" "${config_path}" << EOF
+import sys
+import json
+
+try:
+  with open(sys.argv[2], 'r') as f:
+    data = json.load(f)
+  keys = sys.argv[1].split('.')
+  if keys[0] == '':
+      keys = keys[1:]
+  result = data
+  for k in keys:
+      if result is None:
+          break
+      result = result.get(k)
+  print(result if result is not None else '')
+except Exception:
+  pass
+EOF
+)"
+  if [[ -z "${value}" ]]; then
+    printf "Error: Could not find '%s' key in %s\n" "${key}" "${config_path}" >&2
+    exit 1
+  fi
+
+  printf "%s\n" "${value}"
+}
+
+SCRIPTS="$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")"
+readonly SCRIPTS
+
+source "${SCRIPTS}/lib_logging.sh"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --help) usage 0 ;;
+    --account)
+      shift
+      if [[ $# -eq 0 ]]; then
+        printf "Error: --account requires an argument.\n" >&2
+        usage 1
+      fi
+      ACCOUNT=$1
+      ;;
+    *) break ;;
+  esac
+  shift
+done
+
+if [[ -z "${ACCOUNT:-}" ]]; then
+  printf "Error: Account is not set. Please use the --account flag.\n" >&2
+  exit 1
+fi
+
+if ! command -v gcloud &> /dev/null; then
+  printf "Error: Required command 'gcloud' is not installed.\n" >&2
+  exit 1
+fi
+
+PROJECT_ROOT="$("${SCRIPTS}"/find_project_root.py)"
+DEVKIT_CONFIG_PATH="${PROJECT_ROOT}/devkit.json"
+DEVKIT_CONFIG_KEY_DOCKER_REGISTRY_PROJECT=".docker.registry.project"
+DEVKIT_CONFIG_KEY_DOCKER_REGISTRY_HOST=".docker.registry.host"
+
+readonly PROJECT_ROOT
+readonly DEVKIT_CONFIG_PATH
+readonly DEVKIT_CONFIG_KEY_DOCKER_REGISTRY_PROJECT
+readonly DEVKIT_CONFIG_KEY_DOCKER_REGISTRY_HOST
+
+if [[ ! -f "${DEVKIT_CONFIG_PATH}" ]]; then
+  printf "Error: Devkit config file not found at %s\n" "${DEVKIT_CONFIG_PATH}" >&2
+  exit 1
+fi
+
+PROJECT="$(get_config_value "${DEVKIT_CONFIG_KEY_DOCKER_REGISTRY_PROJECT}" "${DEVKIT_CONFIG_PATH}")"
+readonly PROJECT
+
+log_sep "Configuring gcloud account..."
+CURRENT_ACCOUNT="$(gcloud config get-value account 2>/dev/null || true)"
+readonly CURRENT_ACCOUNT
+if [[ ${CURRENT_ACCOUNT} != "${ACCOUNT}" ]]; then
+  gcloud config set account "${ACCOUNT}" --quiet
+  printf "Account is now set to %s.\n" "${ACCOUNT}"
+else
+  printf "gcloud account is already set to %s.\n" "${ACCOUNT}"
+fi
+
+log_sep "Configuring gcloud project..."
+CURRENT_PROJECT="$(gcloud config get-value project 2>/dev/null || true)"
+readonly CURRENT_PROJECT
+if [[ ${CURRENT_PROJECT} != "${PROJECT}" ]]; then
+  gcloud config set project "${PROJECT}" --quiet
+  printf "Project is now set to %s.\n" "${PROJECT}"
+else
+  printf "Project is already set to %s.\n" "${PROJECT}"
+fi
+
+log_sep "Checking authentication..."
+if ! gcloud auth print-access-token --account="${ACCOUNT}" &>/dev/null; then
+  printf "Logging into gcloud as %s...\n" "${ACCOUNT}"
+  gcloud auth login "${ACCOUNT}" --quiet
+else
+  printf "Already logged in as %s.\n" "${ACCOUNT}"
+fi
+
+log_sep "Checking application-default credentials..."
+if ! gcloud auth application-default print-access-token --account="${ACCOUNT}" &>/dev/null; then
+  printf "Setting application-default credentials...\n"
+  gcloud auth application-default login --quiet
+else
+  printf "Application-default credentials already set.\n"
+fi
+
+log_sep "Configuring Docker credentials..."
+DOCKER_REGISTRY_HOST="$(get_config_value "${DEVKIT_CONFIG_KEY_DOCKER_REGISTRY_HOST}" "${DEVKIT_CONFIG_PATH}")"
+readonly DOCKER_REGISTRY_HOST
+gcloud auth configure-docker "${DOCKER_REGISTRY_HOST}" --quiet
+
+log_sep "Done."

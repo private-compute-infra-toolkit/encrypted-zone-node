@@ -1,0 +1,118 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "junction",
+    srcs = glob(["src/*.rs"]),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":junction_trait",
+        "//enforcer/container/manager:container_manager_request",
+        "//enforcer/container/manager:container_manager_requester",
+        "//enforcer/data_scope",
+        "//enforcer/error:ez_error",
+        "//enforcer/error:ez_error_trait",
+        "//enforcer/isolate:isolate_info",
+        "//enforcer/isolate:isolate_service_mapper",
+        "//enforcer/isolate:shared_memory_manager",
+        "//enforcer/metrics",
+        "//enforcer/state:state_manager",
+        "//enforcer/v1:data_scope_rust",
+        "//enforcer/v1:enforcer_rust",
+        "//enforcer/v1:error_detail_rust",
+        "//enforcer/v1:google_rpc_error_details_rust",
+        "//simple_tonic_stream",
+        "@crates//:anyhow",
+        "@crates//:async-stream",
+        "@crates//:dashmap",
+        "@crates//:futures-core",
+        "@crates//:hyper-util",
+        "@crates//:log",
+        "@crates//:opentelemetry",
+        "@crates//:prost",
+        "@crates//:rand",
+        "@crates//:thiserror",
+        "@crates//:tokio",
+        "@crates//:tokio-retry",
+        "@crates//:tokio-stream",
+        "@crates//:tonic",
+        "@crates//:tower",
+    ],
+)
+
+rust_test(
+    name = "junction_test",
+    size = "small",
+    srcs = ["test/junction_test.rs"],
+    deps = [
+        ":junction",
+        ":junction_test_utils",
+        ":junction_trait",
+        "//enforcer/container/manager:container_manager_request",
+        "//enforcer/container/manager:container_manager_requester",
+        "//enforcer/data_scope",
+        "//enforcer/isolate:isolate_info",
+        "//enforcer/isolate:isolate_service_mapper",
+        "//enforcer/isolate:isolate_test_utils",
+        "//enforcer/isolate:shared_memory_manager",
+        "//enforcer/state:state_manager",
+        "//enforcer/v1:data_scope_rust",
+        "//enforcer/v1:enforcer_rust",
+        "//enforcer/v1:payload_rust",
+        "//simple_tonic_stream",
+        "@crates//:rand",
+        "@crates//:tokio",
+        "@crates//:tokio-stream",
+        "@crates//:tonic",
+    ],
+)
+
+rust_library(
+    name = "junction_trait",
+    srcs = ["trait.rs"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//enforcer/error:ez_error",
+        "//enforcer/isolate:isolate_info",
+        "//enforcer/v1:enforcer_rust",
+        "@crates//:anyhow",
+        "@crates//:dyn-clone",
+        "@crates//:tokio",
+        "@crates//:tonic",
+    ],
+)
+
+rust_library(
+    name = "junction_test_utils",
+    testonly = True,
+    srcs = ["test_utils.rs"],
+    proc_macro_deps = ["@crates//:derivative"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":junction_trait",
+        "//enforcer/data_scope",
+        "//enforcer/error:ez_error",
+        "//enforcer/error:ez_error_trait",
+        "//enforcer/isolate:isolate_info",
+        "//enforcer/isolate:isolate_test_utils",
+        "//enforcer/v1:enforcer_rust",
+        "//enforcer/v1:error_detail_rust",
+        "@crates//:anyhow",
+        "@crates//:dashmap",
+        "@crates//:tokio",
+        "@crates//:tonic",
+    ],
+)

@@ -1,0 +1,186 @@
+// Copyright 2025 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package enforcer;
+
+import "enforcer/v1/data_scope_type.proto";
+
+message EzManifest {
+  // The name of the current workload as chosen by the publisher.
+  string isolate_name = 1;
+
+  // Must match domain in the cert that signs this package. Need not match the
+  // domain of the machine installing the package.
+  string publisher_id = 2;
+
+  // An arbitrary but unique filename (POSIX-compatible) to use for this
+  // package. The filename is how other packages will expect to find this
+  // package in a bundle.
+  //
+  // Example: acme.com-ads-backend1-v1.09012024.3.ezpkg
+  string package_filename = 3;
+
+  oneof ManifestType {
+    BundleManifest bundle_manifest = 4;
+    BinaryManifest binary_manifest = 5;
+    DataManifest data_manifest = 6;
+    CredentialManifest credential_manifest = 7;
+    KeyMaterialManifest key_material_manifest = 8;
+  }
+
+  // TODO: Add information about crypto keys needed to decrypt the archive.
+}
+
+message BundleManifest {
+  // A list of manifests for other EzPackages that will be bundled with this
+  // one. Those packages _must_ be present in the attached archive, or else
+  // validation will fail. Each of the packages must also have an exactly
+  // matching manifest, or else validation will fail. Any extraneous
+  // packages (or other files) in the archive that are not listed here will be
+  // ignored and/or deleted during the install processes.
+  repeated EzManifest manifests = 1;
+}
+
+// Describes a binary to be run inside an EZ Isolate, and the services that
+// Isolate will expose.
+message BinaryManifest {
+  // Filename of this executable binary file
+  string binary_filename = 1;
+  // Command line arguments to be passed to the binary
+  // May reference a set of pre-defined environment variables (and only those).
+  // TODO: Link to a doc itemizing the allowlisted variables
+  repeated string command_line_arguments = 2;
+  // Size in bytes of the decompressed archive containing the binary
+  int64 unpacked_archive_size = 3;
+  // Disk space (in bytes) needed at runtime. Typically this is
+  // unpacked_archive_size + any extra tmp space needed to start the binary.
+  int64 disk_reservation_size = 4;
+  // Specifications for any services this binary implements (not all services
+  // may be active at runtime)
+  repeated EzServiceSpec service_specs = 5;
+  repeated EzBackendDependency ez_backend_dependencies = 6;
+  // Environment variables to be set.
+  repeated string environment_variables = 7;
+  // Number of Isolates that will be mainted for this binary.
+  // Note: This field will be deprecated in favor of dynamic number of instances
+  // in the future.
+  int32 number_of_isolates = 8;
+  // This field indicates whether an Isolate is a Ratified Isolate.
+  // This field should not be over relied on and will be deprecated.
+  bool is_ratified_isolate = 9;
+  // List of Opaque Isolates for which this Ratified Isolate will intercept all
+  // requests. Only Ratified Isolates are allowed to provide this field. Only
+  // one Interceptor is allowed to be configured for each Opaque Isolate
+  // service.
+  repeated InterceptingServices services_to_intercept = 10;
+  // TODO: Add specs for other dependencies, such as Data or KeyMaterial
+}
+
+// Describes a service implemented in the binary, to run as an EZ Isolate.
+// The domain of the service will be the same as the publisher_id of the
+// manifest that directly describes the service binary (that is, if the binary
+// is included via a bundle, only the binary's publisher_id matters and not
+// the publisher_id of the containing bundle.)
+message EzServiceSpec {
+  // Public (redacted) service name, as will be surfaced by monitoring metrics
+  string service_name = 1;
+  // Generic (redacted) method name and input/output types
+  repeated EzMethodSpec method_specs = 2;
+}
+
+message EzMethodSpec {
+  string method_name = 1;
+  repeated enforcer.v1.DataScopeType input_scope_types = 2;
+  repeated enforcer.v1.DataScopeType output_scope_types = 3;
+}
+
+message EzBackendDependency {
+  string operator_domain = 1;
+  string publisher_id = 5;
+  string isolate_name = 6;
+
+  string service_name = 2;
+  string method_name = 3;
+
+  // RouteType defines how the dependency service should be routed.
+  enum RouteType {
+    // Unspecified route type. This should not be used.
+    ROUTE_TYPE_UNSPECIFIED = 0;
+    // Should be used when an Isolate needs to reach a service outside of EZ.
+    ROUTE_TYPE_EXTERNAL = 1;
+    // Should be used when an Isolate needs to reach a local Isolate on the same
+    // EZ instance.
+    ROUTE_TYPE_INTERNAL = 2;
+    // Should be used when an Isolate needs to reach an Isolate on a different
+    // EZ instance.
+    ROUTE_TYPE_REMOTE = 3;
+  }
+  // The type of routing to use for this backend dependency.
+  RouteType route_type = 4;
+  // TODO: Add additional metadata describing the expected interaction types,
+  // e.g., load balancing strategies, streaming or not, chaffing related
+  // knobs, etc.
+}
+
+// TODO: Implement this manifest type
+message DataManifest {}
+
+// TODO: Implement this manifest type
+message CredentialManifest {}
+
+// TODO: Implement this manifest type
+message KeyMaterialManifest {}
+
+// IsolateRuntimeConfig provides runtime configurations to matching
+// BinaryManifests to allow different configuration on every run.
+// TODO: Move out of ez_manifest.proto along with Ratified Isolates protos.
+message IsolateRuntimeConfig {
+  // To match certain binary manifests.
+  string publisher_id = 1;
+  string binary_filename = 2;
+  // TODO: Make this a map<string,string> instead of repeated string.
+  repeated string command_line_arguments = 3;
+  repeated string environment_variables = 4;
+  // Override /etc/hosts file inside the container for routing.
+  string etc_hosts = 5;
+}
+
+message IsolateRuntimeConfigs {
+  repeated IsolateRuntimeConfig configs = 1;
+}
+
+// Opaque Isolate services for which all requests will be intercepted by
+// Ratified Isolate. Intercepting is the Opaque Isolate service that is being
+// intercepted. Interceptor is the Ratified Isolate service that will receive
+// all requests intended for the Intercepting service.
+message InterceptingServices {
+  // These fields should match from the Opaque Isolate's BinaryManifest
+  string intercepting_operator_domain = 1;
+  string intercepting_publisher_id = 7;
+  string intercepting_isolate_name = 8;
+  string intercepting_service_name = 2;
+  // These fields should match the Ratified Isolate's BinaryManifest
+  string interceptor_operator_domain = 3;
+  string interceptor_publisher_id = 9;
+  string interceptor_isolate_name = 10;
+  string interceptor_service_name = 4;
+  // The Ratified Isolate method that will be used to intercept all Opaque
+  // Isolate unary methods.
+  string interceptor_method_for_unary = 5;
+  // The Ratified Isolate method that will be used to intercept all Opaque
+  // Isolate streaming methods.
+  string interceptor_method_for_streaming = 6;
+}

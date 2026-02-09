@@ -1,0 +1,8 @@
+{
+  "recommendations": [
+    "rust-lang.rust-analyzer",
+    "ryanluker.vscode-coverage-gutters",
+    "waderyan.gitblame",
+    "vadimcn.vscode-lldb"
+  ]
+}

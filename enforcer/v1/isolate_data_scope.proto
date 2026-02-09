@@ -1,0 +1,53 @@
+// Copyright 2025 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// This file contains a redacted version of EzDataScope suitable for use by all
+// Isolates. Ratified Isolates may be given additional EzDataScope info.
+
+syntax = "proto3";
+
+package enforcer.v1;
+
+import "enforcer/v1/data_scope_type.proto";
+
+// Specifies import path for the generated Go code used to auto-generate SDK code from proto annotations.
+option go_package = "github.com/private-compute-infra-toolkit/ez/sdk/v1";
+
+// Describes the entity that owns an instantiated EZ data scope.
+message IsolateScopeOwner {
+  // Optional
+  // UUID for this scope's owner, e.g., a particular EZ user or developer.
+  // This may not match the actual UUID in the original EzDataScope, but instead
+  // will be re-mapped to a safer UUID that is only valid for the domain that
+  // owns this particular Isolate.
+  bytes mapped_owner_uuid = 1;
+}
+
+// This is a small subset of the data contained in an EzDataScope, suitable both
+// for ingress and egress from untrusted Isolate code. When referring to an
+// IsolateDataScope in code, prefer the use of the short form "Iscope" as a way
+// to distinguish this from regular EzDataScope typed "Scope" variable names.
+//
+// WARNING: The protobuf must be carefully instantiated so as not to contain any
+// unknown fields (e.g. as might happen via copying of the protobuf, or by
+// passing it through directly from one Isolate to another).
+message IsolateDataScope {
+  DataScopeType scope_type = 1; // Required
+  IsolateScopeOwner mapped_scope_owner = 3; // Optional (unset for some scopes)
+
+  // TODO: Consider how to pass the list of mapped owners MULTI_USER_PRIVATE
+  //       scopes. It seems helpful only when the owner is attached individually
+  //       to inputs owned by that user (i.e. only when passing multiple
+  //       USER_PRIVATE scoped inputs.)
+}

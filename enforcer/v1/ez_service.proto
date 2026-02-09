@@ -1,0 +1,114 @@
+// Copyright 2025 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package enforcer.v1;
+
+import "enforcer/v1/ez_data_scope.proto";
+import "enforcer/v1/isolate_health.proto";
+
+// Specifies import path for the generated Go code used to auto-generate SDK code from proto annotations.
+option go_package = "github.com/private-compute-infra-toolkit/ez/sdk/v1";
+
+// Used by external clients to make RPC calls to services running inside
+// Encrypted Zone.
+service EzPublicApi {
+  // Makes a unary RPC call to a service instance running within an Encrypted
+  // Zone.
+  rpc Call(CallRequest) returns (CallResponse);
+
+  // Establishes a bi-directional stream with a single service
+  // instance running within an Encrypted Zone. This sticky session ensures
+  // all messages within the stream are routed to the same instance.
+  //
+  // The first CallRequest message is used to establish the session and must
+  // contain the fields service_name, method_name and session_metadata
+  // for routing and initialization. For all subsequent CallRequest messages on
+  // the same stream, these fields are ignored by the server and can be omitted
+  // by the client.
+  rpc StreamCall(stream CallRequest) returns (stream CallResponse);
+
+  // Return the latest health report of the Enforcer.
+  rpc GetHealthReport(GetHealthReportRequest) returns (GetHealthReportResponse);
+}
+
+message GetHealthReportRequest {}
+
+message GetHealthReportResponse {
+  EzIsolateHealthReport health_report = 1;
+}
+
+// Metadata that describes the session context in which an RPC call happens.
+message SessionMetadata {
+  // A unique session ID for the current RPC call. If the call is retried
+  // without modification, the session_id can (and should) remain the same.
+  // Failure to change the session_id between unrelated calls may result
+  // in spurious errors, and similarly changing session id when retrying
+  // a call may unintentionally cause quotas or budgets to be exhausted.
+  // Must be unique per client, but need not be globally unique.
+  fixed64 session_id = 1;
+
+  // Must be a globally unique identifier for this EZ client.
+  // TODO: Link to documentation for EZ Client ID
+  bytes ez_client_uuid = 2;
+
+  // TODO: Add caller session key here
+}
+
+message EncryptedField {
+  bytes ciphertext = 1;
+  EzDataScope scope = 2;
+  // TODO:  Insert metadata about ciphertext needed to decrypt.
+}
+
+// The callee is expected to know how to parse raw serialized inputs,
+// which will be converted to EzDatagram format.
+message CallParameters {
+  // Unencrypted (PUBLIC data scope) input only.
+  // This is a special case in order to simplify debugging and error handling.
+  bytes public_input = 1 [ctype = CORD];
+  // Encrypted fields (for any non-PUBLIC data scopes) can be set here.
+  // Typically, each entry in the list corresponds to a distinct data scope.
+  repeated EncryptedField encrypted_input = 2;
+}
+
+message CallRequest {
+  // If left unset, the domain of the service operator is used by default.
+  // Setting this field overrides the default domain, enabling clients to
+  // request to use a service operated by another entity (must be route-able).
+  string operator_domain = 1;
+  // Required for unary rpc and the first request message of streaming rpc.
+  string publisher_id = 6;
+  // Required for unary rpc and the first request message of streaming rpc.
+  string isolate_name = 7;
+
+  // Required for unary rpc and the first request message of streaming rpc.
+  string service_name = 2;
+  // Required for unary rpc and the first request message of streaming rpc.
+  string method_name = 3;
+  // Required for unary rpc and the first request message of streaming rpc.
+  SessionMetadata session_metadata = 4;
+  // Required field
+  CallParameters input_params = 5;
+}
+
+message CallResponse {
+  SessionMetadata session_metadata = 1;
+  // Unencrypted (PUBLIC data scope) output only. See comments on public_input.
+  bytes public_output = 2;
+  // Encrypted outputs that are still within protected (non-PUBLIC) data scopes.
+  // Typically, each entry in the list corresponds to a distinct data scope.
+  repeated EncryptedField encrypted_output = 3;
+}

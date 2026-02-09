@@ -1,0 +1,10 @@
+External Library Name;Link to License;License Name;Copyright Notice Included (Yes/No);Source Code Included (Yes/No);Counsel LDAP and Authorization Date;repository_type;repository_URL;is_runtime;license_category
+rust-std-1.86.0;https://raw.githubusercontent.com/rust-lang/rust/refs/tags/1.86.0/LICENSE-MIT;MIT OR Apache-2.0;Yes;No;N/A;other;https://static.rust-lang.org/dist/rust-std-1.86.0-x86_64-unknown-linux-gnu.tar.xz;NOT_KNOWN;notice
+rust-std-1.87.0;https://raw.githubusercontent.com/rust-lang/rust/refs/tags/1.87.0/LICENSE-MIT;MIT OR Apache-2.0;Yes;No;N/A;other;https://static.rust-lang.org/dist/rust-std-1.87.0-x86_64-unknown-linux-gnu.tar.xz;NOT_KNOWN;notice
+interfaces-0.0.9;https://choosealicense.com/licenses/mit;MIT/Apache-2.0;Yes;No;N/A;crates|github;https://github.com/andrew-d/interfaces-rs;NOT_KNOWN;notice
+tower-http-0.6.8;https://raw.githubusercontent.com/tower-rs/tower-http/refs/tags/tower-http-0.6.8/tower-http/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/tower-rs/tower-http;NOT_KNOWN;notice
+anstyle-1.0.13;https://raw.githubusercontent.com/rust-cli/anstyle/refs/tags/v1.0.13/crates/anstyle/LICENSE-MIT;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-cli/anstyle.git;NOT_KNOWN;notice
+anstream-0.6.21;https://raw.githubusercontent.com/rust-cli/anstyle/refs/tags/anstream-v0.6.21/crates/anstream/LICENSE-MIT;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-cli/anstyle.git;NOT_KNOWN;notice
+colorchoice-1.0.4;https://raw.githubusercontent.com/rust-cli/anstyle/refs/tags/colorchoice-v1.0.4/crates/colorchoice/LICENSE-MIT;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-cli/anstyle.git;NOT_KNOWN;notice
+anstyle-query-1.1.5;https://raw.githubusercontent.com/rust-cli/anstyle/refs/tags/anstyle-query-v1.1.5/crates/anstyle-query/LICENSE-MIT;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-cli/anstyle.git;NOT_KNOWN;notice
+anstyle-parse-0.2.7;https://raw.githubusercontent.com/rust-cli/anstyle/refs/tags/anstyle-parse-v0.2.7/crates/anstyle-query/LICENSE-MIT;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-cli/anstyle.git;NOT_KNOWN;notice

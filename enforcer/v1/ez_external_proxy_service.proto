@@ -1,0 +1,64 @@
+// Copyright 2025 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package enforcer.v1;
+
+// Specifies import path for the generated Go code used to auto-generate SDK
+// code from proto annotations.
+option go_package = "github.com/private-compute-infra-toolkit/ez/sdk/v1";
+
+// Service that proxies gRPC calls to targets outside of the originating
+// encrypted zone. For now, this only includes non-EZ backends. Do not use this
+// for intra or inter EZ communications. This call is considered untrusted by
+// the policy enforcer.
+service EzExternalProxyService {
+  // The client is expected to send all necessary information to call
+  // the backend, including the target service/method and the serialized
+  // payload.
+  rpc UnaryCall(EzExternalProxyRequest) returns (EzExternalProxyResponse) {}
+
+  // Streaming version of the above.
+  rpc StreamCall(stream EzExternalProxyRequest) returns (stream EzExternalProxyResponse) {}
+}
+
+message EzExternalProxyRequest {
+  // The resource to which the external proxy should send the payload.
+  EzExternalResource resource = 1;
+
+  // The serialized request message proto payload for the backend service.
+  // The proxy service may treat this as opaque bytes.
+  bytes external_request_payload = 2 [ctype = CORD];
+}
+
+message EzExternalProxyResponse {
+  // The serialized response message payload from the backend service.
+  // The proxy service may treat this as opaque bytes.
+  bytes external_response_payload = 1 [ctype = CORD];
+}
+
+message EzExternalResource {
+  // The external_target is the 'id' of the target to call. The target is what
+  // runs the service defined in service_name. The target will be specified by
+  // the Isolate that is attempting to call an external service. The target must
+  // be known to the External Proxy. An example external_target is
+  // external/foo-service, which relies on the External Proxy knowing that
+  // 'external/foo-service' maps to a client for 'dns:///foo-service'.
+  string target = 1; // Required.
+  // An RPC service name including package name. format: package_name.service_name
+  string service_name = 2; // Required.
+  // An RPC method name on the service named in service_name.
+  string method_name = 3; // Required.
+}

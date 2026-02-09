@@ -1,0 +1,59 @@
+// Copyright 2025 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package enforcer.v1;
+
+import "enforcer/v1/ez_payload.proto";
+import "enforcer/v1/isolate_bridge.proto";
+
+// RPC Service definitions for EZ-to-EZ enforcer RPCs only.
+// Assumes a mutually authenticated encrypted transport, such as mTLS.
+// (Not to be confused with intra-EZ IPC on the same node.)
+service EzToEzApi {
+  // RPC for unary calls
+  rpc EzCall(EzCallRequest) returns (EzCallResponse) {}
+
+  // RPC for bidirectional streaming calls
+  rpc EzStreamingCall(stream EzCallRequest) returns (stream EzCallResponse) {}
+}
+
+// Wire-format matches that of grpc's standard google.rpc.Status message,
+// but doesn't have external dependencies and doesn't allow extra details.
+//
+// Note: It is NOT safe to copy Status codes coming from untrusted code
+// without filtering the protobuf fields carefully. Unknown fields may
+// unintentionally be carried along.
+message EzStatus {
+  int32 code = 1;
+  string message = 2;
+}
+
+message EzCallRequest {
+  // Includes routing data. Fields requester_is_local and responder_is_local
+  // must be overwritten by receiving enforcer before forwarding to Isolate.
+  enforcer.v1.ControlPlaneMetadata control_plane_metadata = 1;
+  // Inputs to the remote method (running in the remote node's Isolates).
+  enforcer.v1.EzPayloadScope payload_scope = 2;
+  enforcer.v1.EzPayloadData payload_data = 3;
+}
+
+message EzCallResponse {
+  // Outputs to be returned to the caller. Required.
+  enforcer.v1.EzPayloadScope payload_scope = 1;
+  enforcer.v1.EzPayloadData payload_data = 2;
+  // Required.
+  EzStatus status = 3;
+}

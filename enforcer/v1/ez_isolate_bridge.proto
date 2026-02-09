@@ -1,0 +1,79 @@
+// Copyright 2025 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// This protobuf is temporary, and will be replaced with an IPC schema when the
+// IPC subsystem for EZ is ready. The definitions here will be shared by both EZ
+// and Isolates running inside (hence the isolate_ prefix naming convention).
+
+syntax = "proto3";
+
+package enforcer.v1;
+
+import "enforcer/v1/ez_payload.proto";
+import "enforcer/v1/isolate_bridge.proto";
+import "enforcer/v1/isolate_state.proto";
+
+// Specifies import path for the generated Go code used to auto-generate SDK
+// code from proto annotations.
+option go_package = "github.com/private-compute-infra-toolkit/ez/sdk/v1";
+
+// The EnforcerIsolateBridge service contains the API that the EZ enforcer uses
+// to locally communicate with Isolates. This will ultimately be replaced with
+// an IPC subsystem, but we will temporarily use streaming gRPC services over
+// Unix Domain Sockets instead. (Note that this API does not include lifecycle
+// management, which is handled by the separately defined IsolateManager
+// service.)
+service EzIsolateBridge {
+  // Used by the EZ Enforcer to invoke methods on an Isolate.
+  // Client side is the EZ enforcer, server side is the Isolate SDK.
+  // We use a streaming service here solely to mimic the behavior of an IPC
+  // channel that is "sticky".
+  //
+  // EZ -> Isolate
+  // Unary rpc
+  rpc InvokeIsolate(InvokeIsolateRequest) returns (InvokeIsolateResponse);
+
+  // Streaming rpc (in session with exactly one Isolate instance)
+  rpc StreamInvokeIsolate(stream InvokeIsolateRequest) returns (stream InvokeIsolateResponse);
+
+  // Used by the enforcer to request an Isolate to conduct a state transition.
+  rpc UpdateIsolateState(UpdateIsolateStateRequest) returns (UpdateIsolateStateResponse);
+}
+
+message InvokeIsolateRequest {
+  ControlPlaneMetadata control_plane_metadata = 1;
+  EzPayloadIsolateScope isolate_input_iscope = 2;
+  // When this payload is part of an external request, this field MUST
+  // contain exactly one datagram. The external proxy only supports a single
+  // payload from the enforcer.
+  EzPayloadData isolate_input = 3;
+}
+
+message InvokeIsolateResponse {
+  ControlPlaneMetadata control_plane_metadata = 1;
+  EzPayloadIsolateScope isolate_output_iscope = 2;
+  EzPayloadData isolate_output = 3;
+  IsolateStatus status = 4;
+}
+
+message UpdateIsolateStateRequest {
+  // Next state that Isolate should transition to. Some state transitions are
+  // controlled by the Isolate, others wait for this request from the enforcer.
+  IsolateState move_to_state = 1;
+}
+
+message UpdateIsolateStateResponse {
+  // Isolate's current state, after handling any pending transitions.
+  IsolateState current_state = 1;
+}

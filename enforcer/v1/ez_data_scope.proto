@@ -1,0 +1,87 @@
+// Copyright 2025 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package enforcer.v1;
+
+import "enforcer/v1/data_scope_type.proto";
+
+// Specifies import path for the generated Go code used to auto-generate SDK
+// code from proto annotations.
+option go_package = "github.com/private-compute-infra-toolkit/ez/sdk/v1";
+
+// Describes the entity that owns an instantiated EZ data scope.
+message EzScopeOwner {
+  // Optional
+  // UUID for this scope's owner, e.g., a particular EZ user or developer.
+  // Ideally follows the UUID version 5 convention, see
+  // https://datatracker.ietf.org/doc/html/rfc4122#section-4.3
+  // Not to exceed 16 bytes in length.
+  bytes owner_uuid = 1;
+}
+
+message EzStaticScopeInfo {
+  DataScopeType scope_type = 1; // Required
+  fixed64 scope_instance_id = 2; // Required. Set upon scope instantiation.
+  EzScopeOwner scope_owner = 3; // Optional (unset for some scopes)
+  // For MULTI_USER_PRIVATE scopes, we include a list of all the instantiated
+  // scopes for users who are being included. It is assumed that the
+  // authoritative holder of this scope instance has at least a cached copy of
+  // the individual subscopes referred to here, which may themselves be
+  // either MULTI_USER_PRIVATE or USER_PRIVATE.
+  repeated fixed64 subscope_instance_ids = 4;
+}
+
+// Contains metadata about the scope that may change dynamically after the scope
+// is instantiated. Changes to this data can be costly, as in the worst case
+// changes must propagate to all other nodes currently using this scope and
+// other nodes desiring to make changes to the scope can cause lock
+// contention.
+// USE SPARINGLY, PROPAGATE AND INCLUDE WHEN STORING SCOPES AT REST.
+message EzDynamicScopeInfo {
+  // Starts at zero when scope is first instantiated, and is incremented
+  // after each mutation. Remote mutations can be either "blind appends",
+  // which can always be safely applied by the authoritative holder of
+  // this data scope, or "transactions" where the mutation request must
+  // include a matching version_sequence_num in order to succeed.
+  // Used for optimistic locking of global transactions for this scope.
+  int64 version_sequence_num = 1;
+
+  // TODO: Add global log event data, such DP budget logs, here.
+}
+
+// Contains metadata used only by the local holder of this instance of an
+// EZ data scope, but which will _not_ be propagated to other EZ nodes.
+// Data here can be highly dynamic, with minimal cost for mututations.
+// DO NOT STORE THIS AT REST or send it over the network.
+message EzLocalScopeInfo {
+  // Used for optimistic locking of transactions with local Isolates.
+  int64 version_sequence_num = 1;
+  // TODO: Add owner-egress encryption info
+  // TODO: Add local scope lifecycle state (INCOMING, ACTIVE, IDLE, TEARDOWN)
+  // TODO: Add cached reference to authoritative owner here
+}
+
+//  Holds various types of information about the data scope,
+//  not all of which need to be present.
+message EzDataScope {
+  // Static info set on scope instantiation.
+  EzStaticScopeInfo static_info = 1;
+  // Dynamic info that is global for this scope instance.
+  EzDynamicScopeInfo dynamic_info = 2;
+  // Local info (used only by local enforcer) for this scope.
+  // Never transmitted or stored at rest.
+  EzLocalScopeInfo local_info = 3;
+}

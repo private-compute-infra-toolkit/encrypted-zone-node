@@ -1,0 +1,56 @@
+// Copyright 2025 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package enforcer.v1;
+
+import "enforcer/v1/ez_data_scope.proto";
+
+// Specifies import path for the generated Go code used to auto-generate SDK code from proto annotations.
+option go_package = "github.com/private-compute-infra-toolkit/ez/sdk/v1";
+
+// Holds an ordered list of datagrams that belong in various EzDataScopes (held
+// in a separate ordered list -- see EzPayloadScope). This message is defined
+// separately from EzPayloadScope solely to facilitate easier decoupling of
+// the data plane and control plane.
+message EzPayloadData {
+  // A (possibly empty) ordered list of datagrams, intended to be understood by
+  // Isolate applications running inside EZ. See also EzPayloadScope.
+  repeated bytes datagrams = 1;
+}
+
+// Holds an ordered list of EzDataScopes that is intended to describe which data
+// scopes apply to each entry of a corresponding EzPayloadData. This message is
+// defined separately from EzPayloadData solely to facilitate easier decoupling
+// of the data plane and control plane.
+message EzPayloadScope {
+  // A (possibly empty) ordered list of EzDataScopes, intended to be used by the
+  // EZ policy enforcer to control the data flow of a corresponding
+  // EzPayloadData message.
+  repeated EzDataScope datagram_scopes = 1;
+}
+
+// Pairs an EzPayloadData (data plane) message with its corresponding
+// EzPayloadScope (control plane) message. This pairing should be used
+// whenever we are sending both control plane and data plane information
+// simultaneously.
+message EzPayload {
+  // Contains a list of the scopes used by the datagram, in the same order.
+  // The list here must have exactly the same number of entries as the datagram.
+  EzPayloadScope payload_scope = 1;
+  // Contains a list of datagrams controlled by the scopes described in the
+  // corresponding EzScopeDirectory.
+  EzPayloadData payload_data = 2;
+}

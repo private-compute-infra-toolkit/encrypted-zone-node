@@ -1,0 +1,77 @@
+{
+  "isolate_name": "ezpkg://playground.example.com",
+  "publisher_id": "playground_example",
+  "package_filename": "/ez/summation_by_lookup_table_with_backend_server_bundle.tar",
+  "bundle_manifest": {
+    "manifests": [
+      {
+        "isolate_name": "ezpkg://playground.example.com",
+        "publisher_id": "playground_example",
+        "package_filename": "/ez/summation_by_lookup_table_with_backend_server_bundle.tar",
+        "binary_manifest": {
+          "binary_filename": "/usr/local/bin/summation_by_lookup_table_with_backend",
+          "command_line_arguments": [""],
+          "service_specs": [
+            {
+              "service_name": "SimpleAdd",
+              "method_specs": [
+                {
+                  "method_name": "IntegerSequence",
+                  "input_scope_types": ["DATA_SCOPE_TYPE_PUBLIC"],
+                  "output_scope_types": ["DATA_SCOPE_TYPE_USER_PRIVATE"]
+                },
+                {
+                  "method_name": "StreamingIntegerSequence",
+                  "input_scope_types": ["DATA_SCOPE_TYPE_DOMAIN_OWNED"],
+                  "output_scope_types": ["DATA_SCOPE_TYPE_PUBLIC"]
+                }
+              ]
+            }
+          ],
+          "number_of_isolates": 4,
+          "ez_backend_dependencies": [
+            {
+              "operator_domain": "playground_example",
+              "service_name": "PrecomputedBackend",
+              "method_name": "FetchTable"
+            },
+            {
+              "operator_domain": "playground_example",
+              "service_name": "PrecomputedBackend",
+              "method_name": "StreamingFetchTable"
+            }
+          ]
+        }
+      },
+      {
+        "isolate_name": "ezpkg://playground.example.com",
+        "publisher_id": "playground_example",
+        "package_filename": "/ez/summation_by_lookup_table_with_backend_server_bundle.tar",
+        "binary_manifest": {
+          "binary_filename": "/usr/local/bin/summation_precomputed_backend",
+          "command_line_arguments": [""],
+          "service_specs": [
+            {
+              "service_name": "PrecomputedBackend",
+              "method_specs": [
+                {
+                  "method_name": "Fetch",
+                  "input_scope_types": ["DATA_SCOPE_TYPE_USER_PRIVATE"],
+                  "output_scope_types": ["DATA_SCOPE_TYPE_PUBLIC"]
+                },
+                {
+                  "method_name": "StreamingFetch",
+                  "input_scope_types": ["DATA_SCOPE_TYPE_DOMAIN_OWNED"],
+                  "output_scope_types": ["DATA_SCOPE_TYPE_PUBLIC"]
+                }
+              ]
+            }
+          ],
+          "number_of_isolates": 1,
+          "ez_backend_dependencies": [],
+          "is_ratified_isolate": true
+        }
+      }
+    ]
+  }
+}

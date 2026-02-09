@@ -1,0 +1,107 @@
+// Copyright 2025 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// This protobuf is temporary, and will be replaced with an IPC schema when the
+// IPC subsystem for EZ is ready. The definitions here will be shared by both EZ
+// and Isolates running inside (hence the isolate_ prefix naming convention).
+
+syntax = "proto3";
+
+package enforcer.v1;
+
+import "enforcer/v1/isolate_data_scope.proto";
+
+// Specifies import path for the generated Go code used to auto-generate SDK
+// code from proto annotations.
+option go_package = "github.com/private-compute-infra-toolkit/ez/sdk/v1";
+
+// Wire-format matches that of grpc's standard google.rpc.Status message,
+// but doesn't have external dependencies and doesn't allow extra details.
+//
+// WARNING: Do NOT directly copy this protobuf to other Status messages, even
+// those with a seemingly compatible format. Unknown fields can be set by
+// untrusted code, and would be silently passed along with the copy.
+message IsolateStatus {
+  int32 code = 1;
+  string message = 2;
+}
+
+// All fields here are optional, and are intended to be shared between the EZ
+// enforcer and untrusted Isolates.
+//
+// Isolates are required to repeat the request ipc_message_id in their response
+// metadata, but all other fields are ignored when the response is from an
+// Isolate. If the EZ enforcer receives a response that does not match up with a
+// pending ipc_message_id, the response will be dropped.
+//
+// When the Isolate is initiating a request, it must use a fresh ipc_message_id
+// or else the EZ enforcer may drop the request. Similarly, the requested
+// recipient (domain, service, and method) must pass validation by the EZ
+// enforcer, or the request will be dropped.
+message ControlPlaneMetadata {
+  // A message id that must be unique for a particular pair of communicating
+  // client/server endpoints (i.e., the EZ enforcer or Isolate in some order).
+  // It is acceptable to have a collision of message ids between two different
+  // instances of an Isolate, or with the same Isolate but in a reverse
+  // communication pattern (i.e., acting as client in one direction and server
+  // in the other).
+  fixed64 ipc_message_id = 1;
+  // The workload identity for the source of this request. The request is always
+  // routed via the EZ enforcer, which is never mentioned here -- this will name
+  // the "remote" Isolate that made the request being routed. When the request
+  // originates directly from an external (non-EZ) source, this field should be
+  // left unset.
+  string requester_spiffe = 2;
+  // Set only if we know that the requesting Isolate is running locally to this
+  // EZ enforcer (i.e., the request did not come in via the PublicApi or
+  // InternalApi).
+  bool requester_is_local = 3;
+  // Set only if we know that the responding Isolate is running locally to this
+  // EZ enforcer (i.e., the request is being handled by an Isolate in direct
+  // communication with this EZ enforcer, not remotely over InternalApi).
+  bool responder_is_local = 4;
+
+  // operator domain / Isolate name / publisher id will uniquely identify an
+  // Isolate in a EZ cluster, and a responder SPIFFE ID can be derived from
+  // these fields.
+  string destination_operator_domain = 5;
+  // Name of the publisher to qualify the Isolate name.
+  string destination_publisher_id = 11;
+  // Name of the Isolate to reach to under the specific operator domain.
+  string destination_isolate_name = 10;
+
+  // Specific service name and method name inside the Isolate to route traffic
+  // to.
+  string destination_service_name = 6;
+  string destination_method_name = 7;
+
+  // Optional: Used to route to a specific Remote EZ instance.
+  string destination_ez_instance_id = 9;
+
+  // Allows the message sender to pass one or more handles to shared memory
+  // region(s). The enforcer must validate that the handles refer to shared
+  // memory that is currently accessible to the message sender, but should
+  // otherwise apply the same policy enforcements as for a message payload.
+  // If validation succeeds, the enforcer will mount the shared memory into the
+  // receiving Isolate's container view, so that the recipient can immediately
+  // map the memory without further calls to the enforcer. If validation of any
+  // handle fails, the entire request will fail.
+  repeated string shared_memory_handles = 8;
+}
+
+// Analogous to EzPayloadScope, but with IsolateDataScope instead of
+// EzDataScope.
+message EzPayloadIsolateScope {
+  repeated IsolateDataScope datagram_iscopes = 1;
+}

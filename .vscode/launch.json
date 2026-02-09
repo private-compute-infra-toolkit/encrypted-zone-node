@@ -1,0 +1,14 @@
+{
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Launch Rust Debugger",
+      "program": "${workspaceFolder}/<target-path-from-bazel-build>",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "sourceLanguages": ["rust"],
+      "initCommands": ["breakpoint set --name main"]
+    }
+  ]
+}

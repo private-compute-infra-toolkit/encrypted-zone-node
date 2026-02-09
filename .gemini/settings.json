@@ -1,0 +1,22 @@
+{
+  "context": {
+    "fileFiltering": {
+      "enableRecursiveFileSearch": false
+    }
+  },
+  "mcpServers": {
+    "pndMcp": {
+      "command": "/google/bin/releases/pnd-swe-agents/mcp/mcp_server_local.par",
+      "args": ["--transport_mode", "stdio", "--codebase", "encrypted-zone"],
+      "timeout": 30000
+    }
+  },
+  "security": {
+    "auth": {
+      "selectedType": "gemini-api-key"
+    }
+  },
+  "ui": {
+    "theme": "Default"
+  }
+}

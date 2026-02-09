@@ -1,0 +1,7 @@
+usage: dev [-h] [COMMAND ...]
+
+Runs a command inside the development environment container.
+If no command is provided, it starts an interactive bash session.
+
+options:
+  -h, --help            Show this help message and exit.

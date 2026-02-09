@@ -1,0 +1,34 @@
+#!/bin/sh
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Git hook to format a commit message before the editor is opened.
+
+# Exit immediately if a command exits with a non-zero status.
+set -e
+
+# Find the absolute path to the repository root
+GIT_ROOT=$(git rev-parse --show-toplevel)
+
+# The path to the main wrapper script
+WRAPPER_SCRIPT="$GIT_ROOT/tools/commit_wrapper_hook/commit_wrapper.sh"
+
+# Call the wrapper script with the 'hook-impl' command and forward all arguments
+"$WRAPPER_SCRIPT" hook-impl "$@"
+
+# Optionally, also execute devkit/gitlint on the prepared message file.
+GITLINT_SCRIPT="$GIT_ROOT/devkit/gitlint"
+if [ -f "$GITLINT_SCRIPT" ]; then
+  "$GITLINT_SCRIPT"
+fi

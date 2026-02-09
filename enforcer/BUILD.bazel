@@ -1,0 +1,220 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+load("@oak//bazel:defs.bzl", "oci_runtime_bundle")
+load("@rules_buf//buf:defs.bzl", "buf_lint_test")
+load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load")
+load("@rules_pkg//pkg:mappings.bzl", "pkg_attributes", "pkg_files", "pkg_mkdirs")
+load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
+load("@rules_proto//proto:defs.bzl", "proto_descriptor_set", "proto_library")
+load("@rules_rust//rust:defs.bzl", "rust_binary")
+load("@rules_rust_prost//:defs.bzl", "rust_prost_library")
+load("//:build_flavors.bzl", "flavors")
+load("//:container_deps.bzl", "get_user")
+
+proto_library(
+    name = "manifest_proto",
+    srcs = ["ez_manifest.proto"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//enforcer/v1:data_scope_proto",
+    ],
+)
+
+buf_lint_test(
+    name = "manifest_lint",
+    size = "small",
+    config = ":buf.yaml",
+    targets = [":manifest_proto"],
+)
+
+proto_descriptor_set(
+    name = "manifest_descriptor_set",
+    visibility = ["//visibility:public"],
+    deps = [":manifest_proto"],
+)
+
+rust_prost_library(
+    name = "manifest_rust",
+    proto = ":manifest_proto",
+    visibility = ["//visibility:public"],
+)
+
+[
+    rust_binary(
+        name = "enforcer{}".format(flavor.suffix),
+        srcs = ["main.rs"],
+        crate_features = flavor.features,
+        visibility = ["//visibility:public"],
+        deps = [
+            "//enforcer/container:container_custom",
+            "//enforcer/container/manager:container_manager{}".format(flavor.suffix),
+            "//enforcer/container/manager:container_manager_request",
+            "//enforcer/container/manager:container_manager_requester",
+            "//enforcer/container/manager:manifest_parser",
+            "//enforcer/data_scope",
+            "//enforcer/ez_to_external:external_proxy_connector",
+            "//enforcer/ez_to_ez:inbound_ez_to_ez_handler",
+            "//enforcer/ez_to_ez:outbound_ez_to_ez_client",
+            "//enforcer/ez_to_ez:outbound_ez_to_ez_handler",
+            "//enforcer/isolate:isolate_ez_service_manager",
+            "//enforcer/isolate:isolate_info",
+            "//enforcer/isolate:isolate_service_mapper",
+            "//enforcer/isolate:shared_memory_manager",
+            "//enforcer/junction",
+            "//enforcer/public_api:interceptor",
+            "//enforcer/v1:ez_to_ez_service_rust",
+            "//enforcer/logging:logging{}".format(flavor.suffix),
+            "//enforcer/health:health_manager{}".format(flavor.suffix),
+            "//enforcer/metrics",
+            "//enforcer/public_api:public_api{}".format(flavor.suffix),
+            "//enforcer/state:state_manager",
+            "//enforcer/traces",
+            "//enforcer/v1:enforcer_rust",
+            "//enforcer/v1:ez_service_rust",
+            "@crates//:anyhow",
+            "@crates//:async-stream",
+            "@crates//:clap",
+            "@crates//:libc",
+            "@crates//:log",
+            "@crates//:log4rs",
+            "@crates//:opentelemetry_sdk",
+            "@crates//:prost",
+            "@crates//:tokio",
+            "@crates//:tokio-stream",
+            "@crates//:tonic",
+            "@crates//:tracing",
+            "@crates//:users",
+        ],
+    )
+    for flavor in flavors
+]
+
+[
+    pkg_files(
+        name = "enforcer_bin{}".format(flavor.suffix),
+        srcs = [":enforcer{}".format(flavor.suffix)],
+        attributes = pkg_attributes(mode = "0500"),
+        prefix = "/enforcer/bin",
+        renames = {
+            ":enforcer{}".format(flavor.suffix): "enforcer",
+        },
+    )
+    for flavor in flavors
+]
+
+pkg_files(
+    name = "enforcer_proto",
+    srcs = [":manifest_descriptor_set"],
+    attributes = pkg_attributes(mode = "0400"),
+    prefix = "/enforcer/proto",
+)
+
+user = get_user(user = "nonroot")
+
+pkg_mkdirs(
+    name = "devshm",
+    attributes = pkg_attributes(mode = "0777"),
+    dirs = ["/dev/shm"],
+)
+
+[
+    pkg_tar(
+        name = "enforcer_tar{}".format(flavor.suffix),
+        srcs = [
+            ":devshm",
+            ":enforcer_bin{}".format(flavor.suffix),
+            ":enforcer_proto",
+        ],
+        owner = "{}.{}".format(
+            user.uid,
+            user.gid,
+        ),
+    )
+    for flavor in flavors
+]
+
+[
+    oci_image(
+        name = "enforcer_image{}".format(flavor.suffix),
+        base = "@isolate_runtime_ubuntu_base{}".format(flavor.ubuntu),
+        entrypoint = ["/enforcer/bin/enforcer"],
+        tars = [":enforcer_tar{}".format(flavor.suffix)],
+        workdir = "/",
+    )
+    for flavor in flavors
+]
+
+enforcer_repo_tag_tmpl = "encrypted-zone/enforcer{flavor}:0.1-{user}"
+
+[
+    oci_load(
+        name = "enforcer_tarball{}".format(flavor.suffix),
+        image = ":enforcer_image{}".format(flavor.suffix),
+        repo_tags = [enforcer_repo_tag_tmpl.format(
+            flavor = flavor.suffix.replace("_", "-"),
+            user = user.user,
+        )],
+    )
+    for flavor in flavors
+]
+
+[
+    filegroup(
+        name = "enforcer{}.tar".format(flavor.suffix),
+        srcs = [":enforcer_tarball{}".format(flavor.suffix)],
+        output_group = "tarball",
+        visibility = ["//visibility:public"],
+    )
+    for flavor in flavors
+]
+
+[
+    oci_runtime_bundle(
+        name = "enforcer_rootfs{}".format(flavor.suffix),
+        image = ":enforcer_image{}".format(flavor.suffix),
+    )
+    for flavor in flavors
+]
+
+genrule(
+    name = "copy_to_dist",
+    srcs = [
+        ":enforcer.tar",
+        ":enforcer_debug.tar",
+        ":enforcer_rootfs.tar",
+        ":enforcer_rootfs_debug.tar",
+        "//enforcer/v1:enforcer_descriptor_set",
+        "//enforcer/v1:ez_service_descriptor_set",
+    ],
+    outs = ["copy_to_dist.bin"],
+    cmd_bash = """cat <<EOF >'$@'
+mkdir -p {dir}/proto
+cp -f $(execpath :enforcer.tar) {dir}/enforcer_oci.tar
+cp -f $(execpath :enforcer_debug.tar) {dir}/enforcer_oci_debug.tar
+cp -f $(execpath :enforcer_rootfs.tar) {dir}/enforcer_rootfs.tar
+cp -f $(execpath :enforcer_rootfs_debug.tar) {dir}/enforcer_rootfs_debug.tar
+# TODO: b/478233839 - Update what is copied for the perf and test variants.
+cp -f $(execpath :enforcer_rootfs.tar) {dir}/enforcer_rootfs_perf.tar
+cp -f $(execpath :enforcer_rootfs_debug.tar) {dir}/enforcer_rootfs_test.tar
+cp -f $(execpath //enforcer/v1:ez_service_descriptor_set) $(execpath //enforcer/v1:enforcer_descriptor_set) {dir}/proto
+EOF""".format(dir = "dist/enforcer"),
+    executable = True,
+    local = True,
+    message = "copying enforcer artifacts to dist dir",
+)
+
+exports_files([
+    "buf.yaml",
+])

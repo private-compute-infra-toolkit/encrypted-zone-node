@@ -1,0 +1,103 @@
+// Copyright 2025 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// This protobuf is temporary, and will be replaced with an IPC schema when the
+// IPC subsystem for EZ is ready. The definitions here will be shared by both EZ
+// and Isolates running inside (hence the isolate_ prefix naming convention).
+
+syntax = "proto3";
+
+package enforcer.v1;
+
+import "enforcer/v1/ez_payload.proto";
+import "enforcer/v1/isolate_bridge.proto";
+import "enforcer/v1/isolate_state.proto";
+
+// Specifies import path for the generated Go code used to auto-generate SDK
+// code from proto annotations.
+option go_package = "github.com/private-compute-infra-toolkit/ez/sdk/v1";
+
+// This is a mirror image of the EzIsolateBridge service (see comments there).
+service IsolateEzBridge {
+  // Used by an Isolate to call other services running inside EZ (i.e., the EZ
+  // enforcer will route this to another Isolate) and supports egress calls to
+  // external systems. For external requests the enforcer validates the request
+  // by enforcing various DataScope policies before forwarding to the EZ
+  // External Proxy. Client side is in the Isolate SDK, server side is the EZ
+  // enforcer. Unary rpc
+  rpc InvokeEz(InvokeEzRequest) returns (InvokeEzResponse);
+
+  // Streaming rpc (in session with exactly one Isolate instance)
+  rpc StreamInvokeEz(stream InvokeEzRequest) returns (stream InvokeEzResponse);
+
+  // Used by an Isolate to ask the enforcer to create a shared memory region
+  // (writable only by the caller) that can be passed to other Isolates (for
+  // read-only access).
+  // TODO: Convert CreateMemshare to a unary RPC in the proto definition.
+  rpc CreateMemshare(stream CreateMemshareRequest) returns (stream CreateMemshareResponse);
+
+  // Communicates the Isolate's new state to the enforcer after a self-driven
+  // state transition.
+  // TODO: Convert NotifyIsolateState to a unary RPC.
+  rpc NotifyIsolateState(stream NotifyIsolateStateRequest) returns (stream NotifyIsolateStateResponse);
+
+  // Used by an Isolate to poll for its current IsolateState.
+  rpc PollIsolateState(PollIsolateStateRequest) returns (PollIsolateStateResponse);
+
+  // TODO: Consider adding a special method here for egress via calls to
+  //       external systems. Otherwise, egress only happens in responses.
+  //       Any solution here would have to be aware of the service mesh.
+}
+
+message InvokeEzRequest {
+  ControlPlaneMetadata control_plane_metadata = 1;
+  EzPayloadIsolateScope isolate_request_iscope = 2;
+  EzPayloadData isolate_request_payload = 3;
+}
+
+message InvokeEzResponse {
+  ControlPlaneMetadata control_plane_metadata = 1;
+  EzPayloadIsolateScope ez_response_iscope = 2;
+  EzPayloadData ez_response_payload = 3;
+  IsolateStatus status = 4;
+}
+
+message CreateMemshareRequest {
+  int64 region_size = 1;
+}
+
+message CreateMemshareResponse {
+  // Client software should treat this as opaque, and rely on our SDK to
+  // translate it to a memory reference.
+  string shared_memory_handle = 1;
+  IsolateStatus status = 2;
+}
+
+message NotifyIsolateStateRequest {
+  // Communicates the Isolate's new state to the enforcer after a self-driven
+  // state transition.
+  IsolateState new_isolate_state = 1;
+}
+
+message NotifyIsolateStateResponse {
+  // Empty for now -- this message is just an "ack" that the enforcer got the
+  // Notify.
+}
+
+message PollIsolateStateRequest {}
+
+message PollIsolateStateResponse {
+  // The Isolate's current state.
+  IsolateState isolate_state = 1;
+}

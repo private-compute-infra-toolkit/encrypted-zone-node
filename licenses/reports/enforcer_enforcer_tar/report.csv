@@ -1,0 +1,344 @@
+External Library Name;Link to License;License Name;Copyright Notice Included (Yes/No);Source Code Included (Yes/No);Counsel LDAP and Authorization Date;repository_type;repository_URL;is_runtime;license_category
+abseil.abseil-cpp-20250127.0;https://raw.githubusercontent.com/abseil/abseil-cpp/20250127.0/LICENSE;Apache License 2.0;Yes;No;N/A;github;https://github.com/abseil/abseil-cpp;NOT_KNOWN;notice
+ahash-0.8.12;https://raw.githubusercontent.com/tkaitchuck/aHash/v0.8.12/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/tkaitchuck/ahash;NOT_KNOWN;notice
+aho-corasick-1.1.4;https://raw.githubusercontent.com/BurntSushi/aho-corasick/1.1.4/UNLICENSE;Unlicense OR MIT;Yes;No;N/A;crates|github;https://github.com/BurntSushi/aho-corasick;NOT_KNOWN;unencumbered
+anstream-0.6.21;https://raw.githubusercontent.com/rust-cli/anstyle/refs/tags/anstream-v0.6.21/crates/anstream/LICENSE-MIT;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-cli/anstyle.git;NOT_KNOWN;notice
+anstyle-1.0.13;https://raw.githubusercontent.com/rust-cli/anstyle/refs/tags/v1.0.13/crates/anstyle/LICENSE-MIT;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-cli/anstyle.git;NOT_KNOWN;notice
+anstyle-parse-0.2.7;https://raw.githubusercontent.com/rust-cli/anstyle/refs/tags/anstyle-parse-v0.2.7/crates/anstyle-query/LICENSE-MIT;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-cli/anstyle.git;NOT_KNOWN;notice
+anstyle-query-1.1.5;https://raw.githubusercontent.com/rust-cli/anstyle/refs/tags/anstyle-query-v1.1.5/crates/anstyle-query/LICENSE-MIT;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-cli/anstyle.git;NOT_KNOWN;notice
+anyhow-1.0.100;https://raw.githubusercontent.com/dtolnay/anyhow/1.0.100/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/dtolnay/anyhow;NOT_KNOWN;notice
+apple_support-1.24.1;https://raw.githubusercontent.com/bazelbuild/apple_support/1.24.1/LICENSE;Apache License 2.0;Yes;No;N/A;bcr.bazel|github;https://github.com/bazelbuild/apple_support;NOT_KNOWN;notice
+arc-swap-1.8.1;https://raw.githubusercontent.com/vorner/arc-swap/v1.8.1/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/vorner/arc-swap;NOT_KNOWN;notice
+aspect-build.toolchains_protoc-0.5.0;https://raw.githubusercontent.com/aspect-build/toolchains_protoc/v0.5.0/LICENSE;Apache License 2.0;Yes;No;N/A;github;https://github.com/aspect-build/toolchains_protoc;NOT_KNOWN;notice
+aspect_bazel_lib-2.21.0;https://raw.githubusercontent.com/bazel-contrib/bazel-lib/v2.21.0/LICENSE;Apache License 2.0;Yes;No;N/A;bcr.bazel|github;https://github.com/bazel-contrib/bazel-lib;NOT_KNOWN;notice
+aspect_bazel_lib-2.21.0;https://raw.githubusercontent.com/bazel-contrib/bazel-lib/v2.21.0/LICENSE;Apache License 2.0;Yes;No;N/A;bcr.bazel|github;https://github.com/bazel-contrib/bazel-lib;NOT_KNOWN;notice
+async-stream-0.3.6;https://raw.githubusercontent.com/tokio-rs/async-stream/v0.3.6/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/tokio-rs/async-stream;NOT_KNOWN;notice
+async-stream-impl-0.3.6;https://raw.githubusercontent.com/tokio-rs/async-stream/v0.3.6/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/tokio-rs/async-stream;NOT_KNOWN;notice
+async-trait-0.1.89;https://raw.githubusercontent.com/dtolnay/async-trait/0.1.89/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/dtolnay/async-trait;NOT_KNOWN;notice
+atomic-waker-1.1.2;https://raw.githubusercontent.com/smol-rs/atomic-waker/v1.1.2/LICENSE-APACHE;Apache-2.0 OR MIT;Yes;No;N/A;crates|github;https://github.com/smol-rs/atomic-waker;NOT_KNOWN;notice
+autocfg-1.5.0;https://raw.githubusercontent.com/cuviper/autocfg/1.5.0/LICENSE-APACHE;Apache-2.0 OR MIT;Yes;No;N/A;crates|github;https://github.com/cuviper/autocfg;NOT_KNOWN;notice
+axum-0.8.8;https://raw.githubusercontent.com/tokio-rs/axum/main/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/tokio-rs/axum;NOT_KNOWN;notice
+axum-core-0.5.6;https://raw.githubusercontent.com/tokio-rs/axum/axum-core-v0.5.6/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/tokio-rs/axum;NOT_KNOWN;notice
+base64-0.22.1;https://raw.githubusercontent.com/marshallpierce/rust-base64/v0.22.1/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/marshallpierce/rust-base64;NOT_KNOWN;notice
+bats-core.bats-core-1.10.0;https://raw.githubusercontent.com/bats-core/bats-core/v1.10.0/LICENSE.md;Other;Yes;No;N/A;github;https://github.com/bats-core/bats-core;NOT_KNOWN;notice
+bazel-contrib.bazel-lib-2.21.0;https://raw.githubusercontent.com/bazel-contrib/bazel-lib/v2.21.0/LICENSE;Apache License 2.0;Yes;No;N/A;github;https://github.com/bazel-contrib/bazel-lib;NOT_KNOWN;notice
+bazel-contrib.bazel_features-1.32.0;https://raw.githubusercontent.com/bazel-contrib/bazel_features/v1.32.0/LICENSE;Apache License 2.0;Yes;No;N/A;github;https://github.com/bazel-contrib/bazel_features;NOT_KNOWN;notice
+bazel-contrib.jq.bzl-0.1.0;https://raw.githubusercontent.com/bazel-contrib/jq.bzl/v0.1.0/LICENSE;Apache License 2.0;Yes;No;N/A;github;https://github.com/bazel-contrib/jq.bzl;NOT_KNOWN;notice
+bazel-contrib.rules_oci-2.0.1;https://raw.githubusercontent.com/bazel-contrib/rules_oci/v2.0.1/LICENSE;Apache License 2.0;Yes;No;N/A;github;https://github.com/bazel-contrib/rules_oci;NOT_KNOWN;notice
+bazel-contrib.rules_python-1.5.3;https://raw.githubusercontent.com/bazel-contrib/rules_python/1.5.3/LICENSE;Apache License 2.0;Yes;No;N/A;github;https://github.com/bazel-contrib/rules_python;NOT_KNOWN;notice
+bazel-contrib.toolchains_llvm-1.4.0;https://raw.githubusercontent.com/bazel-contrib/toolchains_llvm/v1.4.0/LICENSE;Apache License 2.0;Yes;No;N/A;github;https://github.com/bazel-contrib/toolchains_llvm;NOT_KNOWN;notice
+bazel_features-1.32.0;https://raw.githubusercontent.com/bazel-contrib/bazel_features/v1.32.0/LICENSE;Apache License 2.0;Yes;No;N/A;bcr.bazel|github;https://github.com/bazel-contrib/bazel_features;NOT_KNOWN;notice
+bazelbuild.apple_support-1.24.1;https://raw.githubusercontent.com/bazelbuild/apple_support/1.24.1/LICENSE;Apache License 2.0;Yes;No;N/A;github;https://github.com/bazelbuild/apple_support;NOT_KNOWN;notice
+bazelbuild.bazel-skylib-1.6.1;https://raw.githubusercontent.com/bazelbuild/bazel-skylib/1.6.1/LICENSE;Apache License 2.0;Yes;No;N/A;github;https://github.com/bazelbuild/bazel-skylib;NOT_KNOWN;notice
+bazelbuild.platforms-1.0.0;https://raw.githubusercontent.com/bazelbuild/platforms/1.0.0/LICENSE;Apache License 2.0;Yes;No;N/A;github;https://github.com/bazelbuild/platforms;NOT_KNOWN;notice
+bazelbuild.rules_cc-0.0.9;https://raw.githubusercontent.com/bazelbuild/rules_cc/0.0.9/LICENSE;Apache License 2.0;Yes;No;N/A;github;https://github.com/bazelbuild/rules_cc;NOT_KNOWN;notice
+bazelbuild.rules_go-0.42.0;https://raw.githubusercontent.com/bazel-contrib/rules_go/v0.42.0/LICENSE.txt;Apache License 2.0;Yes;No;N/A;github;https://github.com/bazel-contrib/rules_go;NOT_KNOWN;notice
+bazelbuild.rules_java-8.6.1;https://raw.githubusercontent.com/bazelbuild/rules_java/8.6.1/LICENSE;Apache License 2.0;Yes;No;N/A;github;https://github.com/bazelbuild/rules_java;NOT_KNOWN;notice
+bazelbuild.rules_kotlin-1.9.6;https://raw.githubusercontent.com/bazelbuild/rules_kotlin/v1.9.6/LICENSE;Apache License 2.0;Yes;No;N/A;github;https://github.com/bazelbuild/rules_kotlin;NOT_KNOWN;notice
+bazelbuild.rules_license-0.0.7;https://raw.githubusercontent.com/bazelbuild/rules_license/0.0.7/LICENSE;Apache License 2.0;Yes;No;N/A;github;https://github.com/bazelbuild/rules_license;NOT_KNOWN;notice
+bazelbuild.rules_license-1.0.0;https://raw.githubusercontent.com/bazelbuild/rules_license/1.0.0/LICENSE;Apache License 2.0;Yes;No;N/A;github;https://github.com/bazelbuild/rules_license;NOT_KNOWN;notice
+bazelbuild.rules_pkg-1.1.0;https://raw.githubusercontent.com/bazelbuild/rules_pkg/1.1.0/LICENSE;Apache License 2.0;Yes;No;N/A;github;https://github.com/bazelbuild/rules_pkg;NOT_KNOWN;notice
+bazelbuild.rules_proto-7.1.0;https://raw.githubusercontent.com/bazelbuild/rules_proto/7.1.0/LICENSE;Apache License 2.0;Yes;No;N/A;github;https://github.com/bazelbuild/rules_proto;NOT_KNOWN;notice
+bazelbuild.rules_shell-0.6.1;https://raw.githubusercontent.com/bazelbuild/rules_shell/v0.6.1/LICENSE;Apache License 2.0;Yes;No;N/A;github;https://github.com/bazelbuild/rules_shell;NOT_KNOWN;notice
+beef-0.5.2;https://raw.githubusercontent.com/maciejhirsz/beef/v0.5.2/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/maciejhirsz/beef;NOT_KNOWN;notice
+bitflags-1.3.2;https://raw.githubusercontent.com/bitflags/bitflags/1.3.2/LICENSE-APACHE;MIT/Apache-2.0;Yes;No;N/A;crates|github;https://github.com/bitflags/bitflags;NOT_KNOWN;notice
+bitflags-2.10.0;https://raw.githubusercontent.com/bitflags/bitflags/2.10.0/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/bitflags/bitflags;NOT_KNOWN;notice
+bufbuild.buf-1.47.2;https://raw.githubusercontent.com/bufbuild/buf/v1.47.2/LICENSE;Apache License 2.0;Yes;No;N/A;github;https://github.com/bufbuild/buf;NOT_KNOWN;notice
+bufbuild.buf-1.47.2;https://raw.githubusercontent.com/bufbuild/buf/v1.47.2/LICENSE;Apache License 2.0;Yes;No;N/A;github;https://github.com/bufbuild/buf;NOT_KNOWN;notice
+bufbuild.buf-1.47.2;https://raw.githubusercontent.com/bufbuild/buf/v1.47.2/LICENSE;Apache License 2.0;Yes;No;N/A;github;https://github.com/bufbuild/buf;NOT_KNOWN;notice
+bufbuild.buf-1.47.2;https://raw.githubusercontent.com/bufbuild/buf/v1.47.2/LICENSE;Apache License 2.0;Yes;No;N/A;github;https://github.com/bufbuild/buf;NOT_KNOWN;notice
+bufbuild.rules_buf-0.5.1;https://raw.githubusercontent.com/bufbuild/rules_buf/v0.5.1/LICENSE;Apache License 2.0;Yes;No;N/A;github;https://github.com/bufbuild/rules_buf;NOT_KNOWN;notice
+bytes-1.11.1;https://raw.githubusercontent.com/tokio-rs/bytes/v1.11.1/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/tokio-rs/bytes;NOT_KNOWN;notice
+cargo-util-schemas-0.3.1;https://raw.githubusercontent.com/rust-lang/cargo/master/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-lang/cargo;NOT_KNOWN;notice
+cc-1.2.55;https://raw.githubusercontent.com/rust-lang/cc-rs/cc-v1.2.55/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-lang/cc-rs;NOT_KNOWN;notice
+cfg-if-1.0.4;https://raw.githubusercontent.com/rust-lang/cfg-if/v1.0.4/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-lang/cfg-if;NOT_KNOWN;notice
+cfg_aliases-0.2.1;https://raw.githubusercontent.com/katharostech/cfg_aliases/v0.2.1/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/katharostech/cfg_aliases;NOT_KNOWN;notice
+chrono-0.4.43;https://raw.githubusercontent.com/chronotope/chrono/v0.4.43/LICENSE.txt;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/chronotope/chrono;NOT_KNOWN;notice
+clap-4.5.57;https://raw.githubusercontent.com/clap-rs/clap/v4.5.57/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/clap-rs/clap;NOT_KNOWN;notice
+clap_builder-4.5.57;https://raw.githubusercontent.com/clap-rs/clap/v4.5.57/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/clap-rs/clap;NOT_KNOWN;notice
+clap_derive-4.5.55;https://raw.githubusercontent.com/clap-rs/clap/v4.5.55/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/clap-rs/clap;NOT_KNOWN;notice
+clap_lex-0.7.7;https://raw.githubusercontent.com/clap-rs/clap/clap_lex-v0.7.7/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/clap-rs/clap;NOT_KNOWN;notice
+colorchoice-1.0.4;https://raw.githubusercontent.com/rust-cli/anstyle/refs/tags/colorchoice-v1.0.4/crates/colorchoice/LICENSE-MIT;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-cli/anstyle.git;NOT_KNOWN;notice
+crossbeam-utils-0.8.21;https://raw.githubusercontent.com/crossbeam-rs/crossbeam/crossbeam-utils-0.8.21/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/crossbeam-rs/crossbeam;NOT_KNOWN;notice
+darling-0.20.11;https://raw.githubusercontent.com/TedDriggs/darling/v0.20.11/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/TedDriggs/darling;NOT_KNOWN;notice
+darling_core-0.20.11;https://raw.githubusercontent.com/TedDriggs/darling/v0.20.11/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/TedDriggs/darling;NOT_KNOWN;notice
+darling_macro-0.20.11;https://raw.githubusercontent.com/TedDriggs/darling/v0.20.11/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/TedDriggs/darling;NOT_KNOWN;notice
+dashmap-6.1.0;https://raw.githubusercontent.com/xacrimon/dashmap/v6.1.0/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/xacrimon/dashmap;NOT_KNOWN;notice
+derivative-2.2.0;https://raw.githubusercontent.com/mcarton/rust-derivative/v2.2.0/LICENSE-APACHE;MIT/Apache-2.0;Yes;No;N/A;crates|github;https://github.com/mcarton/rust-derivative;NOT_KNOWN;notice
+derive_builder-0.20.2;https://raw.githubusercontent.com/colin-kiegel/rust-derive-builder/v0.20.2/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/colin-kiegel/rust-derive-builder;NOT_KNOWN;notice
+derive_builder_core-0.20.2;https://raw.githubusercontent.com/colin-kiegel/rust-derive-builder/v0.20.2/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/colin-kiegel/rust-derive-builder;NOT_KNOWN;notice
+derive_builder_macro-0.20.2;https://raw.githubusercontent.com/colin-kiegel/rust-derive-builder/v0.20.2/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/colin-kiegel/rust-derive-builder;NOT_KNOWN;notice
+derive_more-2.1.1;https://raw.githubusercontent.com/JelteF/derive_more/v2.1.1/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/JelteF/derive_more;NOT_KNOWN;notice
+derive_more-impl-2.1.1;https://raw.githubusercontent.com/JelteF/derive_more/v2.1.1/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/JelteF/derive_more;NOT_KNOWN;notice
+displaydoc-0.2.5;https://raw.githubusercontent.com/yaahc/displaydoc/v0.2.5/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/yaahc/displaydoc;NOT_KNOWN;notice
+dyn-clone-1.0.20;https://raw.githubusercontent.com/dtolnay/dyn-clone/1.0.20/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/dtolnay/dyn-clone;NOT_KNOWN;notice
+either-1.15.0;https://raw.githubusercontent.com/rayon-rs/either/1.15.0/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rayon-rs/either;NOT_KNOWN;notice
+equivalent-1.0.1;https://raw.githubusercontent.com/cuviper/equivalent/main/LICENSE-APACHE;Apache-2.0 OR MIT;Yes;No;N/A;crates|github;https://github.com/cuviper/equivalent;NOT_KNOWN;notice
+equivalent-1.0.2;https://raw.githubusercontent.com/indexmap-rs/equivalent/v1.0.2/LICENSE-APACHE;Apache-2.0 OR MIT;Yes;No;N/A;crates|github;https://github.com/indexmap-rs/equivalent;NOT_KNOWN;notice
+erased-serde-0.4.5;https://raw.githubusercontent.com/dtolnay/erased-serde/0.4.5/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/dtolnay/erased-serde;NOT_KNOWN;notice
+errno-0.3.14;https://raw.githubusercontent.com/lambda-fairy/rust-errno/main/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/lambda-fairy/rust-errno;NOT_KNOWN;notice
+fastrand-2.3.0;https://raw.githubusercontent.com/smol-rs/fastrand/v2.3.0/LICENSE-APACHE;Apache-2.0 OR MIT;Yes;No;N/A;crates|github;https://github.com/smol-rs/fastrand;NOT_KNOWN;notice
+filetime-0.2.27;https://raw.githubusercontent.com/alexcrichton/filetime/0.2.27/LICENSE-APACHE;MIT/Apache-2.0;Yes;No;N/A;crates|github;https://github.com/alexcrichton/filetime;NOT_KNOWN;notice
+find-msvc-tools-0.1.9;https://raw.githubusercontent.com/rust-lang/cc-rs/find-msvc-tools-v0.1.9/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-lang/cc-rs;NOT_KNOWN;notice
+fixedbitset-0.5.7;https://raw.githubusercontent.com/petgraph/fixedbitset/v0.5.7/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/petgraph/fixedbitset;NOT_KNOWN;notice
+fnv-1.0.7;https://raw.githubusercontent.com/servo/rust-fnv/v1.0.7/LICENSE-APACHE;Apache-2.0 / MIT;Yes;No;N/A;crates|github;https://github.com/servo/rust-fnv;NOT_KNOWN;notice
+foldhash-0.1.5;https://raw.githubusercontent.com/orlp/foldhash/v0.1.5/LICENSE;Zlib;Yes;No;N/A;crates|github;https://github.com/orlp/foldhash;NOT_KNOWN;notice
+form_urlencoded-1.2.1;https://raw.githubusercontent.com/servo/rust-url/v1.2.1/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/servo/rust-url;NOT_KNOWN;notice
+form_urlencoded-1.2.2;https://raw.githubusercontent.com/servo/rust-url/v1.2.2/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/servo/rust-url;NOT_KNOWN;notice
+futures-0.3.31;https://raw.githubusercontent.com/rust-lang/futures-rs/0.3.31/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-lang/futures-rs;NOT_KNOWN;notice
+futures-channel-0.3.31;https://raw.githubusercontent.com/rust-lang/futures-rs/0.3.31/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-lang/futures-rs;NOT_KNOWN;notice
+futures-core-0.3.31;https://raw.githubusercontent.com/rust-lang/futures-rs/0.3.31/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-lang/futures-rs;NOT_KNOWN;notice
+futures-executor-0.3.31;https://raw.githubusercontent.com/rust-lang/futures-rs/0.3.31/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-lang/futures-rs;NOT_KNOWN;notice
+futures-io-0.3.31;https://raw.githubusercontent.com/rust-lang/futures-rs/0.3.31/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-lang/futures-rs;NOT_KNOWN;notice
+futures-macro-0.3.31;https://raw.githubusercontent.com/rust-lang/futures-rs/0.3.31/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-lang/futures-rs;NOT_KNOWN;notice
+futures-sink-0.3.31;https://raw.githubusercontent.com/rust-lang/futures-rs/0.3.31/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-lang/futures-rs;NOT_KNOWN;notice
+futures-task-0.3.31;https://raw.githubusercontent.com/rust-lang/futures-rs/0.3.31/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-lang/futures-rs;NOT_KNOWN;notice
+futures-util-0.3.31;https://raw.githubusercontent.com/rust-lang/futures-rs/0.3.31/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-lang/futures-rs;NOT_KNOWN;notice
+getrandom-0.2.17;https://raw.githubusercontent.com/rust-random/getrandom/v0.2.17/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-random/getrandom;NOT_KNOWN;notice
+getrandom-0.3.4;https://raw.githubusercontent.com/rust-random/getrandom/v0.3.4/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-random/getrandom;NOT_KNOWN;notice
+getset-0.1.6;https://raw.githubusercontent.com/jbaublitz/getset/v0.1.6/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/jbaublitz/getset;NOT_KNOWN;notice
+google-parfait.confidential-federated-compute;https://raw.githubusercontent.com/google-parfait/confidential-federated-compute/main/LICENSE;Apache License 2.0;Yes;No;N/A;github;https://github.com/google-parfait/confidential-federated-compute;NOT_KNOWN;notice
+h2-0.4.13;https://raw.githubusercontent.com/hyperium/h2/v0.4.13/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/hyperium/h2;NOT_KNOWN;notice
+handlebars-3.5.5;https://raw.githubusercontent.com/sunng87/handlebars-rust/v3.5.5/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/sunng87/handlebars-rust;NOT_KNOWN;notice
+hashbrown-0.14.5;https://raw.githubusercontent.com/rust-lang/hashbrown/v0.14.5/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-lang/hashbrown;NOT_KNOWN;notice
+hashbrown-0.15.2;https://raw.githubusercontent.com/rust-lang/hashbrown/master/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-lang/hashbrown;NOT_KNOWN;notice
+hashbrown-0.15.5;https://raw.githubusercontent.com/rust-lang/hashbrown/v0.15.5/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-lang/hashbrown;NOT_KNOWN;notice
+hashbrown-0.16.1;https://raw.githubusercontent.com/rust-lang/hashbrown/v0.16.1/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-lang/hashbrown;NOT_KNOWN;notice
+heck-0.5.0;https://raw.githubusercontent.com/withoutboats/heck/master/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/withoutboats/heck;NOT_KNOWN;notice
+heck-0.5.0;https://raw.githubusercontent.com/withoutboats/heck/master/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/withoutboats/heck;NOT_KNOWN;notice
+http-1.4.0;https://raw.githubusercontent.com/hyperium/http/v1.4.0/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/hyperium/http;NOT_KNOWN;notice
+http-body-1.0.1;https://raw.githubusercontent.com/hyperium/http-body/v1.0.1/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/hyperium/http-body;NOT_KNOWN;notice
+http-body-util-0.1.3;https://raw.githubusercontent.com/hyperium/http-body/http-body-util-v0.1.3/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/hyperium/http-body;NOT_KNOWN;notice
+httparse-1.10.1;https://raw.githubusercontent.com/seanmonstar/httparse/v1.10.1/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/seanmonstar/httparse;NOT_KNOWN;notice
+httpdate-1.0.3;https://raw.githubusercontent.com/pyfisch/httpdate/v1.0.3/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/pyfisch/httpdate;NOT_KNOWN;notice
+hyper-1.8.1;https://raw.githubusercontent.com/hyperium/hyper/v1.8.1/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/hyperium/hyper;NOT_KNOWN;notice
+hyper-timeout-0.5.2;https://raw.githubusercontent.com/hjr3/hyper-timeout/0.5.2/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/hjr3/hyper-timeout;NOT_KNOWN;notice
+hyper-util-0.1.20;https://raw.githubusercontent.com/hyperium/hyper-util/v0.1.20/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/hyperium/hyper-util;NOT_KNOWN;notice
+iana-time-zone-0.1.65;https://raw.githubusercontent.com/strawlab/iana-time-zone/v0.1.65/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/strawlab/iana-time-zone;NOT_KNOWN;notice
+icu_collections-1.5.0;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+icu_collections-2.1.1;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+icu_locale_core-2.1.1;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+icu_locid-1.5.0;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+icu_locid_transform-1.5.0;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+icu_locid_transform_data-1.5.0;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+icu_normalizer-1.5.0;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+icu_normalizer-2.1.1;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+icu_normalizer_data-1.5.0;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+icu_normalizer_data-2.1.1;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+icu_properties-1.5.1;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+icu_properties-2.1.2;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+icu_properties_data-1.5.0;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+icu_properties_data-2.1.2;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+icu_provider-1.5.0;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+icu_provider-2.1.1;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+icu_provider_macros-1.5.0;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+ident_case-1.0.1;https://raw.githubusercontent.com/TedDriggs/ident_case/master/LICENSE;MIT/Apache-2.0;Yes;No;N/A;crates|github;https://github.com/TedDriggs/ident_case;NOT_KNOWN;notice
+idna-1.0.3;https://raw.githubusercontent.com/servo/rust-url/idna-v1.0.3/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/servo/rust-url/;NOT_KNOWN;notice
+idna-1.1.0;https://raw.githubusercontent.com/servo/rust-url/main/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/servo/rust-url/;NOT_KNOWN;notice
+idna_adapter-1.2.0;https://raw.githubusercontent.com/hsivonen/idna_adapter/v1.2.0/LICENSE-APACHE;Apache-2.0 OR MIT;Yes;No;N/A;crates|github;https://github.com/hsivonen/idna_adapter;NOT_KNOWN;notice
+idna_adapter-1.2.1;https://raw.githubusercontent.com/hsivonen/idna_adapter/v1.2.1/LICENSE-APACHE;Apache-2.0 OR MIT;Yes;No;N/A;crates|github;https://github.com/hsivonen/idna_adapter;NOT_KNOWN;notice
+indexmap-2.13.0;https://raw.githubusercontent.com/indexmap-rs/indexmap/2.13.0/LICENSE-APACHE;Apache-2.0 OR MIT;Yes;No;N/A;crates|github;https://github.com/indexmap-rs/indexmap;NOT_KNOWN;notice
+indexmap-2.7.1;https://raw.githubusercontent.com/indexmap-rs/indexmap/2.7.1/LICENSE-APACHE;Apache-2.0 OR MIT;Yes;No;N/A;crates|github;https://github.com/indexmap-rs/indexmap;NOT_KNOWN;notice
+interfaces-0.0.9;https://choosealicense.com/licenses/mit;MIT/Apache-2.0;Yes;No;N/A;crates|github;https://github.com/andrew-d/interfaces-rs;NOT_KNOWN;notice
+ipnet-2.11.0;https://raw.githubusercontent.com/krisprice/ipnet/2.11.0/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/krisprice/ipnet;NOT_KNOWN;notice
+iri-string-0.7.10;https://raw.githubusercontent.com/lo48576/iri-string/v0.7.10/LICENSE-APACHE.txt;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/lo48576/iri-string;NOT_KNOWN;notice
+is_terminal_polyfill-1.70.2;https://raw.githubusercontent.com/polyfill-rs/is_terminal_polyfill/v1.70.2/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/polyfill-rs/is_terminal_polyfill;NOT_KNOWN;notice
+itertools-0.14.0;https://raw.githubusercontent.com/rust-itertools/itertools/v0.14.0/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-itertools/itertools;NOT_KNOWN;notice
+itoa-1.0.17;https://raw.githubusercontent.com/dtolnay/itoa/1.0.17/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/dtolnay/itoa;NOT_KNOWN;notice
+jq.bzl-0.1.0;https://raw.githubusercontent.com/bazel-contrib/jq.bzl/v0.1.0/LICENSE;Apache License 2.0;Yes;No;N/A;bcr.bazel|github;https://github.com/bazel-contrib/jq.bzl;NOT_KNOWN;notice
+lazy_static-1.5.0;https://raw.githubusercontent.com/rust-lang-nursery/lazy-static.rs/1.5.0/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-lang-nursery/lazy-static.rs;NOT_KNOWN;notice
+libc-0.2.180;https://raw.githubusercontent.com/rust-lang/libc/0.2.180/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-lang/libc;NOT_KNOWN;notice
+linux-raw-sys-0.11.0;https://raw.githubusercontent.com/sunfishcode/linux-raw-sys/v0.11.0/LICENSE-APACHE;Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT;Yes;No;N/A;crates|github;https://github.com/sunfishcode/linux-raw-sys;NOT_KNOWN;notice
+litemap-0.7.4;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+litemap-0.8.1;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+llvm.llvm-project-20.1.0;https://raw.githubusercontent.com/llvm/llvm-project/main/LICENSE.TXT;Other;Yes;No;N/A;github;https://github.com/llvm/llvm-project;NOT_KNOWN;notice
+lock_api-0.4.14;https://raw.githubusercontent.com/Amanieu/parking_lot/lock_api-v0.4.14/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/Amanieu/parking_lot;NOT_KNOWN;notice
+log-0.4.29;https://raw.githubusercontent.com/rust-lang/log/0.4.29/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-lang/log;NOT_KNOWN;notice
+log-mdc-0.1.0;https://raw.githubusercontent.com/sfackler/rust-log-mdc/v0.1.0/LICENSE-APACHE;MIT/Apache-2.0;Yes;No;N/A;crates|github;https://github.com/sfackler/rust-log-mdc;NOT_KNOWN;notice
+log4rs-1.4.0;https://raw.githubusercontent.com/estk/log4rs/v1.4.0/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/estk/log4rs;NOT_KNOWN;notice
+logos-0.15.1;https://raw.githubusercontent.com/maciejhirsz/logos/v0.15.1/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/maciejhirsz/logos;NOT_KNOWN;notice
+logos-codegen-0.15.1;https://raw.githubusercontent.com/maciejhirsz/logos/v0.15.1/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/maciejhirsz/logos;NOT_KNOWN;notice
+logos-derive-0.15.1;https://raw.githubusercontent.com/maciejhirsz/logos/v0.15.1/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/maciejhirsz/logos;NOT_KNOWN;notice
+madler.zlib-1.3.1;https://raw.githubusercontent.com/madler/zlib/v1.3.1/LICENSE;Other;Yes;No;N/A;github;https://github.com/madler/zlib;NOT_KNOWN;notice
+matchers-0.2.0;https://raw.githubusercontent.com/hawkw/matchers/main/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/hawkw/matchers;NOT_KNOWN;notice
+matchit-0.8.4;https://raw.githubusercontent.com/ibraheemdev/matchit/v0.8.4/LICENSE;MIT AND BSD-3-Clause;Yes;No;N/A;crates|github;https://github.com/ibraheemdev/matchit;NOT_KNOWN;notice
+memchr-2.7.6;https://raw.githubusercontent.com/BurntSushi/memchr/2.7.6/UNLICENSE;Unlicense OR MIT;Yes;No;N/A;crates|github;https://github.com/BurntSushi/memchr;NOT_KNOWN;unencumbered
+memoffset-0.7.1;https://raw.githubusercontent.com/Gilnaa/memoffset/v0.7.1/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/Gilnaa/memoffset;NOT_KNOWN;notice
+metrics-0.22.4;https://raw.githubusercontent.com/metrics-rs/metrics/metrics-v0.22.4/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/metrics-rs/metrics;NOT_KNOWN;notice
+mime-0.3.17;https://raw.githubusercontent.com/hyperium/mime/v0.3.17/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/hyperium/mime;NOT_KNOWN;notice
+mio-1.1.1;https://raw.githubusercontent.com/tokio-rs/mio/v1.1.1/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/tokio-rs/mio;NOT_KNOWN;notice
+mock_instant-0.6.0;https://raw.githubusercontent.com/museun/mock_instant/v0.6.0/LICENSE.txt;0BSD;Yes;No;N/A;crates|github;https://github.com/museun/mock_instant;NOT_KNOWN;permissive
+multimap-0.10.1;https://raw.githubusercontent.com/havarnov/multimap/master/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/havarnov/multimap;NOT_KNOWN;notice
+nix-0.26.4;https://raw.githubusercontent.com/nix-rust/nix/v0.26.4/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/nix-rust/nix;NOT_KNOWN;notice
+nix-0.30.1;https://raw.githubusercontent.com/nix-rust/nix/v0.30.1/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/nix-rust/nix;NOT_KNOWN;notice
+nu-ansi-term-0.50.3;https://raw.githubusercontent.com/nushell/nu-ansi-term/v0.50.3/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/nushell/nu-ansi-term;NOT_KNOWN;notice
+num-traits-0.2.19;https://raw.githubusercontent.com/rust-num/num-traits/num-traits-0.2.19/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-num/num-traits;NOT_KNOWN;notice
+oci-spec-0.7.1;https://raw.githubusercontent.com/youki-dev/oci-spec-rs/v0.7.1/LICENSE;Apache-2.0;Yes;No;N/A;crates|github;https://github.com/containers/oci-spec-rs;NOT_KNOWN;notice
+once_cell-1.21.3;https://raw.githubusercontent.com/matklad/once_cell/v1.21.3/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/matklad/once_cell;NOT_KNOWN;notice
+opencontainers.umoci-0.4.7;https://raw.githubusercontent.com/opencontainers/umoci/v0.4.7/COPYING;Apache License 2.0;Yes;No;N/A;github;https://github.com/opencontainers/umoci;NOT_KNOWN;notice
+opentelemetry-0.31.0;https://raw.githubusercontent.com/open-telemetry/opentelemetry-rust/v0.31.0/LICENSE;Apache-2.0;Yes;No;N/A;crates|github;https://github.com/open-telemetry/opentelemetry-rust/tree/main/opentelemetry;NOT_KNOWN;notice
+opentelemetry-http-0.31.0;https://raw.githubusercontent.com/open-telemetry/opentelemetry-rust/v0.31.0/LICENSE;Apache-2.0;Yes;No;N/A;crates|github;https://github.com/open-telemetry/opentelemetry-rust/tree/main/opentelemetry-http;NOT_KNOWN;notice
+opentelemetry-otlp-0.31.0;https://raw.githubusercontent.com/open-telemetry/opentelemetry-rust/v0.31.0/LICENSE;Apache-2.0;Yes;No;N/A;crates|github;https://github.com/open-telemetry/opentelemetry-rust/tree/main/opentelemetry-otlp;NOT_KNOWN;notice
+opentelemetry-proto-0.31.0;https://raw.githubusercontent.com/open-telemetry/opentelemetry-rust/v0.31.0/LICENSE;Apache-2.0;Yes;No;N/A;crates|github;https://github.com/open-telemetry/opentelemetry-rust/tree/main/opentelemetry-proto;NOT_KNOWN;notice
+opentelemetry_sdk-0.31.0;https://raw.githubusercontent.com/open-telemetry/opentelemetry-rust/v0.31.0/LICENSE;Apache-2.0;Yes;No;N/A;crates|github;https://github.com/open-telemetry/opentelemetry-rust/tree/main/opentelemetry-sdk;NOT_KNOWN;notice
+ordered-float-2.10.1;https://raw.githubusercontent.com/reem/rust-ordered-float/v2.10.1/LICENSE-MIT;MIT;Yes;No;N/A;crates|github;https://github.com/reem/rust-ordered-float;NOT_KNOWN;notice
+parking_lot-0.12.5;https://raw.githubusercontent.com/Amanieu/parking_lot/parking_lot-v0.12.5/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/Amanieu/parking_lot;NOT_KNOWN;notice
+parking_lot_core-0.9.12;https://raw.githubusercontent.com/Amanieu/parking_lot/parking_lot_core-v0.9.12/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/Amanieu/parking_lot;NOT_KNOWN;notice
+pathdiff-0.1.0;https://raw.githubusercontent.com/Manishearth/pathdiff/master/LICENSE-APACHE;MIT/Apache-2.0;Yes;No;N/A;crates|github;https://github.com/Manishearth/pathdiff;NOT_KNOWN;notice
+percent-encoding-2.3.1;https://raw.githubusercontent.com/servo/rust-url/v2.3.1/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/servo/rust-url/;NOT_KNOWN;notice
+percent-encoding-2.3.2;https://raw.githubusercontent.com/servo/rust-url/main/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/servo/rust-url/;NOT_KNOWN;notice
+pest-2.8.5;https://raw.githubusercontent.com/pest-parser/pest/v2.8.5/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/pest-parser/pest;NOT_KNOWN;notice
+pest_derive-2.8.5;https://raw.githubusercontent.com/pest-parser/pest/v2.8.5/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/pest-parser/pest;NOT_KNOWN;notice
+pest_generator-2.8.5;https://raw.githubusercontent.com/pest-parser/pest/v2.8.5/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/pest-parser/pest;NOT_KNOWN;notice
+pest_meta-2.8.5;https://raw.githubusercontent.com/pest-parser/pest/v2.8.5/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/pest-parser/pest;NOT_KNOWN;notice
+petgraph-0.8.3;https://raw.githubusercontent.com/petgraph/petgraph/master/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/petgraph/petgraph;NOT_KNOWN;notice
+pin-project-1.1.10;https://raw.githubusercontent.com/taiki-e/pin-project/v1.1.10/LICENSE-APACHE;Apache-2.0 OR MIT;Yes;No;N/A;crates|github;https://github.com/taiki-e/pin-project;NOT_KNOWN;notice
+pin-project-internal-1.1.10;https://raw.githubusercontent.com/taiki-e/pin-project/v1.1.10/LICENSE-APACHE;Apache-2.0 OR MIT;Yes;No;N/A;crates|github;https://github.com/taiki-e/pin-project;NOT_KNOWN;notice
+pin-project-lite-0.2.16;https://raw.githubusercontent.com/taiki-e/pin-project-lite/v0.2.16/LICENSE-APACHE;Apache-2.0 OR MIT;Yes;No;N/A;crates|github;https://github.com/taiki-e/pin-project-lite;NOT_KNOWN;notice
+pin-utils-0.1.0;https://raw.githubusercontent.com/rust-lang/pin-utils/0.1.0/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-lang-nursery/pin-utils;NOT_KNOWN;notice
+potential_utf-0.1.4;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+ppv-lite86-0.2.21;https://raw.githubusercontent.com/cryptocorrosion/cryptocorrosion/ppv-lite86-0.2.21/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/cryptocorrosion/cryptocorrosion;NOT_KNOWN;notice
+prettyplease-0.2.37;https://raw.githubusercontent.com/dtolnay/prettyplease/0.2.37/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/dtolnay/prettyplease;NOT_KNOWN;notice
+proc-macro-error-attr2-2.0.0;https://raw.githubusercontent.com/GnomedDev/proc-macro-error-2/master/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/GnomedDev/proc-macro-error-2;NOT_KNOWN;notice
+proc-macro-error2-2.0.1;https://raw.githubusercontent.com/GnomedDev/proc-macro-error-2/master/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/GnomedDev/proc-macro-error-2;NOT_KNOWN;notice
+proc-macro2-1.0.106;https://raw.githubusercontent.com/dtolnay/proc-macro2/1.0.106/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/dtolnay/proc-macro2;NOT_KNOWN;notice
+proc-macro2-1.0.93;https://raw.githubusercontent.com/dtolnay/proc-macro2/1.0.93/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/dtolnay/proc-macro2;NOT_KNOWN;notice
+project-oak.oak;https://raw.githubusercontent.com/project-oak/oak/main/LICENSE;Apache License 2.0;Yes;No;N/A;github;https://github.com/project-oak/oak;NOT_KNOWN;notice
+prost-0.14.3;https://raw.githubusercontent.com/tokio-rs/prost/v0.14.3/LICENSE;Apache-2.0;Yes;No;N/A;crates|github;https://github.com/tokio-rs/prost;NOT_KNOWN;notice
+prost-build-0.14.3;https://raw.githubusercontent.com/tokio-rs/prost/v0.14.3/LICENSE;Apache-2.0;Yes;No;N/A;crates|github;https://github.com/tokio-rs/prost;NOT_KNOWN;notice
+prost-derive-0.14.3;https://raw.githubusercontent.com/tokio-rs/prost/v0.14.3/LICENSE;Apache-2.0;Yes;No;N/A;crates|github;https://github.com/tokio-rs/prost;NOT_KNOWN;notice
+prost-reflect-0.16.3;https://raw.githubusercontent.com/andrewhickman/prost-reflect/prost-reflect-v0.16.3/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/andrewhickman/prost-reflect;NOT_KNOWN;notice
+prost-types-0.14.3;https://raw.githubusercontent.com/tokio-rs/prost/v0.14.3/LICENSE;Apache-2.0;Yes;No;N/A;crates|github;https://github.com/tokio-rs/prost;NOT_KNOWN;notice
+protoc-gen-prost-0.5.0;https://raw.githubusercontent.com/neoeinstein/protoc-gen-prost/protoc-gen-prost-v0.5.0/LICENSE;Apache-2.0;Yes;No;N/A;crates|github;https://github.com/neoeinstein/protoc-gen-prost;NOT_KNOWN;notice
+protoc-gen-tonic-0.5.0;https://raw.githubusercontent.com/neoeinstein/protoc-gen-prost/protoc-gen-tonic-v0.5.0/LICENSE;Apache-2.0;Yes;No;N/A;crates|github;https://github.com/neoeinstein/protoc-gen-prost;NOT_KNOWN;notice
+protocolbuffers.protobuf-31.1;https://raw.githubusercontent.com/protocolbuffers/protobuf/v31.1/LICENSE;Other;Yes;No;N/A;github;https://github.com/protocolbuffers/protobuf;NOT_KNOWN;notice
+quick-error-2.0.1;https://raw.githubusercontent.com/tailhook/quick-error/v2.0.1/LICENSE-APACHE;MIT/Apache-2.0;Yes;No;N/A;crates|github;http://github.com/tailhook/quick-error;NOT_KNOWN;notice
+quote-1.0.38;https://raw.githubusercontent.com/dtolnay/quote/1.0.38/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/dtolnay/quote;NOT_KNOWN;notice
+quote-1.0.44;https://raw.githubusercontent.com/dtolnay/quote/1.0.44/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/dtolnay/quote;NOT_KNOWN;notice
+rand-0.8.5;https://raw.githubusercontent.com/rust-random/rand/0.8.5/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-random/rand;NOT_KNOWN;notice
+rand-0.9.2;https://raw.githubusercontent.com/rust-random/rand/0.9.2/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-random/rand;NOT_KNOWN;notice
+rand_chacha-0.3.1;https://raw.githubusercontent.com/rust-random/rand/0.3.1/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-random/rand;NOT_KNOWN;notice
+rand_chacha-0.9.0;https://raw.githubusercontent.com/rust-random/rand/0.9.0/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-random/rand;NOT_KNOWN;notice
+rand_core-0.6.4;https://raw.githubusercontent.com/rust-random/rand/0.6.4/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-random/rand;NOT_KNOWN;notice
+rand_core-0.9.5;https://raw.githubusercontent.com/rust-random/rand/master/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-random/rand;NOT_KNOWN;notice
+regex-1.12.3;https://raw.githubusercontent.com/rust-lang/regex/1.12.3/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-lang/regex;NOT_KNOWN;notice
+regex-automata-0.4.14;https://raw.githubusercontent.com/rust-lang/regex/regex-automata-0.4.14/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-lang/regex;NOT_KNOWN;notice
+regex-syntax-0.8.9;https://raw.githubusercontent.com/rust-lang/regex/regex-syntax-0.8.9/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-lang/regex;NOT_KNOWN;notice
+reqwest-0.12.28;https://raw.githubusercontent.com/seanmonstar/reqwest/v0.12.28/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/seanmonstar/reqwest;NOT_KNOWN;notice
+rules_kotlin-1.9.6;https://raw.githubusercontent.com/bazelbuild/rules_kotlin/v1.9.6/LICENSE;Apache License 2.0;Yes;No;N/A;bcr.bazel|github;https://github.com/bazelbuild/rules_kotlin;NOT_KNOWN;notice
+rules_oci-2.0.1;https://raw.githubusercontent.com/bazel-contrib/rules_oci/v2.0.1/LICENSE;Apache License 2.0;Yes;No;N/A;bcr.bazel|github;https://github.com/bazel-contrib/rules_oci;NOT_KNOWN;notice
+rules_proto-7.1.0;https://raw.githubusercontent.com/bazelbuild/rules_proto/7.1.0/LICENSE;Apache License 2.0;Yes;No;N/A;bcr.bazel|github;https://github.com/bazelbuild/rules_proto;NOT_KNOWN;notice
+rules_proto-7.1.0;https://raw.githubusercontent.com/bazelbuild/rules_proto/7.1.0/LICENSE;Apache License 2.0;Yes;No;N/A;bcr.bazel|github;https://github.com/bazelbuild/rules_proto;NOT_KNOWN;notice
+rules_python-1.5.3;https://raw.githubusercontent.com/bazel-contrib/rules_python/1.5.3/LICENSE;Apache License 2.0;Yes;No;N/A;bcr.bazel|github;https://github.com/bazelbuild/rules_python;NOT_KNOWN;notice
+rules_shell-0.6.1;https://raw.githubusercontent.com/bazelbuild/rules_shell/v0.6.1/LICENSE;Apache License 2.0;Yes;No;N/A;bcr.bazel|github;https://github.com/bazelbuild/rules_shell;NOT_KNOWN;notice
+rust-std-1.86.0;https://raw.githubusercontent.com/rust-lang/rust/refs/tags/1.86.0/LICENSE-MIT;MIT OR Apache-2.0;Yes;No;N/A;other;https://static.rust-lang.org/dist/rust-std-1.86.0-x86_64-unknown-linux-gnu.tar.xz;NOT_KNOWN;notice
+rust-std-1.87.0;https://raw.githubusercontent.com/rust-lang/rust/refs/tags/1.87.0/LICENSE-MIT;MIT OR Apache-2.0;Yes;No;N/A;other;https://static.rust-lang.org/dist/rust-std-1.87.0-x86_64-unknown-linux-gnu.tar.xz;NOT_KNOWN;notice
+rustc_version-0.4.1;https://raw.githubusercontent.com/djc/rustc-version-rs/v0.4.1/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/djc/rustc-version-rs;NOT_KNOWN;notice
+rustix-1.1.3;https://raw.githubusercontent.com/bytecodealliance/rustix/v1.1.3/LICENSE-APACHE;Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT;Yes;No;N/A;crates|github;https://github.com/bytecodealliance/rustix;NOT_KNOWN;notice
+rustversion-1.0.22;https://raw.githubusercontent.com/dtolnay/rustversion/1.0.22/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/dtolnay/rustversion;NOT_KNOWN;notice
+ryu-1.0.22;https://raw.githubusercontent.com/dtolnay/ryu/1.0.22/LICENSE-APACHE;Apache-2.0 OR BSL-1.0;Yes;No;N/A;crates|github;https://github.com/dtolnay/ryu;NOT_KNOWN;notice
+scopeguard-1.2.0;https://raw.githubusercontent.com/bluss/scopeguard/v1.2.0/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/bluss/scopeguard;NOT_KNOWN;notice
+semver-1.0.25;https://raw.githubusercontent.com/dtolnay/semver/1.0.25/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/dtolnay/semver;NOT_KNOWN;notice
+semver-1.0.27;https://raw.githubusercontent.com/dtolnay/semver/1.0.27/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/dtolnay/semver;NOT_KNOWN;notice
+serde-1.0.217;https://raw.githubusercontent.com/serde-rs/serde/v1.0.217/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/serde-rs/serde;NOT_KNOWN;notice
+serde-1.0.228;https://raw.githubusercontent.com/serde-rs/serde/v1.0.228/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/serde-rs/serde;NOT_KNOWN;notice
+serde-untagged-0.1.6;https://raw.githubusercontent.com/dtolnay/serde-untagged/0.1.6/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/dtolnay/serde-untagged;NOT_KNOWN;notice
+serde-value-0.7.0;https://raw.githubusercontent.com/arcnmx/serde-value/0.7.0/COPYING;MIT;Yes;No;N/A;crates|github;https://github.com/arcnmx/serde-value;NOT_KNOWN;notice
+serde_core-1.0.228;https://raw.githubusercontent.com/serde-rs/serde/v1.0.228/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/serde-rs/serde;NOT_KNOWN;notice
+serde_derive-1.0.217;https://raw.githubusercontent.com/serde-rs/serde/v1.0.217/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/serde-rs/serde;NOT_KNOWN;notice
+serde_derive-1.0.228;https://raw.githubusercontent.com/serde-rs/serde/v1.0.228/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/serde-rs/serde;NOT_KNOWN;notice
+serde_json-1.0.149;https://raw.githubusercontent.com/serde-rs/json/v1.0.149/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/serde-rs/json;NOT_KNOWN;notice
+serde_spanned-0.6.8;https://raw.githubusercontent.com/toml-rs/toml/main/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/toml-rs/toml;NOT_KNOWN;notice
+serde_urlencoded-0.7.1;https://raw.githubusercontent.com/nox/serde_urlencoded/master/LICENSE-APACHE;MIT/Apache-2.0;Yes;No;N/A;crates|github;https://github.com/nox/serde_urlencoded;NOT_KNOWN;notice
+sharded-slab-0.1.7;https://raw.githubusercontent.com/hawkw/sharded-slab/v0.1.7/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/hawkw/sharded-slab;NOT_KNOWN;notice
+shlex-1.3.0;https://raw.githubusercontent.com/comex/rust-shlex/1.3.0/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/comex/rust-shlex;NOT_KNOWN;notice
+signal-hook-registry-1.4.8;https://raw.githubusercontent.com/vorner/signal-hook/master/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/vorner/signal-hook;NOT_KNOWN;notice
+slab-0.4.12;https://raw.githubusercontent.com/tokio-rs/slab/v0.4.12/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/tokio-rs/slab;NOT_KNOWN;notice
+smallvec-1.13.2;https://raw.githubusercontent.com/servo/rust-smallvec/v1.13.2/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/servo/rust-smallvec;NOT_KNOWN;notice
+smallvec-1.15.1;https://raw.githubusercontent.com/servo/rust-smallvec/v1.15.1/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/servo/rust-smallvec;NOT_KNOWN;notice
+socket2-0.6.2;https://raw.githubusercontent.com/rust-lang/socket2/v0.6.2/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/rust-lang/socket2;NOT_KNOWN;notice
+stable_deref_trait-1.2.0;https://raw.githubusercontent.com/Storyyeller/stable_deref_trait/master/LICENSE-APACHE;MIT/Apache-2.0;Yes;No;N/A;crates|github;https://github.com/storyyeller/stable_deref_trait;NOT_KNOWN;notice
+stable_deref_trait-1.2.1;https://raw.githubusercontent.com/Storyyeller/stable_deref_trait/master/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/storyyeller/stable_deref_trait;NOT_KNOWN;notice
+strsim-0.11.1;https://raw.githubusercontent.com/rapidfuzz/strsim-rs/v0.11.1/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/rapidfuzz/strsim-rs;NOT_KNOWN;notice
+strum-0.26.3;https://raw.githubusercontent.com/Peternator7/strum/v0.26.3/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/Peternator7/strum;NOT_KNOWN;notice
+strum_macros-0.26.4;https://raw.githubusercontent.com/Peternator7/strum/master/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/Peternator7/strum;NOT_KNOWN;notice
+syn-1.0.109;https://raw.githubusercontent.com/dtolnay/syn/1.0.109/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/dtolnay/syn;NOT_KNOWN;notice
+syn-2.0.114;https://raw.githubusercontent.com/dtolnay/syn/2.0.114/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/dtolnay/syn;NOT_KNOWN;notice
+syn-2.0.98;https://raw.githubusercontent.com/dtolnay/syn/2.0.98/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/dtolnay/syn;NOT_KNOWN;notice
+sync_wrapper-1.0.2;https://raw.githubusercontent.com/Actyx/sync_wrapper/master/LICENSE;Apache-2.0;Yes;No;N/A;crates|github;https://github.com/Actyx/sync_wrapper;NOT_KNOWN;notice
+synstructure-0.13.1;https://raw.githubusercontent.com/mystor/synstructure/main/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/mystor/synstructure;NOT_KNOWN;notice
+synstructure-0.13.2;https://raw.githubusercontent.com/mystor/synstructure/main/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/mystor/synstructure;NOT_KNOWN;notice
+tar-0.4.44;https://raw.githubusercontent.com/alexcrichton/tar-rs/0.4.44/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/alexcrichton/tar-rs;NOT_KNOWN;notice
+tempfile-3.24.0;https://raw.githubusercontent.com/Stebalien/tempfile/v3.24.0/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/Stebalien/tempfile;NOT_KNOWN;notice
+thiserror-1.0.69;https://raw.githubusercontent.com/dtolnay/thiserror/1.0.69/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/dtolnay/thiserror;NOT_KNOWN;notice
+thiserror-2.0.18;https://raw.githubusercontent.com/dtolnay/thiserror/2.0.18/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/dtolnay/thiserror;NOT_KNOWN;notice
+thiserror-impl-1.0.69;https://raw.githubusercontent.com/dtolnay/thiserror/1.0.69/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/dtolnay/thiserror;NOT_KNOWN;notice
+thiserror-impl-2.0.18;https://raw.githubusercontent.com/dtolnay/thiserror/2.0.18/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/dtolnay/thiserror;NOT_KNOWN;notice
+thread-id-5.1.0;https://raw.githubusercontent.com/ruuda/thread-id/v5.1.0/license-apache;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/ruuda/thread-id;NOT_KNOWN;notice
+thread_local-1.1.9;https://raw.githubusercontent.com/Amanieu/thread_local-rs/v1.1.9/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/Amanieu/thread_local-rs;NOT_KNOWN;notice
+tinyjson-2.5.1;https://raw.githubusercontent.com/rhysd/tinyjson/v2.5.1/LICENSE.txt;MIT;Yes;No;N/A;crates|github;https://github.com/rhysd/tinyjson;NOT_KNOWN;notice
+tinystr-0.7.6;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+tinystr-0.8.2;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+tokio-1.49.0;https://raw.githubusercontent.com/tokio-rs/tokio/tokio-1.49.0/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/tokio-rs/tokio;NOT_KNOWN;notice
+tokio-macros-2.6.0;https://raw.githubusercontent.com/tokio-rs/tokio/tokio-macros-2.6.0/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/tokio-rs/tokio;NOT_KNOWN;notice
+tokio-retry-0.3.0;https://raw.githubusercontent.com/srijs/rust-tokio-retry/master/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/srijs/rust-tokio-retry;NOT_KNOWN;notice
+tokio-stream-0.1.18;https://raw.githubusercontent.com/tokio-rs/tokio/tokio-stream-0.1.18/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/tokio-rs/tokio;NOT_KNOWN;notice
+tokio-util-0.7.18;https://raw.githubusercontent.com/tokio-rs/tokio/tokio-util-0.7.18/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/tokio-rs/tokio;NOT_KNOWN;notice
+toml-0.8.20;https://raw.githubusercontent.com/toml-rs/toml/main/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/toml-rs/toml;NOT_KNOWN;notice
+toml_datetime-0.6.8;https://raw.githubusercontent.com/toml-rs/toml/main/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/toml-rs/toml;NOT_KNOWN;notice
+toml_edit-0.22.24;https://raw.githubusercontent.com/toml-rs/toml/main/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/toml-rs/toml;NOT_KNOWN;notice
+tonic-0.14.3;https://raw.githubusercontent.com/hyperium/tonic/v0.14.3/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/hyperium/tonic;NOT_KNOWN;notice
+tonic-build-0.14.3;https://raw.githubusercontent.com/hyperium/tonic/v0.14.3/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/hyperium/tonic;NOT_KNOWN;notice
+tonic-prost-0.14.3;https://raw.githubusercontent.com/hyperium/tonic/v0.14.3/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/hyperium/tonic;NOT_KNOWN;notice
+toolchains_llvm-1.4.0;https://raw.githubusercontent.com/bazel-contrib/toolchains_llvm/v1.4.0/LICENSE;Apache License 2.0;Yes;No;N/A;bcr.bazel|github;https://github.com/bazel-contrib/toolchains_llvm;NOT_KNOWN;notice
+toolchains_protoc-0.5.0;https://raw.githubusercontent.com/aspect-build/toolchains_protoc/v0.5.0/LICENSE;Apache License 2.0;Yes;No;N/A;bcr.bazel|github;https://github.com/aspect-build/toolchains_protoc;NOT_KNOWN;notice
+tower-0.5.3;https://raw.githubusercontent.com/tower-rs/tower/tower-0.5.3/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/tower-rs/tower;NOT_KNOWN;notice
+tower-http-0.6.8;https://raw.githubusercontent.com/tower-rs/tower-http/refs/tags/tower-http-0.6.8/tower-http/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/tower-rs/tower-http;NOT_KNOWN;notice
+tower-layer-0.3.3;https://raw.githubusercontent.com/tower-rs/tower/tower-layer-0.3.3/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/tower-rs/tower;NOT_KNOWN;notice
+tower-service-0.3.3;https://raw.githubusercontent.com/tower-rs/tower/tower-service-0.3.3/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/tower-rs/tower;NOT_KNOWN;notice
+tracing-0.1.44;https://raw.githubusercontent.com/tokio-rs/tracing/tracing-0.1.44/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/tokio-rs/tracing;NOT_KNOWN;notice
+tracing-attributes-0.1.31;https://raw.githubusercontent.com/tokio-rs/tracing/tracing-attributes-0.1.31/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/tokio-rs/tracing;NOT_KNOWN;notice
+tracing-core-0.1.36;https://raw.githubusercontent.com/tokio-rs/tracing/tracing-core-0.1.36/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/tokio-rs/tracing;NOT_KNOWN;notice
+tracing-log-0.2.0;https://raw.githubusercontent.com/tokio-rs/tracing/tracing-log-0.2.0/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/tokio-rs/tracing;NOT_KNOWN;notice
+tracing-opentelemetry-0.32.1;https://raw.githubusercontent.com/tokio-rs/tracing-opentelemetry/v0.32.1/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/tokio-rs/tracing-opentelemetry;NOT_KNOWN;notice
+tracing-subscriber-0.3.22;https://raw.githubusercontent.com/tokio-rs/tracing/tracing-subscriber-0.3.22/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/tokio-rs/tracing;NOT_KNOWN;notice
+try-lock-0.2.5;https://raw.githubusercontent.com/seanmonstar/try-lock/v0.2.5/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/seanmonstar/try-lock;NOT_KNOWN;notice
+typeid-1.0.2;https://raw.githubusercontent.com/dtolnay/typeid/1.0.2/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/dtolnay/typeid;NOT_KNOWN;notice
+ucd-trie-0.1.7;https://raw.githubusercontent.com/BurntSushi/ucd-generate/master/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/BurntSushi/ucd-generate;NOT_KNOWN;notice
+unicode-ident-1.0.16;https://raw.githubusercontent.com/dtolnay/unicode-ident/1.0.16/LICENSE-APACHE;(MIT OR Apache-2.0) AND Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/dtolnay/unicode-ident;NOT_KNOWN;notice
+unicode-ident-1.0.22;https://raw.githubusercontent.com/dtolnay/unicode-ident/1.0.22/LICENSE-APACHE;(MIT OR Apache-2.0) AND Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/dtolnay/unicode-ident;NOT_KNOWN;notice
+unicode-segmentation-1.12.0;https://raw.githubusercontent.com/unicode-rs/unicode-segmentation/v1.12.0/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/unicode-rs/unicode-segmentation;NOT_KNOWN;notice
+unicode-xid-0.2.6;https://raw.githubusercontent.com/unicode-rs/unicode-xid/v0.2.6/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/unicode-rs/unicode-xid;NOT_KNOWN;notice
+url-2.5.4;https://raw.githubusercontent.com/servo/rust-url/v2.5.4/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/servo/rust-url;NOT_KNOWN;notice
+url-2.5.8;https://raw.githubusercontent.com/servo/rust-url/v2.5.8/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/servo/rust-url;NOT_KNOWN;notice
+users-0.11.0;https://raw.githubusercontent.com/ogham/rust-users/v0.11.0/LICENCE;MIT;Yes;No;N/A;crates|github;https://github.com/ogham/rust-users;NOT_KNOWN;notice
+utf16_iter-1.0.5;https://raw.githubusercontent.com/hsivonen/utf16_iter/v1.0.5/LICENSE-APACHE;Apache-2.0 OR MIT;Yes;No;N/A;crates|github;https://github.com/hsivonen/utf16_iter;NOT_KNOWN;notice
+utf8_iter-1.0.4;https://raw.githubusercontent.com/hsivonen/utf8_iter/v1.0.4/LICENSE-APACHE;Apache-2.0 OR MIT;Yes;No;N/A;crates|github;https://github.com/hsivonen/utf8_iter;NOT_KNOWN;notice
+utf8parse-0.2.2;https://raw.githubusercontent.com/alacritty/vte/v0.2.2/LICENSE-APACHE;Apache-2.0 OR MIT;Yes;No;N/A;crates|github;https://github.com/alacritty/vte;NOT_KNOWN;notice
+value-bag-1.12.0;https://raw.githubusercontent.com/sval-rs/value-bag/v1.12.0/LICENSE-APACHE;Apache-2.0 OR MIT;Yes;No;N/A;crates|github;https://github.com/sval-rs/value-bag;NOT_KNOWN;notice
+version_check-0.9.5;https://raw.githubusercontent.com/SergioBenitez/version_check/v0.9.5/LICENSE-APACHE;MIT/Apache-2.0;Yes;No;N/A;crates|github;https://github.com/SergioBenitez/version_check;NOT_KNOWN;notice
+want-0.3.1;https://raw.githubusercontent.com/seanmonstar/want/v0.3.1/LICENSE;MIT;Yes;No;N/A;crates|github;https://github.com/seanmonstar/want;NOT_KNOWN;notice
+which-0.2.1;https://raw.githubusercontent.com/harryfei/which-rs/0.2.1/LICENSE.txt;MIT;Yes;No;N/A;crates|github;https://github.com/fangyuanziti/which-rs.git;NOT_KNOWN;notice
+winnow-0.7.2;https://raw.githubusercontent.com/winnow-rs/winnow/v0.7.2/LICENSE-MIT;MIT;Yes;No;N/A;crates|github;https://github.com/winnow-rs/winnow;NOT_KNOWN;notice
+write16-1.0.0;https://raw.githubusercontent.com/hsivonen/write16/v1.0.0/LICENSE-APACHE;Apache-2.0 OR MIT;Yes;No;N/A;crates|github;https://github.com/hsivonen/write16;NOT_KNOWN;notice
+writeable-0.5.5;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+writeable-0.6.2;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+xattr-1.6.1;https://raw.githubusercontent.com/Stebalien/xattr/v1.6.1/LICENSE-APACHE;MIT OR Apache-2.0;Yes;No;N/A;crates|github;https://github.com/Stebalien/xattr;NOT_KNOWN;notice
+yoke-0.7.5;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+yoke-0.8.1;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+yoke-derive-0.7.5;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+yoke-derive-0.8.1;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+zerocopy-0.8.38;https://raw.githubusercontent.com/google/zerocopy/v0.8.38/LICENSE-APACHE;BSD-2-Clause OR Apache-2.0 OR MIT;Yes;No;N/A;crates|github;https://github.com/google/zerocopy;NOT_KNOWN;notice
+zerocopy-derive-0.8.38;https://raw.githubusercontent.com/google/zerocopy/v0.8.38/LICENSE-APACHE;BSD-2-Clause OR Apache-2.0 OR MIT;Yes;No;N/A;crates|github;https://github.com/google/zerocopy;NOT_KNOWN;notice
+zerofrom-0.1.5;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+zerofrom-0.1.6;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+zerofrom-derive-0.1.5;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+zerofrom-derive-0.1.6;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+zerotrie-0.2.3;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+zerovec-0.10.4;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+zerovec-0.11.5;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+zerovec-derive-0.10.3;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+zerovec-derive-0.11.2;https://raw.githubusercontent.com/unicode-org/icu4x/main/LICENSE;Unicode-3.0;Yes;No;N/A;crates|github;https://github.com/unicode-org/icu4x;NOT_KNOWN;notice
+zlib-1.3.1.bcr.5;https://raw.githubusercontent.com/madler/zlib/develop/LICENSE;Other;Yes;No;N/A;bcr.bazel|github;https://github.com/madler/zlib;NOT_KNOWN;notice
+zlib-1.3.1.bcr.5;https://raw.githubusercontent.com/madler/zlib/develop/LICENSE;Other;Yes;No;N/A;bcr.bazel|github;https://github.com/madler/zlib;NOT_KNOWN;notice
+zmij-1.0.19;https://raw.githubusercontent.com/dtolnay/zmij/1.0.19/LICENSE-MIT;MIT;Yes;No;N/A;crates|github;https://github.com/dtolnay/zmij;NOT_KNOWN;notice

@@ -1,0 +1,44 @@
+{
+  "docker": {
+    "registry": {
+        "host": "",
+        "project": "",
+        "repository": ""
+    },
+    "images": {
+      "build-env": {
+        "keys": {
+          "hashicorp": "https://apt.releases.hashicorp.com/gpg"
+        },
+        "repositories": {
+          "hashicorp": "https://apt.releases.hashicorp.com"
+        },
+        "packages": {
+          "terraform": "1.11.*"
+        }
+      },
+      "build-env-debian": {
+        "keys": {
+          "hashicorp": "https://apt.releases.hashicorp.com/gpg"
+        },
+        "repositories": {
+          "hashicorp": "https://apt.releases.hashicorp.com"
+        },
+        "packages": {
+          "terraform": "1.11.*"
+        }
+      },
+      "build-env-rockylinux": {
+        "keys": {
+          "hashicorp": "https://rpm.releases.hashicorp.com/gpg"
+        },
+        "repositories": {
+          "hashicorp": "https://rpm.releases.hashicorp.com/RHEL/hashicorp.repo"
+        },
+        "packages": {
+          "terraform": "1.11.*"
+        }
+      }
+    }
+  }
+}

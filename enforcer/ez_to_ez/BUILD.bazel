@@ -1,0 +1,119 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "outbound_ez_to_ez_handler",
+    srcs = ["src/outbound.rs"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":outbound_ez_to_ez_client",
+        "//enforcer/grpc_connector",
+        "//enforcer/junction:junction_trait",
+        "//enforcer/v1:data_scope_rust",
+        "//enforcer/v1:enforcer_rust",
+        "//enforcer/v1:ez_to_ez_service_rust",
+        "//enforcer/v1:payload_rust",
+        "//simple_tonic_stream",
+        "@crates//:anyhow",
+        "@crates//:log",
+        "@crates//:rand",
+        "@crates//:tokio",
+        "@crates//:tokio-stream",
+        "@crates//:tonic",
+    ],
+)
+
+rust_library(
+    name = "inbound_ez_to_ez_handler",
+    srcs = ["src/inbound.rs"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//enforcer/error:ez_error",
+        "//enforcer/junction:junction_trait",
+        "//enforcer/v1:data_scope_rust",
+        "//enforcer/v1:enforcer_rust",
+        "//enforcer/v1:ez_to_ez_service_rust",
+        "//enforcer/v1:payload_rust",
+        "//simple_tonic_stream",
+        "@crates//:anyhow",
+        "@crates//:log",
+        "@crates//:rand",
+        "@crates//:tokio",
+        "@crates//:tokio-stream",
+        "@crates//:tonic",
+    ],
+)
+
+rust_library(
+    name = "outbound_ez_to_ez_client",
+    srcs = ["outbound_ez_to_ez_client.rs"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//enforcer/v1:enforcer_rust",
+        "@crates//:anyhow",
+        "@crates//:dyn-clone",
+        "@crates//:tokio",
+        "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "inbound_test",
+    size = "small",
+    srcs = ["test/inbound_test.rs"],
+    deps = [
+        ":inbound_ez_to_ez_handler",
+        "//enforcer/error:ez_error",
+        "//enforcer/isolate:isolate_info",
+        "//enforcer/junction:junction_test_utils",
+        "//enforcer/junction:junction_trait",
+        "//enforcer/v1:data_scope_rust",
+        "//enforcer/v1:enforcer_rust",
+        "//enforcer/v1:ez_to_ez_service_rust",
+        "//enforcer/v1:payload_rust",
+        "//simple_tonic_stream",
+        "@crates//:anyhow",
+        "@crates//:hyper-util",
+        "@crates//:tempfile",
+        "@crates//:tokio",
+        "@crates//:tokio-stream",
+        "@crates//:tonic",
+        "@crates//:tower",
+    ],
+)
+
+rust_test(
+    name = "outbound_test",
+    size = "small",
+    srcs = ["test/outbound_test.rs"],
+    deps = [
+        ":outbound_ez_to_ez_client",
+        ":outbound_ez_to_ez_handler",
+        "//enforcer/isolate:isolate_info",
+        "//enforcer/junction:junction_test_utils",
+        "//enforcer/junction:junction_trait",
+        "//enforcer/v1:data_scope_rust",
+        "//enforcer/v1:enforcer_rust",
+        "//enforcer/v1:ez_to_ez_service_rust",
+        "//enforcer/v1:payload_rust",
+        "//simple_tonic_stream",
+        "@crates//:anyhow",
+        "@crates//:tokio",
+        "@crates//:tokio-stream",
+        "@crates//:tonic",
+        "@crates//:tower",
+    ],
+)

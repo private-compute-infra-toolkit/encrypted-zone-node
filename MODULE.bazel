@@ -1,0 +1,415 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"The Encrypted Zone Bazel module"
+
+module(
+    name = "encrypted-zone",
+    version = "0.0.0",
+)
+
+bazel_dep(name = "aspect_bazel_lib", version = "2.21.0")
+bazel_dep(name = "protobuf", version = "31.1", repo_name = "com_google_protobuf")
+bazel_dep(name = "rules_buf", version = "0.5.1")
+bazel_dep(name = "rules_oci", version = "2.0.1")
+bazel_dep(name = "rules_pkg", version = "1.1.0")
+bazel_dep(name = "rules_proto", version = "7.1.0")
+bazel_dep(name = "rules_python", version = "1.5.3")
+bazel_dep(name = "rules_rust", version = "0.67.0")
+bazel_dep(name = "rules_rust_prost", version = "0.67.0")
+bazel_dep(name = "toolchains_protoc", version = "0.5.0")
+bazel_dep(name = "googleapis", version = "0.0.0-20260130-c0fcb356")
+
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+# The sysroot from Confidential Fedated Compute (CFC)
+# is used to achieve hemeticity of the LLVM toolchain.
+# Without it the non-hermetic libc from the host will be used.
+# The definition of the sysroot can be found in the repository:
+# https://github.com/google-parfait/confidential-federated-compute/tree/main/toolchains
+http_archive(
+    name = "confidential-federated-compute",
+    build_file_content = """
+filegroup(
+  name = "sysroot",
+  srcs = glob(["*/**"]),
+  visibility = ["//visibility:public"],
+)
+""",
+    sha256 = "f58c289b3ccb28895ad8ca408ac366e709037088e8b5c28aca18212adc18c31e",
+    urls = ["https://github.com/google-parfait/confidential-federated-compute/releases/download/sysroot-20250618/sysroot.tar.xz"],
+)
+
+bazel_dep(name = "toolchains_llvm", version = "1.4.0")
+
+llvm = use_extension("@toolchains_llvm//toolchain/extensions:llvm.bzl", "llvm")
+llvm.toolchain(
+    name = "cpp_toolchain",
+    llvm_version = "20.1.0",
+)
+llvm.sysroot(
+    name = "cpp_toolchain",
+    label = "@confidential-federated-compute//:sysroot",
+    targets = ["linux-x86_64"],
+)
+use_repo(llvm, "cpp_toolchain")
+
+register_toolchains("@cpp_toolchain//:all")
+
+# Configure Rust toolchain
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(
+    edition = "2021",
+    versions = ["1.87.0"],
+)
+use_repo(rust, "rust_toolchains")
+
+register_toolchains("@rust_toolchains//:all")
+
+# Custom Prost toolchain
+register_toolchains(
+    "@//toolchains:prost_toolchain",
+    "@//toolchains:proto_toolchain",
+)
+
+register_toolchains("@rust_toolchains//:all")
+
+# Create a repo for all crates used by Cargo-enabled targets, under "crates"
+crate = use_extension(
+    "@rules_rust//crate_universe:extensions.bzl",
+    "crate",
+)
+crate.spec(
+    package = "async-stream",
+    version = "0.3.5",
+)
+crate.spec(
+    package = "prost",
+    version = "0.14.1",
+)
+crate.spec(
+    default_features = False,
+    package = "prost-types",
+    version = "0.14.1",
+)
+crate.spec(
+    package = "protoc-gen-prost",
+    version = "0.5.0",
+)
+crate.annotation(
+    crate = "protoc-gen-prost",
+    gen_binaries = ["protoc-gen-prost"],
+)
+crate.spec(
+    package = "protoc-gen-tonic",
+    version = "0.5.0",
+)
+crate.annotation(
+    crate = "protoc-gen-tonic",
+    gen_binaries = ["protoc-gen-tonic"],
+)
+crate.spec(
+    features = [
+        "server",
+        "transport-io",
+    ],
+    package = "rmcp",
+    version = "0.6.1",
+)
+crate.spec(
+    features = ["derive"],
+    package = "serde",
+    version = "1.0.204",
+)
+crate.spec(
+    features = [
+        "full",
+        "tracing",
+    ],
+    package = "tokio",
+    version = "1.49.0",
+)
+crate.annotation(
+    crate = "tokio",
+    deps = ["@crates//:tracing"],
+)
+crate.spec(
+    package = "tokio-stream",
+    version = "0.1.15",
+)
+crate.spec(
+    features = ["transport"],
+    package = "tonic",
+    version = "0.14.2",
+)
+crate.spec(
+    package = "tonic-prost",
+    version = "0.14.2",
+)
+crate.spec(
+    package = "futures-core",
+    version = "0.3.30",
+)
+crate.spec(
+    package = "futures",
+    version = "0.3.30",
+)
+crate.spec(
+    package = "http",
+    version = "1.1.0",
+)
+crate.spec(
+    package = "hyper-util",
+    version = "0.1.7",
+)
+crate.spec(
+    features = ["util"],
+    package = "tower",
+    version = "0.5.0",
+)
+crate.spec(
+    package = "anyhow",
+    version = "1.0.89",
+)
+crate.spec(
+    package = "thiserror",
+    version = "1.0.64",
+)
+crate.spec(
+    package = "tokio-retry",
+    version = "0.3.0",
+)
+crate.spec(
+    package = "users",
+    version = "*",
+)
+crate.spec(
+    package = "oci-spec",
+    version = "0.7.0",
+)
+crate.spec(
+    package = "tar",
+    version = "0.4.42",
+)
+crate.spec(
+    package = "which",
+    version = "0.2.0",
+)
+crate.spec(
+    package = "tempfile",
+    version = "3.13.0",
+)
+crate.spec(
+    features = ["derive"],
+    package = "clap",
+    version = "4.5.20",
+)
+crate.spec(
+    package = "memmap2",
+    version = "0.9.2",
+)
+crate.spec(
+    package = "sha2",
+    version = "0.10.8",
+)
+crate.spec(
+    package = "rand",
+    version = "0.9.2",
+)
+crate.spec(
+    package = "libc",
+    version = "0.2.161",
+)
+crate.spec(
+    package = "serde_json",
+    version = "1.0.133",
+)
+crate.spec(
+    features = [
+        "serde",
+        "text-format",
+    ],
+    package = "prost-reflect",
+    version = "0.16.3",
+)
+crate.spec(
+    package = "log",
+    version = "0.4.22",
+)
+crate.spec(
+    package = "env_logger",
+    version = "0.10.0",
+)
+crate.spec(
+    package = "regex",
+    version = "1.10.5",
+)
+crate.spec(
+    default_features = False,
+    features = [
+        "background_rotation",
+        "console_appender",
+        "file_appender",
+        "pattern_encoder",
+    ],
+    package = "log4rs",
+    version = "1.3.0",
+)
+crate.spec(
+    package = "metrics",
+    version = "0.22.0",
+)
+crate.spec(
+    package = "metrics-util",
+    version = "0.16.0",
+)
+crate.spec(
+    package = "indexmap",
+    version = "2.7.1",
+)
+crate.spec(
+    package = "dashmap",
+    version = "6.1.0",
+)
+crate.spec(
+    package = "dyn-clone",
+    version = "1.0.19",
+)
+crate.spec(
+    features = [
+        "sched",
+        "mount",
+        "fs",
+        "process",
+        "signal",
+    ],
+    package = "nix",
+    version = "0.30.1",
+)
+crate.spec(
+    package = "interfaces",
+    version = "0.0.9",
+)
+crate.spec(
+    package = "ping",
+    version = "0.5.0",
+)
+crate.spec(
+    features = [
+        "async_tokio",
+        "html_reports",
+        "cargo_bench_support",
+        "stable",
+    ],
+    package = "criterion",
+    version = "0.5.1",
+)
+crate.spec(
+    package = "derivative",
+    version = "2.2.0",
+)
+crate.spec(
+    package = "once_cell",
+    version = "1.21.3",
+)
+crate.spec(
+    features = [
+        "metrics",
+        "trace",
+    ],
+    package = "opentelemetry",
+    version = "0.31.0",
+)
+crate.spec(
+    features = [
+        "grpc-tonic",
+        "metrics",
+        "trace",
+    ],
+    package = "opentelemetry-otlp",
+    version = "0.31.0",
+)
+crate.spec(
+    features = [
+        "metrics",
+        "rt-tokio",
+        "trace",
+    ],
+    package = "opentelemetry_sdk",
+    version = "0.31.0",
+)
+crate.spec(
+    package = "tracing",
+    version = "0.1.44",
+)
+crate.spec(
+    features = [
+        "fmt",
+        "tracing-log",
+        "env-filter",
+    ],
+    package = "tracing-subscriber",
+    version = "0.3.22",
+)
+crate.spec(
+    package = "tracing-opentelemetry",
+    version = "0.32.1",
+)
+crate.spec(
+    package = "fake-opentelemetry-collector",
+    version = "0.34.0",
+)
+crate.spec(
+    package = "serde_json",
+    version = "1.0.145",
+)
+crate.spec(
+    package = "console-subscriber",
+    version = "0.5.0",
+)
+crate.spec(
+    package = "googleapis-tonic-google-rpc",
+    version = "0.23.0",
+)
+crate.from_specs()
+use_repo(crate, "crates")
+
+oci = use_extension("@rules_oci//oci:extensions.bzl", "oci")
+oci.pull(
+    name = "distroless_cc_debian12",
+    digest = "sha256:6714977f9f02632c31377650c15d89a7efaebf43bab0f37c712c30fc01edb973",
+    image = "gcr.io/distroless/cc-debian12",
+    platforms = ["linux/amd64"],
+)
+use_repo(oci, "distroless_cc_debian12", "distroless_cc_debian12_linux_amd64")
+oci.pull(
+    name = "isolate_runtime_ubuntu_base",
+    # runtime-debian-nondebug-nonroot-amd64, Mar 28, 2025
+    digest = "sha256:acf6c2fe4179cd5da18bcf433f0b62467c40f2a42dc821c08cc4ce2f7037813b",
+    image = "gcr.io/distroless/cc-debian12",
+)
+use_repo(oci, "isolate_runtime_ubuntu_base")
+oci.pull(
+    name = "isolate_runtime_ubuntu_base_debug",
+    # runtime-debian-debug-nonroot-amd64, Jun 14, 2025
+    digest = "sha256:4da3ff6bea72f1fae66dc4aeba8545b88e300f55c13ca65e3b6bc7f15749a08b",
+    image = "gcr.io/distroless/cc-debian12",
+)
+use_repo(oci, "isolate_runtime_ubuntu_base_debug")
+
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.toolchain(
+    ignore_root_user_error = True,
+    python_version = "3.13",
+)

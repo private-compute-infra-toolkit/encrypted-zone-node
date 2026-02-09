@@ -1,0 +1,200 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
+load("@rules_buf//buf:defs.bzl", "buf_lint_test")
+load("@rules_proto//proto:defs.bzl", "proto_descriptor_set")
+load("@rules_rust_prost//:defs.bzl", "rust_prost_library")
+
+proto_library(
+    name = "data_scope_proto",
+    srcs = [
+        "data_scope_type.proto",
+        "ez_data_scope.proto",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+buf_lint_test(
+    name = "data_scope_lint",
+    size = "small",
+    config = ":buf.yaml",
+    targets = [":data_scope_proto"],
+)
+
+proto_library(
+    name = "ez_service_proto",
+    srcs = [
+        "ez_service.proto",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":data_scope_proto",
+        ":enforcer_proto",
+    ],
+)
+
+buf_lint_test(
+    name = "ez_service_lint",
+    size = "small",
+    config = ":buf.yaml",
+    targets = [":ez_service_proto"],
+)
+
+proto_descriptor_set(
+    name = "ez_service_descriptor_set",
+    visibility = ["//visibility:public"],
+    deps = [":ez_service_proto"],
+)
+
+proto_library(
+    name = "payload_proto",
+    srcs = [
+        "ez_payload.proto",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":data_scope_proto",
+    ],
+)
+
+buf_lint_test(
+    name = "payload_lint",
+    size = "small",
+    config = ":buf.yaml",
+    targets = [":payload_proto"],
+)
+
+proto_library(
+    name = "enforcer_proto",
+    srcs = [
+        "ez_external_proxy_service.proto",
+        "ez_isolate_bridge.proto",
+        "isolate_bridge.proto",
+        "isolate_data_scope.proto",
+        "isolate_ez_bridge.proto",
+        "isolate_health.proto",
+        "isolate_state.proto",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":data_scope_proto",
+        ":payload_proto",
+    ],
+)
+
+buf_lint_test(
+    name = "enforcer_lint",
+    size = "small",
+    config = ":buf.yaml",
+    targets = [":enforcer_proto"],
+)
+
+proto_descriptor_set(
+    name = "enforcer_descriptor_set",
+    visibility = ["//visibility:public"],
+    deps = [":enforcer_proto"],
+)
+
+rust_prost_library(
+    name = "data_scope_rust",
+    proto = ":data_scope_proto",
+    visibility = ["//visibility:public"],
+)
+
+rust_prost_library(
+    name = "payload_rust",
+    proto = ":payload_proto",
+    visibility = ["//visibility:public"],
+)
+
+rust_prost_library(
+    name = "ez_service_rust",
+    proto = ":ez_service_proto",
+    visibility = ["//visibility:public"],
+)
+
+rust_prost_library(
+    name = "enforcer_rust",
+    proto = ":enforcer_proto",
+    visibility = ["//visibility:public"],
+)
+
+proto_library(
+    name = "options_proto",
+    srcs = ["options.proto"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":data_scope_proto",
+        "@com_google_protobuf//:descriptor_proto",
+    ],
+)
+
+buf_lint_test(
+    name = "options_lint",
+    size = "small",
+    config = ":buf.yaml",
+    targets = [":options_proto"],
+)
+
+proto_descriptor_set(
+    name = "options_descriptor_set",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":options_proto",
+    ],
+)
+
+proto_library(
+    name = "ez_to_ez_service_proto",
+    srcs = [
+        "ez_to_ez_service.proto",
+    ],
+    deps = [
+        "//enforcer/v1:enforcer_proto",
+        "//enforcer/v1:payload_proto",
+    ],
+)
+
+buf_lint_test(
+    name = "ez_to_ez_service_lint",
+    size = "small",
+    config = ":buf.yaml",
+    targets = [":ez_to_ez_service_proto"],
+)
+
+rust_prost_library(
+    name = "ez_to_ez_service_rust",
+    proto = ":ez_to_ez_service_proto",
+    visibility = ["//visibility:public"],
+)
+
+proto_library(
+    name = "error_detail_proto",
+    srcs = ["error_detail.proto"],
+    visibility = ["//visibility:public"],
+    deps = ["@googleapis//google/rpc:error_details_proto"],
+)
+
+rust_prost_library(
+    name = "error_detail_rust",
+    proto = ":error_detail_proto",
+    visibility = ["//visibility:public"],
+)
+
+rust_prost_library(
+    name = "google_rpc_error_details_rust",
+    proto = "@googleapis//google/rpc:error_details_proto",
+    visibility = ["//visibility:public"],
+)

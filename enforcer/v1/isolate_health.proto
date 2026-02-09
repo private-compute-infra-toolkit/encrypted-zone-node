@@ -1,0 +1,77 @@
+// Copyright 2025 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package enforcer.v1;
+
+import "enforcer/v1/data_scope_type.proto";
+import "enforcer/v1/isolate_state.proto";
+
+// Specifies import path for the generated Go code used to auto-generate SDK
+// code from proto annotations.
+option go_package = "github.com/private-compute-infra-toolkit/ez/sdk/v1";
+
+// Health report of all Isolates run by the Enforcer.
+message EzIsolateHealthReport {
+  // List of all Isolates.
+  repeated EzIsolateHealth isolates = 1;
+  // Start time (in milliseconds since epoch) of the health data collection.
+  int64 start_timestamp = 2;
+  // End time (in milliseconds since epoch) of the health data collection.
+  // Having both start and end timestamps allows for a tight time bound on the
+  // health data.
+  int64 end_timestamp = 3;
+}
+
+// Health report of a single Isolate.
+message EzIsolateHealth {
+  // Status of the container run.
+  message ContainerRunStatus {
+    enum Status {
+      // The status is not specified.
+      STATUS_UNSPECIFIED = 0;
+      // The container is running.
+      STATUS_RUNNING = 1;
+      // The container is not found.
+      STATUS_NOT_FOUND = 2;
+      // The container has exited.
+      STATUS_EXITED = 3;
+      // The container has been signaled (e.g. SIGKILL).
+      STATUS_SIGNALED = 4;
+    }
+    Status status = 1;
+    // The exit code of the container.
+    optional int32 exit_code = 2;
+    // The signal that was sent to the container.
+    optional int32 signal = 3;
+  }
+  string isolate_id = 1;
+  optional IsolateState state = 2;
+  optional ContainerRunStatus container_run_status = 3;
+  // If true, the Health Manager has requested a container reset.
+  // This could be because the Isolate container was not running.
+  bool container_reset_requested = 4;
+  // All the services supported by the Isolate.
+  repeated IsolateServiceInfo services = 5;
+  // Current data scope of the Isolate. This value can change over the course of
+  // an Isolate's lifetime and only applies to Opaque Isolates.
+  optional DataScopeType current_scope = 7;
+}
+
+// Information about a service running in an Isolate.
+message IsolateServiceInfo {
+  string operator_domain = 1;
+  string service_name = 2;
+}

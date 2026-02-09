@@ -1,0 +1,57 @@
+{
+  "bundle_manifest": {
+    "manifests": [
+      {
+        "binary_manifest": {
+          "service_specs": [
+            {
+              "service_name": "Service1",
+              "method_specs": [
+                {
+                  "method_name": "Method1A",
+                  "input_scope_types": ["DATA_SCOPE_TYPE_PUBLIC"],
+                  "output_scope_types": ["DATA_SCOPE_TYPE_PUBLIC"]
+                }
+              ]
+            }
+          ],
+          "number_of_isolates": 15
+        }
+      },
+      {
+        "binary_manifest": {
+          "service_specs": [
+            {
+              "service_name": "Service2",
+              "method_specs": [
+                {
+                  "method_name": "Method2A",
+                  "input_scope_types": ["DATA_SCOPE_TYPE_DOMAIN_OWNED"],
+                  "output_scope_types": ["DATA_SCOPE_TYPE_DOMAIN_OWNED"]
+                }
+              ]
+            }
+          ],
+          "number_of_isolates": 10
+        }
+      },
+      {
+        "binary_manifest": {
+          "service_specs": [
+            {
+              "service_name": "Service3",
+              "method_specs": [
+                {
+                  "method_name": "Method3A",
+                  "input_scope_types": ["DATA_SCOPE_TYPE_USER_PRIVATE"],
+                  "output_scope_types": ["DATA_SCOPE_TYPE_USER_PRIVATE"]
+                }
+              ]
+            }
+          ],
+          "number_of_isolates": 20
+        }
+      }
+    ]
+  }
+}

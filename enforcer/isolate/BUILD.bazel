@@ -1,0 +1,180 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "isolate_info",
+    srcs = ["src/isolate_info.rs"],
+    proc_macro_deps = ["@crates//:derivative"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//enforcer/ez_to_external:external_proxy_connector_constants",
+        "@crates//:anyhow",
+        "@crates//:once_cell",
+        "@crates//:rand",
+    ],
+)
+
+rust_library(
+    name = "isolate_service_mapper",
+    srcs = ["src/isolate_service_mapper.rs"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":isolate_info",
+        "//enforcer:manifest_rust",
+        "//enforcer/ez_to_external:external_proxy_connector_constants",
+        "@crates//:anyhow",
+        "@crates//:rand",
+        "@crates//:tokio",
+    ],
+)
+
+rust_library(
+    name = "isolate_ez_service",
+    srcs = [
+        "src/isolate_ez_service.rs",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":isolate_info",
+        ":isolate_service_mapper",
+        ":shared_memory_manager",
+        "//enforcer/data_scope",
+        "//enforcer/ez_to_external:external_proxy_connector",
+        "//enforcer/ez_to_ez:outbound_ez_to_ez_client",
+        "//enforcer/junction:junction_trait",
+        "//enforcer/metrics",
+        "//enforcer/state:state_manager",
+        "//enforcer/v1:enforcer_rust",
+        "//simple_tonic_stream",
+        "@crates//:anyhow",
+        "@crates//:log",
+        "@crates//:opentelemetry",
+        "@crates//:tokio",
+        "@crates//:tokio-stream",
+        "@crates//:tonic",
+    ],
+)
+
+rust_library(
+    name = "isolate_ez_service_manager",
+    srcs = [
+        "src/isolate_ez_service_manager.rs",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":isolate_ez_service",
+        ":isolate_info",
+        ":isolate_service_mapper",
+        ":shared_memory_manager",
+        "//enforcer/container/manager:container_manager_requester",
+        "//enforcer/data_scope",
+        "//enforcer/ez_to_external:external_proxy_connector",
+        "//enforcer/ez_to_ez:outbound_ez_to_ez_client",
+        "//enforcer/junction:junction_trait",
+        "//enforcer/state:state_manager",
+        "//enforcer/v1:enforcer_rust",
+        "@crates//:dashmap",
+        "@crates//:log",
+        "@crates//:tokio",
+        "@crates//:tokio-stream",
+        "@crates//:tonic",
+    ],
+)
+
+rust_library(
+    name = "shared_memory_manager",
+    srcs = ["src/shared_mem_manager.rs"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":isolate_info",
+        "//enforcer/container/manager:container_manager_request",
+        "//enforcer/container/manager:container_manager_requester",
+        "//enforcer/v1:enforcer_rust",
+        "@crates//:anyhow",
+        "@crates//:dashmap",
+        "@crates//:rand",
+        "@crates//:thiserror",
+        "@crates//:tokio",
+        "@crates//:tonic",
+    ],
+)
+
+rust_library(
+    name = "isolate_test_utils",
+    testonly = True,
+    srcs = ["test_utils.rs"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//enforcer/error:ez_error",
+        "//enforcer/isolate:isolate_info",
+        "//enforcer/v1:enforcer_rust",
+        "//simple_tonic_stream",
+        "@crates//:anyhow",
+        "@crates//:dyn-clone",
+        "@crates//:tokio",
+        "@crates//:tokio-stream",
+        "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "isolate_service_mapper_test",
+    size = "small",
+    srcs = ["test/isolate_service_mapper_test.rs"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":isolate_info",
+        ":isolate_service_mapper",
+        "//enforcer:manifest_rust",
+        "//enforcer/ez_to_external:external_proxy_connector_constants",
+        "//enforcer/v1:enforcer_rust",
+        "@crates//:tokio",
+    ],
+)
+
+rust_test(
+    name = "isolate_ez_service_test",
+    size = "small",
+    srcs = ["test/isolate_ez_service_test.rs"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":isolate_ez_service",
+        ":isolate_info",
+        ":isolate_service_mapper",
+        ":shared_memory_manager",
+        "//enforcer:manifest_rust",
+        "//enforcer/container/manager:container_manager_request",
+        "//enforcer/container/manager:container_manager_requester",
+        "//enforcer/data_scope",
+        "//enforcer/ez_to_external:external_proxy_connector",
+        "//enforcer/ez_to_external:external_proxy_connector_constants",
+        "//enforcer/ez_to_ez:outbound_ez_to_ez_client",
+        "//enforcer/isolate:isolate_test_utils",
+        "//enforcer/junction:junction_test_utils",
+        "//enforcer/junction:junction_trait",
+        "//enforcer/state:state_manager",
+        "//enforcer/v1:data_scope_rust",
+        "//enforcer/v1:enforcer_rust",
+        "//enforcer/v1:payload_rust",
+        "@crates//:anyhow",
+        "@crates//:hyper-util",
+        "@crates//:log",
+        "@crates//:tokio",
+        "@crates//:tokio-stream",
+        "@crates//:tonic",
+        "@crates//:tower",
+    ],
+)

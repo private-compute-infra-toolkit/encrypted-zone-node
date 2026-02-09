@@ -1,0 +1,78 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("//:build_flavors.bzl", "flavors")
+
+[
+    rust_library(
+        name = "health_manager{}".format(flavor.suffix),
+        srcs = ["src/health_manager.rs"],
+        crate_features = flavor.features,
+        crate_name = "health_manager",
+        visibility = ["//visibility:public"],
+        deps = [
+            ":health_ops",
+            "//enforcer/container/manager:container_manager_requester",
+            "//enforcer/data_scope",
+            "//enforcer/isolate:isolate_info",
+            "//enforcer/isolate:isolate_service_mapper",
+            "//enforcer/logging:logging{}".format(flavor.suffix),
+            "//enforcer/state:state_manager",
+            "//enforcer/v1:enforcer_rust",
+            "@crates//:anyhow",
+            "@crates//:log",
+            "@crates//:tokio",
+        ],
+    )
+    for flavor in flavors
+]
+
+rust_library(
+    name = "health_ops",
+    srcs = ["src/health_ops.rs"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//enforcer/container",
+        "//enforcer/container/manager:container_manager_request",
+        "//enforcer/container/manager:container_manager_requester",
+        "//enforcer/isolate:isolate_info",
+        "//enforcer/logging:logging_debug",
+        "//enforcer/v1:enforcer_rust",
+        "@crates//:anyhow",
+        "@crates//:log",
+        "@crates//:tokio",
+    ],
+)
+
+rust_test(
+    name = "health_manager_tests",
+    size = "small",
+    srcs = ["test/health_manager_tests.rs"],
+    deps = [
+        ":health_manager",
+        ":health_ops",
+        "//enforcer/container",
+        "//enforcer/container/manager:container_manager_request",
+        "//enforcer/container/manager:container_manager_requester",
+        "//enforcer/data_scope",
+        "//enforcer/isolate:isolate_info",
+        "//enforcer/isolate:isolate_service_mapper",
+        "//enforcer/logging:logging_debug",
+        "//enforcer/state:state_manager",
+        "//enforcer/v1:data_scope_rust",
+        "//enforcer/v1:enforcer_rust",
+        "@crates//:tokio",
+    ],
+)

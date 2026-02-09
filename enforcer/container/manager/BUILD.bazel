@@ -1,0 +1,171 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("//:build_flavors.bzl", "flavors")
+
+rust_library(
+    name = "container_manager_request",
+    srcs = [
+        "src/request.rs",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//enforcer/container",
+        "//enforcer/isolate:isolate_info",
+        "@crates//:anyhow",
+        "@crates//:log",
+        "@crates//:tokio",
+    ],
+)
+
+rust_library(
+    name = "container_manager_requester",
+    srcs = [
+        "src/requester.rs",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":container_manager_request",
+        "//enforcer/container",
+        "//enforcer/isolate:isolate_info",
+        "@crates//:anyhow",
+        "@crates//:log",
+        "@crates//:tokio",
+    ],
+)
+
+rust_library(
+    name = "manifest_parser",
+    srcs = ["src/manifest_parser.rs"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//enforcer:manifest_rust",
+        "//enforcer/v1:data_scope_rust",
+        "//enforcer/v1:enforcer_rust",
+        "@crates//:anyhow",
+        "@crates//:prost-reflect",
+        "@crates//:serde_json",
+        "@crates//:thiserror",
+    ],
+)
+
+[
+    rust_library(
+        name = "container_manager{}".format(flavor.suffix),
+        srcs = [
+            "src/manager.rs",
+        ],
+        crate_features = flavor.features,
+        crate_name = "container_manager",
+        proc_macro_deps = ["@crates//:derivative"],
+        visibility = ["//visibility:public"],
+        deps = [
+            ":container_manager_request",
+            ":manifest_parser",
+            "//enforcer:manifest_rust",
+            "//enforcer/container",
+            "//enforcer/container:utils",
+            "//enforcer/data_scope",
+            "//enforcer/isolate:isolate_ez_service_manager",
+            "//enforcer/isolate:isolate_info",
+            "//enforcer/isolate:isolate_service_mapper",
+            "//enforcer/isolate:shared_memory_manager",
+            "//enforcer/junction:junction_trait",
+            "//enforcer/public_api:interceptor",
+            "//enforcer/state:state_manager",
+            "//enforcer/v1:data_scope_rust",
+            "@crates//:anyhow",
+            "@crates//:dashmap",
+            "@crates//:log",
+            "@crates//:nix",
+            "@crates//:tempfile",
+            "@crates//:thiserror",
+            "@crates//:tokio",
+        ],
+    )
+    for flavor in flavors
+]
+
+filegroup(
+    name = "testdata",
+    srcs = glob([
+        "test/testdata/*.json",
+        "test/testdata/*.txtpb",
+    ]),
+)
+
+rust_test(
+    name = "manifest_parser_test",
+    size = "small",
+    srcs = ["test/manifest_parser_test.rs"],
+    data = [
+        ":testdata",
+        "//enforcer/proto:test_manifest_descriptor_set",
+    ],
+    deps = [
+        ":manifest_parser",
+        "//enforcer:manifest_rust",
+        "//enforcer/v1:data_scope_rust",
+        "@crates//:anyhow",
+        "@crates//:prost-reflect",
+    ],
+)
+
+rust_test(
+    name = "container_manager_tests",
+    size = "small",
+    srcs = [
+        "src/manager.rs",
+        "test/container_manager_tests.rs",
+    ],
+    # Add this line to enforce sequential execution
+    # This is important because we use global states
+    args = ["--test-threads=1"],
+    data = [
+        ":testdata",
+        "//enforcer/container/test_data:test_binary",
+        "//enforcer/proto:test_manifest_descriptor_set",
+    ],
+    deps = [
+        ":container_manager",
+        ":container_manager_request",
+        ":container_manager_requester",
+        "//enforcer:manifest_rust",
+        "//enforcer/container:container_custom",
+        "//enforcer/container:container_test_utils",
+        "//enforcer/data_scope",
+        "//enforcer/isolate:isolate_ez_service_manager",
+        "//enforcer/isolate:isolate_info",
+        "//enforcer/isolate:isolate_service_mapper",
+        "//enforcer/isolate:shared_memory_manager",
+        "//enforcer/junction:junction_test_utils",
+        "//enforcer/junction:junction_trait",
+        "//enforcer/public_api:interceptor",
+        "//enforcer/state:state_manager",
+        "//enforcer/v1:data_scope_rust",
+        "//enforcer/v1:enforcer_rust",
+        "//enforcer/v1:ez_service_rust",
+        "//enforcer/v1:payload_rust",
+        "//simple_tonic_stream",
+        "@crates//:anyhow",
+        "@crates//:dashmap",
+        "@crates//:hyper-util",
+        "@crates//:rand",
+        "@crates//:tokio",
+        "@crates//:tokio-stream",
+        "@crates//:tonic",
+        "@crates//:tower",
+    ],
+)

@@ -1,0 +1,62 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package enforcer.v1;
+
+option go_package = "github.com/private-compute-infra-toolkit/ez/sdk/v1";
+
+// Details about EZ Errors. This will be propagated in grpc.rpc.Status.details
+// along with grpc.rpc.Status.
+message EzErrorDetail {
+  // Identifies which layer caused the error.
+  enum ErrorSource {
+    // Error source couldn't be determined.
+    ERROR_SOURCE_UNSPECIFIED = 0;
+    // The Policy Enforcer. This can involve policy errors or internal errors.
+    ERROR_SOURCE_ENFORCER = 1;
+    // The Isolate binary. If error comes from an Opaque Isolate having private
+    // data, the error will be redacted to prevent data leakage. This error source
+    // also covers errors coming from EZ SDKs.
+    ERROR_SOURCE_ISOLATE = 2;
+    // The Proxy layer between components (accessed in Enforcer via
+    // EzExternalProxyService).
+    ERROR_SOURCE_PROXY = 3;
+    // The Enforcer side of IPC communication to Isolate which is part of trusted
+    // code base.
+    ERROR_SOURCE_ENFORCER_BRIDGE = 4;
+  }
+
+  // Gives the reason/type of the error.
+  enum ErrorReason {
+    // Error reason couldn't be determined.
+    ERROR_REASON_UNSPECIFIED = 0;
+    // Either the DataScope is not provided or is not supported yet by EZ.
+    ERROR_REASON_INVALID_DATA_SCOPE = 1;
+    // No Isolates available with the requested DataScope.
+    ERROR_REASON_NO_ISOLATES_WITH_REQUESTED_DATA_SCOPE = 2;
+    // Communication not allowed as it is not defined in the EzManifest.
+    ERROR_REASON_COMMUNICATION_NOT_ALLOWED = 3;
+    // The Isolate is not allowed to operate at the requested scope as per the EzManifest.
+    ERROR_REASON_DISALLOWED_BY_MANIFEST = 4;
+    // The Isolate is not allowed to emit payload with DataScope less than the current DataScope.
+    ERROR_REASON_REQUESTED_PAYLOAD_DATA_SCOPE_UNSAFE = 5;
+    // The egress is not allowed, only PUBLIC DataScope is allowed for egress.
+    ERROR_REASON_DISALLOWED_EGRESS = 6;
+  }
+
+  ErrorSource source = 1; // Identifies which layer caused the error.
+  ErrorReason error_reason = 2; // Gives the reason/type of the error.
+}
