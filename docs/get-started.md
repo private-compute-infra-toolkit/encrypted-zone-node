@@ -130,5 +130,5 @@ to see the server handle the request but the result was expected.
 
 # Feedback
 
-If you have any implementation questions or feedback on these new features, please file an issue in
+If you have any implementation questions or feedback on these new features, please [file an issue](https://github.com/private-compute-infra-toolkit/encrypted-zone-node/issues) in
 our Github repository.
