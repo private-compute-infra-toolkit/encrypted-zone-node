@@ -226,14 +226,14 @@ comprehensive list and we plan to update the list as development progresses.
 
 -   **TEE Integration:** This release does not include the fundamental capability to gather and
     exchange attestation evidence from a Trusted Execution Environment.
--   **Enhanced Sandboxing:**Improved sandboxing with additional hardening protections and other
+-   **Enhanced Sandboxing:** Improved sandboxing with additional hardening protections and other
     improvements (e.g. state reset).
--   **Dynamic Isolate Loading:**Isolate packages that can be loaded at runtime to ensure that only
+-   **Dynamic Isolate Loading:** Isolate packages that can be loaded at runtime to ensure that only
     Enforcer image is part of TEE attestation. This will avoid the explosion of TEE measurements
     with ongoing Isolate deployments.
--   **Enhanced Debugging & Metrics:**A separate debug-mode Enforcer binary and helper Ratified
+-   **Enhanced Debugging & Metrics:** A separate debug-mode Enforcer binary and helper Ratified
     Isolates that assist with debugging, metrics, tracing, etc.
--   **mTLS based EZ to EZ Communication:**Enforcer to Enforcer communication across hosts will be
+-   **mTLS based EZ to EZ Communication:** Enforcer to Enforcer communication across hosts will be
     encrypted and based on mTLS.
 
 ## License
