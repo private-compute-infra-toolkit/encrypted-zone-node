@@ -45,7 +45,7 @@ use shared_memory_manager::SharedMemManager;
 use state_manager::IsolateStateManager;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::time::{sleep, timeout, Duration};
@@ -64,15 +64,18 @@ const TEST_UNKNOWN_DOMAIN: &str = "unknown.domain";
 const TEST_UNKNOWN_SERVICE_NAME: &str = "UnknownService";
 const TEST_SOME_DOMAIN: &str = "some.domain";
 const TEST_SOME_SERVICE_NAME: &str = "some_service";
+const RATIFIED_INTERCEPTOR_DOMAIN: &str = "ratified.interceptor.domain";
+const RATIFIED_INTERCEPTOR_SERVICE: &str = "RatifiedInterceptorService";
 const TEST_INTERNAL_ROUTE_TYPE: RouteType = RouteType::Internal;
 const TEST_EXTERNAL_ROUTE_TYPE: RouteType = RouteType::External;
 const TEST_REMOTE_ROUTE_TYPE: RouteType = RouteType::Remote;
 
 // Creates a Mock Proxy Component for testing Ez-to-External external streaming calls.
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Debug, Default)]
 struct MockExternalProxy {
     call_count: Arc<AtomicUsize>,
     received_from_bridge_count: Arc<AtomicUsize>,
+    delay: Arc<Mutex<Duration>>,
 }
 
 #[tonic::async_trait]
@@ -81,8 +84,19 @@ impl ExternalProxyChannel for MockExternalProxy {
         &self,
         _: IsolateId,
         _: InvokeEzRequest,
+        timeout: Option<std::time::Duration>,
     ) -> Result<InvokeEzResponse, ExternalProxyConnectorError> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
+        if let Some(t) = timeout {
+            let delay = *self.delay.lock().unwrap();
+            if delay > t {
+                return Err(ExternalProxyConnectorError::ConnectionFailed(
+                    "Mock proxy timeout".to_string(),
+                ));
+            }
+        }
+        let delay = *self.delay.lock().unwrap();
+        sleep(delay).await;
         Ok(get_sample_invoke_ez_response())
     }
     async fn stream_proxy_external(
@@ -111,16 +125,28 @@ impl ExternalProxyChannel for MockExternalProxy {
 }
 
 // Mock for EzToEzOutboundHandler for testing remote routing.
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Debug, Default)]
 struct MockEzToEzOutboundHandler {
     call_count: Arc<AtomicUsize>,
+    delay: Arc<Mutex<Duration>>,
 }
 
 #[tonic::async_trait]
 impl OutboundEzToEzClient for MockEzToEzOutboundHandler {
-    async fn remote_invoke(&self, _request: InvokeEzRequest) -> anyhow::Result<InvokeEzResponse> {
+    async fn remote_invoke(
+        &self,
+        _request: InvokeEzRequest,
+        timeout: Option<std::time::Duration>,
+    ) -> anyhow::Result<InvokeEzResponse> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
-        // Just return an empty response for simplicity
+        if let Some(t) = timeout {
+            let delay = *self.delay.lock().unwrap();
+            if delay > t {
+                return Err(anyhow::anyhow!("Mock remote_invoke timeout"));
+            }
+        }
+        let delay = *self.delay.lock().unwrap();
+        sleep(delay).await;
         Ok(InvokeEzResponse::default())
     }
 
@@ -154,6 +180,7 @@ struct TestHarness {
     manifest_validator: ManifestValidator,
     container_manager_rx: Receiver<ContainerManagerRequest>,
     client: IsolateEzBridgeClient<Channel>,
+    interceptor: interceptor::Interceptor,
 }
 
 impl TestHarness {
@@ -163,7 +190,7 @@ impl TestHarness {
     ) -> Result<Self> {
         let mock_proxy = MockExternalProxy::default();
         let mut mock_junction = FakeJunction::default();
-        mock_junction.set_fake_isolate(Box::new(DefaultEchoIsolate::new(instruction)));
+        mock_junction.set_fake_isolate(Box::new(DefaultEchoIsolate::new(instruction, None)));
 
         let mock_ez_to_ez = MockEzToEzOutboundHandler::default();
         let service_mapper = IsolateServiceMapper::default();
@@ -179,6 +206,7 @@ impl TestHarness {
             container_manager_requester.clone(),
         );
         let shared_memory_manager = SharedMemManager::new(container_manager_requester);
+        let interceptor_instance = interceptor::Interceptor::new(service_mapper.clone());
 
         let deps = IsolateEzBridgeDependencies {
             isolate_id,
@@ -190,6 +218,7 @@ impl TestHarness {
             data_scope_requester: data_scope_requester.clone(),
             manifest_validator: manifest_validator.clone(),
             ez_to_ez_outbound_handler: Some(Box::new(mock_ez_to_ez.clone())),
+            interceptor: interceptor_instance.clone(),
         };
         let isolate_ez_bridge_service = IsolateEzBridgeService::new(deps);
         let client = spawn_test_server(isolate_ez_bridge_service).await;
@@ -205,6 +234,7 @@ impl TestHarness {
             manifest_validator,
             container_manager_rx,
             client,
+            interceptor: interceptor_instance,
         })
     }
 
@@ -1437,4 +1467,197 @@ fn get_sample_invoke_ez_response() -> InvokeEzResponse {
         }),
         ..Default::default()
     }
+}
+
+#[tokio::test]
+async fn test_unary_routes_via_interceptor() {
+    let mut harness = TestHarness::new().await.expect("Harness should start");
+    let junction_calls = harness.mock_junction.call_count.clone();
+
+    // The backend service we want to route to (interceptor)
+    let interceptor_info = IsolateServiceInfo {
+        operator_domain: RATIFIED_INTERCEPTOR_DOMAIN.to_string(),
+        service_name: RATIFIED_INTERCEPTOR_SERVICE.to_string(),
+    };
+
+    harness
+        .mapper
+        .new_binary_index(vec![interceptor_info.clone()], true)
+        .await
+        .expect("Failed to index ratified service");
+
+    harness
+        .manifest_validator
+        .add_backend_dependencies(AddBackendDependenciesRequest {
+            binary_services_index: harness.isolate_id.get_binary_services_index(),
+            dependency_index: harness
+                .mapper
+                .get_service_index(&interceptor_info)
+                .await
+                .expect("Failed to get service index"),
+        })
+        .await
+        .expect("Should be able to add backend dependency in manifest");
+
+    add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
+        .await
+        .expect("Should be able to add to DSM/RIM");
+
+    // The fake target the request will try to hit initially
+    let target_info = IsolateServiceInfo {
+        operator_domain: TEST_SOME_DOMAIN.to_string(),
+        service_name: TEST_SOME_SERVICE_NAME.to_string(),
+    };
+    harness
+        .mapper
+        .new_binary_index(vec![target_info.clone()], false)
+        .await
+        .expect("Failed to index opaque service");
+
+    let intercepting_services = manifest_proto::enforcer::InterceptingServices {
+        intercepting_operator_domain: target_info.operator_domain.clone(),
+        intercepting_service_name: target_info.service_name.clone(),
+        interceptor_operator_domain: interceptor_info.operator_domain.clone(),
+        interceptor_service_name: interceptor_info.service_name.clone(),
+        interceptor_method_for_unary: "interceptor_unary".to_string(),
+        ..Default::default()
+    };
+    harness.interceptor.add_interceptor(intercepting_services).await.unwrap();
+
+    let request = create_test_request(&target_info.operator_domain, &target_info.service_name);
+    let _response = harness.client.invoke_ez(request).await.expect("Invoke should succeed");
+
+    assert_eq!(junction_calls.load(Ordering::SeqCst), 1, "Junction should have been called");
+    let received_request =
+        harness.mock_junction.invoked_isolate_requests.lock().unwrap().last().unwrap().clone();
+    assert_eq!(
+        received_request.control_plane_metadata.unwrap().destination_method_name,
+        "interceptor_unary",
+        "Request should be rerouted to interceptor's method"
+    );
+}
+
+#[tokio::test]
+async fn unary_external_timeout_expires() {
+    let mut harness = TestHarness::new().await.expect("Harness should start");
+    let domain = format!("{}some.service", EXTERNAL_PREFIX);
+    add_backend_dependencies(
+        harness.isolate_id,
+        harness.mapper.clone(),
+        harness.manifest_validator.clone(),
+        &IsolateServiceInfo {
+            operator_domain: domain.clone(),
+            service_name: TEST_SERVICE_NAME.to_string(),
+        },
+        false,
+        TEST_EXTERNAL_ROUTE_TYPE,
+    )
+    .await
+    .expect("Failed to add backend dependency");
+    add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
+        .await
+        .expect("Should be able to add to DSM/RIM");
+
+    *harness.mock_proxy.delay.lock().unwrap() = Duration::from_millis(100);
+
+    let request = create_test_request(&domain, TEST_SERVICE_NAME);
+    let mut tonic_request = tonic::Request::new(request);
+    tonic_request.metadata_mut().insert("grpc-timeout", "10000u".parse().unwrap());
+
+    let response = harness.client.invoke_ez(tonic_request).await;
+    assert!(response.is_err());
+    assert!(response.unwrap_err().to_string().contains("Mock proxy timeout"));
+}
+
+#[tokio::test]
+async fn unary_external_timeout_success() {
+    let mut harness = TestHarness::new().await.expect("Harness should start");
+    let domain = format!("{}some.service", EXTERNAL_PREFIX);
+    add_backend_dependencies(
+        harness.isolate_id,
+        harness.mapper.clone(),
+        harness.manifest_validator.clone(),
+        &IsolateServiceInfo {
+            operator_domain: domain.clone(),
+            service_name: TEST_SERVICE_NAME.to_string(),
+        },
+        false,
+        TEST_EXTERNAL_ROUTE_TYPE,
+    )
+    .await
+    .expect("Failed to add backend dependency");
+    add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
+        .await
+        .expect("Should be able to add to DSM/RIM");
+
+    *harness.mock_proxy.delay.lock().unwrap() = Duration::from_millis(50);
+
+    let request = create_test_request(&domain, TEST_SERVICE_NAME);
+    let mut tonic_request = tonic::Request::new(request);
+    tonic_request.metadata_mut().insert("grpc-timeout", "1S".parse().unwrap());
+
+    let response = harness.client.invoke_ez(tonic_request).await;
+    assert!(response.is_ok());
+}
+
+#[tokio::test]
+async fn unary_remote_timeout_expires() {
+    let mut harness = TestHarness::new().await.expect("Harness should start");
+    add_backend_dependencies(
+        harness.isolate_id,
+        harness.mapper.clone(),
+        harness.manifest_validator.clone(),
+        &IsolateServiceInfo {
+            operator_domain: TEST_REMOTE_OPERATOR_DOMAIN.to_string(),
+            service_name: TEST_SERVICE_NAME.to_string(),
+        },
+        false,
+        TEST_REMOTE_ROUTE_TYPE,
+    )
+    .await
+    .expect("Failed to add backend dependency");
+    add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
+        .await
+        .expect("Should be able to add to DSM/RIM");
+
+    *harness.mock_ez_to_ez.delay.lock().unwrap() = Duration::from_millis(100);
+
+    let request = create_test_request(TEST_REMOTE_OPERATOR_DOMAIN, TEST_SERVICE_NAME);
+    let mut tonic_request = tonic::Request::new(request);
+    tonic_request.metadata_mut().insert("grpc-timeout", "10000u".parse().unwrap());
+
+    let response = harness.client.invoke_ez(tonic_request).await;
+    assert!(response.is_err());
+    let err_msg = response.unwrap_err().to_string();
+    assert!(err_msg.contains("Error from remote enforcer: Mock remote_invoke timeout"));
+}
+
+#[tokio::test]
+async fn unary_remote_timeout_success() {
+    let mut harness = TestHarness::new().await.expect("Harness should start");
+    add_backend_dependencies(
+        harness.isolate_id,
+        harness.mapper.clone(),
+        harness.manifest_validator.clone(),
+        &IsolateServiceInfo {
+            operator_domain: TEST_REMOTE_OPERATOR_DOMAIN.to_string(),
+            service_name: TEST_SERVICE_NAME.to_string(),
+        },
+        false,
+        TEST_REMOTE_ROUTE_TYPE,
+    )
+    .await
+    .expect("Failed to add backend dependency");
+    add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
+        .await
+        .expect("Should be able to add to DSM/RIM");
+
+    *harness.mock_ez_to_ez.delay.lock().unwrap() = Duration::from_millis(50);
+
+    let request = create_test_request(TEST_REMOTE_OPERATOR_DOMAIN, TEST_SERVICE_NAME);
+    let mut tonic_request = tonic::Request::new(request);
+    tonic_request.metadata_mut().insert("grpc-timeout", "1S".parse().unwrap());
+
+    let response = harness.client.invoke_ez(tonic_request).await;
+    assert!(response.is_ok());
 }

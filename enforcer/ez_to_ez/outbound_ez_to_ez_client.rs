@@ -21,7 +21,11 @@ use tokio::sync::mpsc::Receiver;
 #[tonic::async_trait]
 pub trait OutboundEzToEzClient: Send + Sync + DynClone {
     /// Sends a unary InvokeEzRequest to a remote enforcer and returns the response.
-    async fn remote_invoke(&self, request: InvokeEzRequest) -> Result<InvokeEzResponse>;
+    async fn remote_invoke(
+        &self,
+        request: InvokeEzRequest,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<InvokeEzResponse>;
 
     /// Establishes a streaming connection with a remote enforcer.
     async fn remote_streaming_connect(

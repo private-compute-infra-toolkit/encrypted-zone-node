@@ -30,11 +30,15 @@ use enforcer_proto::enforcer::v1::{
     PollIsolateStateResponse,
 };
 use external_proxy_connector::ExternalProxyChannel;
+use futures::stream::{Stream, StreamExt};
+use grpc_connector::try_parse_grpc_timeout;
+use interceptor::{Interceptor, RequestType};
 use isolate_info::{IsolateId, IsolateServiceInfo, Route};
 use isolate_service_mapper::IsolateServiceMapper;
 use junction_trait::Junction;
 use metrics::common::{MetricAttributes, ServiceMetrics};
 use metrics::isolate_ez_service::IsolateEzServiceMetrics;
+use metrics::observed_stream;
 use outbound_ez_to_ez_client::OutboundEzToEzClient;
 use shared_memory_manager::SharedMemManager;
 use simple_tonic_stream::SimpleStreamingWrapper;
@@ -58,8 +62,8 @@ pub struct IsolateEzBridgeDependencies {
     pub manifest_validator: ManifestValidator,
     pub data_scope_requester: DataScopeRequester,
     pub ez_to_ez_outbound_handler: Option<Box<dyn OutboundEzToEzClient>>,
+    pub interceptor: Interceptor,
 }
-
 /// Service Impl for IsolateEzBridge.
 #[derive(Debug)]
 pub struct IsolateEzBridgeService {
@@ -72,6 +76,7 @@ pub struct IsolateEzBridgeService {
     manifest_validator: ManifestValidator,
     data_scope_requester: DataScopeRequester,
     ez_to_ez_outbound_handler: Option<Box<dyn OutboundEzToEzClient>>,
+    interceptor: Interceptor,
     metrics: IsolateEzServiceMetrics,
 }
 
@@ -88,6 +93,7 @@ impl IsolateEzBridgeService {
             manifest_validator: deps.manifest_validator,
             data_scope_requester: deps.data_scope_requester,
             ez_to_ez_outbound_handler: deps.ez_to_ez_outbound_handler,
+            interceptor: deps.interceptor,
             metrics,
         }
     }
@@ -95,24 +101,35 @@ impl IsolateEzBridgeService {
 
 #[tonic::async_trait]
 impl IsolateEzBridge for IsolateEzBridgeService {
-    type StreamInvokeEzStream = ReceiverStream<Result<InvokeEzResponse, Status>>;
+    type StreamInvokeEzStream = observed_stream::ObservedResponseStream<
+        ReceiverStream<Result<InvokeEzResponse, Status>>,
+        IsolateEzServiceMetrics,
+    >;
     async fn stream_invoke_ez(
         &self,
         request: Request<Streaming<InvokeEzRequest>>,
     ) -> Result<Response<Self::StreamInvokeEzStream>, Status> {
-        let invoke_ez_request_stream: SimpleStreamingWrapper<InvokeEzRequest> =
-            request.into_inner().into();
         let (invoke_ez_response_tx, invoke_ez_response_rx) = channel(CHANNEL_SIZE);
+        let invoke_ez_response_stream = ReceiverStream::new(invoke_ez_response_rx);
+
+        let (invoke_ez_request_stream, invoke_ez_response_stream) = observed_stream::pair_deferred(
+            request.into_inner(),
+            invoke_ez_response_stream,
+            self.metrics.clone(),
+        );
 
         let stream_handler = StreamHandler::new(self, invoke_ez_response_tx);
         tokio::spawn(async move {
             stream_handler.process_invoke_ez_requests(invoke_ez_request_stream).await;
         });
-        Ok(Response::new(ReceiverStream::new(invoke_ez_response_rx)))
+        Ok(Response::new(invoke_ez_response_stream))
     }
 
     async fn invoke_ez(&self, request: Request<InvokeEzRequest>) -> InvokeEzResult {
+        let timeout = try_parse_grpc_timeout(request.metadata()).unwrap_or(None);
         let mut req = request.into_inner();
+
+        self.interceptor.replace_with_interceptor(&mut req, RequestType::Unary).await;
 
         let restrictions_enforcer = RestrictionsEnforcer {
             isolate_id: self.isolate_id,
@@ -135,9 +152,13 @@ impl IsolateEzBridge for IsolateEzBridgeService {
         let result = match route_result {
             Ok(route) => {
                 let mut result: InvokeEzResult = match route {
-                    Route::External => self.handle_external_request(req, &metric_attr).await,
-                    Route::Internal => self.handle_internal_request(req, &metric_attr).await,
-                    Route::Remote => self.handle_remote_request(req, &metric_attr).await,
+                    Route::External => {
+                        self.handle_external_request(req, &metric_attr, timeout).await
+                    }
+                    Route::Internal => {
+                        self.handle_internal_request(req, &metric_attr, timeout).await
+                    }
+                    Route::Remote => self.handle_remote_request(req, &metric_attr, timeout).await,
                     Route::Unknown => {
                         self.metrics.record_error(&metric_attr.base(), "unknown_route");
                         Err(Status::not_found(
@@ -257,6 +278,7 @@ impl IsolateEzBridgeService {
         &self,
         req: InvokeEzRequest,
         metric_attr: &MetricAttributes,
+        timeout: Option<std::time::Duration>,
     ) -> InvokeEzResult {
         log::debug!("Routing external call for isolate {}", self.isolate_id);
 
@@ -272,7 +294,7 @@ impl IsolateEzBridgeService {
         };
 
         // Forward to the request to the ExternalProxyConnector and to the proxy.
-        match connector.proxy_external(self.isolate_id, req).await {
+        match connector.proxy_external(self.isolate_id, req, timeout).await {
             Ok(response) => Ok(Response::new(response)),
             Err(e) => {
                 log::error!("External unary call failed: {}", e);
@@ -287,11 +309,12 @@ impl IsolateEzBridgeService {
         &self,
         req: InvokeEzRequest,
         metric_attr: &MetricAttributes,
+        timeout: Option<std::time::Duration>,
     ) -> InvokeEzResult {
         log::debug!("Routing internal call for isolate {}", self.isolate_id);
         let invoke_isolate_result = self
             .isolate_junction
-            .invoke_isolate(Some(self.isolate_id), convert_to_isolate_request(req), false)
+            .invoke_isolate(Some(self.isolate_id), convert_to_isolate_request(req), false, timeout)
             .await;
 
         match invoke_isolate_result {
@@ -310,6 +333,7 @@ impl IsolateEzBridgeService {
         &self,
         req: InvokeEzRequest,
         metric_attr: &MetricAttributes,
+        timeout: Option<std::time::Duration>,
     ) -> InvokeEzResult {
         log::debug!("Routing remote call for isolate {}", self.isolate_id);
         let Some(handler) = &self.ez_to_ez_outbound_handler else {
@@ -319,7 +343,7 @@ impl IsolateEzBridgeService {
             ));
         };
 
-        handler.remote_invoke(req).await.map(Response::new).map_err(|e| {
+        handler.remote_invoke(req, timeout).await.map(Response::new).map_err(|e| {
             self.metrics.record_error(&metric_attr.base(), "remote_invoke_failed");
             Status::internal(format!("Error from remote enforcer: {}", e))
         })
@@ -335,6 +359,7 @@ struct StreamHandler {
     ez_to_ez_outbound_handler: Option<Box<dyn OutboundEzToEzClient>>,
     response_tx: Sender<Result<InvokeEzResponse, Status>>,
     metrics: IsolateEzServiceMetrics,
+    interceptor: Interceptor,
 }
 
 impl StreamHandler {
@@ -358,47 +383,17 @@ impl StreamHandler {
             ez_to_ez_outbound_handler: service.ez_to_ez_outbound_handler.clone(),
             response_tx,
             metrics: service.metrics.clone(),
+            interceptor: service.interceptor.clone(),
         }
     }
-}
 
-async fn process_initial_stream_request(
-    mut first_req: InvokeEzRequest,
-    metrics: &IsolateEzServiceMetrics,
-    restrictions_enforcer: &RestrictionsEnforcer,
-) -> Result<
-    (
-        InvokeEzRequest,
-        Route,
-        metrics::common::CallTracker<IsolateEzServiceMetrics>,
-        MetricAttributes,
-    ),
-    (),
-> {
-    let route_result = restrictions_enforcer.stream_validate_invoke_ez_req(&mut first_req).await;
-
-    let route = route_result.as_ref().unwrap_or(&Route::Unknown);
-    let metric_attr = MetricAttributes::from(first_req.control_plane_metadata.as_ref())
-        .with_attribute("route_type", route.as_str_name());
-
-    match route_result {
-        Ok(route) => {
-            let call_tracker = metrics.track_call(metric_attr.base());
-            Ok((first_req, route, call_tracker, metric_attr))
-        }
-        Err(_) => {
-            metrics.record_error(&metric_attr.base(), "validation_failed");
-            Err(())
-        }
-    }
-}
-
-impl StreamHandler {
-    async fn process_invoke_ez_requests(
+    async fn process_invoke_ez_requests<S>(
         &self,
-        mut invoke_req_stream: SimpleStreamingWrapper<InvokeEzRequest>,
-    ) {
-        let Some(first_req) = invoke_req_stream.message().await else {
+        mut invoke_req_stream: observed_stream::ObservedRequestStream<S, IsolateEzServiceMetrics>,
+    ) where
+        S: Stream<Item = Result<InvokeEzRequest, Status>> + Unpin + Send + 'static,
+    {
+        let Some(mut first_req) = invoke_req_stream.next().await else {
             log::error!(
                 "Failed to receive first request in StreamInvokeEz for isolate {}",
                 self.isolate_id
@@ -407,44 +402,33 @@ impl StreamHandler {
             return;
         };
 
-        let (first_req, route, request_tracker, metric_attr) = match process_initial_stream_request(
-            first_req,
-            &self.metrics,
-            &self.restrictions_enforcer,
-        )
-        .await
-        {
-            Ok(data) => data,
-            Err(_) => return,
-        };
+        self.interceptor.replace_with_interceptor(&mut first_req, RequestType::Streaming).await;
+
+        let route_result =
+            self.restrictions_enforcer.stream_validate_invoke_ez_req(&mut first_req).await;
+
+        let is_validation_error = route_result.is_err();
+        let route = route_result.unwrap_or(Route::Unknown);
+
+        // Complete activation with determined route
+        let attributes = MetricAttributes::from(first_req.control_plane_metadata.as_ref())
+            .with_attribute("route_type", route.as_str_name());
+        invoke_req_stream.finalize_attributes(attributes);
+
+        if is_validation_error {
+            self.metrics
+                .record_error(invoke_req_stream.attributes().base().as_ref(), "validation_failed");
+        }
 
         match route {
             Route::External => {
-                self.handle_external_stream(
-                    first_req,
-                    invoke_req_stream,
-                    request_tracker,
-                    metric_attr,
-                )
-                .await;
+                self.handle_external_stream(first_req, invoke_req_stream).await;
             }
             Route::Internal => {
-                self.handle_internal_stream(
-                    first_req,
-                    invoke_req_stream,
-                    request_tracker,
-                    metric_attr,
-                )
-                .await;
+                self.handle_internal_stream(first_req, invoke_req_stream).await;
             }
             Route::Remote => {
-                self.handle_remote_stream(
-                    first_req,
-                    invoke_req_stream,
-                    request_tracker,
-                    metric_attr,
-                )
-                .await;
+                self.handle_remote_stream(first_req, invoke_req_stream).await;
             }
             Route::Unknown => {
                 self.handle_unknown_stream().await;
@@ -452,13 +436,15 @@ impl StreamHandler {
         }
     }
 
-    async fn handle_remote_stream(
+    async fn handle_remote_stream<S>(
         &self,
         first_req: InvokeEzRequest,
-        mut invoke_req_stream: SimpleStreamingWrapper<InvokeEzRequest>,
-        call_tracker: metrics::common::CallTracker<IsolateEzServiceMetrics>,
-        metric_attr: MetricAttributes,
-    ) {
+        mut invoke_req_stream: observed_stream::ObservedRequestStream<S, IsolateEzServiceMetrics>,
+    ) where
+        S: Stream<Item = Result<InvokeEzRequest, Status>> + Unpin + Send + 'static,
+    {
+        let metric_attr = invoke_req_stream.attributes().clone();
+
         let handler = match self.ez_to_ez_outbound_handler {
             Some(ref h) => h,
             None => {
@@ -495,7 +481,7 @@ impl StreamHandler {
             }
 
             // Send the rest of the requests from the stream.
-            while let Some(mut req) = invoke_req_stream.message().await {
+            while let Some(mut req) = invoke_req_stream.next().await {
                 let _timer = metrics.track_message_processing(metric_attr_req.request());
                 if restrictions_enforcer.stream_validate_invoke_ez_req(&mut req).await.is_err() {
                     log::error!("Remote enforcer request channel closed before first message.");
@@ -519,7 +505,6 @@ impl StreamHandler {
         let restrictions_enforcer = self.restrictions_enforcer.clone();
         let metrics = self.metrics.clone();
         tokio::spawn(async move {
-            let _call_tracker = call_tracker;
             while let Some(response_result) = from_outbound_rx.recv().await {
                 let _timer = metrics.track_message_processing(metric_attr.response());
                 if restrictions_enforcer
@@ -536,13 +521,15 @@ impl StreamHandler {
         });
     }
 
-    async fn handle_external_stream(
+    async fn handle_external_stream<S>(
         &self,
         first_req: InvokeEzRequest,
-        mut invoke_req_stream: SimpleStreamingWrapper<InvokeEzRequest>,
-        call_tracker: metrics::common::CallTracker<IsolateEzServiceMetrics>,
-        metric_attr: MetricAttributes,
-    ) {
+        mut invoke_req_stream: observed_stream::ObservedRequestStream<S, IsolateEzServiceMetrics>,
+    ) where
+        S: Stream<Item = Result<InvokeEzRequest, Status>> + Unpin + Send + 'static,
+    {
+        let metric_attr = invoke_req_stream.attributes().clone();
+
         log::debug!("Routing external stream for isolate {}", self.isolate_id);
 
         let connector = match get_connector(&self.external_proxy_connector, self.isolate_id) {
@@ -578,7 +565,7 @@ impl StreamHandler {
             }
 
             // Send the rest of the requests from the stream.
-            while let Some(mut req) = invoke_req_stream.message().await {
+            while let Some(mut req) = invoke_req_stream.next().await {
                 let _timer = metrics.track_message_processing(metric_attr_req.request());
                 if restrictions_enforcer.stream_validate_invoke_ez_req(&mut req).await.is_err() {
                     log::error!("Error while enforcing scopes InvokeEzRequest");
@@ -614,7 +601,6 @@ impl StreamHandler {
         let restrictions_enforcer = self.restrictions_enforcer.clone();
         let metrics = self.metrics.clone();
         tokio::spawn(async move {
-            let _call_tracker = call_tracker;
             while let Some(response) = from_connector_stream.recv().await {
                 let _timer = metrics.track_message_processing(metric_attr.response());
                 // The connector now sends InvokeEzResponse directly, with errors inside the status field.
@@ -627,13 +613,15 @@ impl StreamHandler {
         });
     }
 
-    async fn handle_internal_stream(
+    async fn handle_internal_stream<S>(
         &self,
         first_req: InvokeEzRequest,
-        mut invoke_req_stream: SimpleStreamingWrapper<InvokeEzRequest>,
-        call_tracker: metrics::common::CallTracker<IsolateEzServiceMetrics>,
-        metric_attr: MetricAttributes,
-    ) {
+        mut invoke_req_stream: observed_stream::ObservedRequestStream<S, IsolateEzServiceMetrics>,
+    ) where
+        S: Stream<Item = Result<InvokeEzRequest, Status>> + Unpin + Send + 'static,
+    {
+        let metric_attr = invoke_req_stream.attributes().clone();
+
         let junction_channel =
             self.isolate_junction.stream_invoke_isolate(Some(self.isolate_id), false).await;
         let to_junction = junction_channel.client_to_junction;
@@ -654,7 +642,7 @@ impl StreamHandler {
             }
 
             // Handle the rest of the streaming requests.
-            while let Some(mut invoke_ez_req) = invoke_req_stream.message().await {
+            while let Some(mut invoke_ez_req) = invoke_req_stream.next().await {
                 let _timer = metrics.track_message_processing(metric_attr_req.request());
                 if restrictions_enforcer
                     .stream_validate_invoke_ez_req(&mut invoke_ez_req)
@@ -674,7 +662,6 @@ impl StreamHandler {
         let restrictions_enforcer = self.restrictions_enforcer.clone();
         let metrics = self.metrics.clone();
         tokio::spawn(async move {
-            let _call_tracker = call_tracker;
             while let Some(invoke_isolate_response) = from_junction.recv().await {
                 let _timer = metrics.track_message_processing(metric_attr.response());
                 let response = invoke_isolate_response
@@ -772,7 +759,8 @@ impl RestrictionsEnforcer {
             return Err(Status::failed_precondition(err.to_string()));
         }
 
-        Ok(destination_isolate_service.get_request_route())
+        let route = destination_isolate_service.get_request_route();
+        Ok(route)
     }
 
     async fn stream_validate_invoke_ez_req(&self, req: &mut InvokeEzRequest) -> Result<Route, ()> {

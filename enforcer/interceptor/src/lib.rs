@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use anyhow::{Ok, Result};
+use enforcer_proto::enforcer::v1::InvokeEzRequest;
 use ez_service_proto::enforcer::v1::CallRequest;
 use isolate_info::IsolateServiceInfo;
 use isolate_service_mapper::IsolateServiceMapper;
@@ -21,7 +22,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// Intercepts PublicApi requests and sends them to a Ratified Isolate Service instead.
+/// Intercepts requests that implement the `TargetableRequest` trait and sends them to a Ratified
+/// Isolate Service instead.
 /// Interceptors can be configured in EzManifest.
 #[derive(Clone, Debug)]
 pub struct Interceptor {
@@ -29,6 +31,89 @@ pub struct Interceptor {
     // TODO Consider removing the RwLock on this map by doing a mutable borrow.
     interceptor_info: Arc<RwLock<HashMap<IsolateServiceInfo, RatifiedInterceptorServiceInfo>>>,
     isolate_service_mapper: IsolateServiceMapper,
+}
+
+/// Trait for requests that can be intercepted by the Interceptor.
+pub trait TargetableRequest {
+    fn operator_domain(&self) -> String;
+    fn set_operator_domain(&mut self, domain: String);
+    fn service_name(&self) -> String;
+    fn set_service_name(&mut self, name: String);
+    fn set_method_name(&mut self, name: String);
+}
+
+impl TargetableRequest for CallRequest {
+    fn operator_domain(&self) -> String {
+        self.operator_domain.clone()
+    }
+
+    fn set_operator_domain(&mut self, domain: String) {
+        self.operator_domain = domain;
+    }
+
+    fn service_name(&self) -> String {
+        self.service_name.clone()
+    }
+
+    fn set_service_name(&mut self, name: String) {
+        self.service_name = name;
+    }
+
+    fn set_method_name(&mut self, name: String) {
+        self.method_name = name;
+    }
+}
+
+impl TargetableRequest for InvokeEzRequest {
+    fn operator_domain(&self) -> String {
+        self.control_plane_metadata
+            .as_ref()
+            .map(|m| m.destination_operator_domain.clone())
+            .unwrap_or_default()
+    }
+
+    fn set_operator_domain(&mut self, domain: String) {
+        if let Some(m) = self.control_plane_metadata.as_mut() {
+            m.destination_operator_domain = domain;
+        } else {
+            self.control_plane_metadata =
+                Some(enforcer_proto::enforcer::v1::ControlPlaneMetadata {
+                    destination_operator_domain: domain,
+                    ..Default::default()
+                });
+        }
+    }
+
+    fn service_name(&self) -> String {
+        self.control_plane_metadata
+            .as_ref()
+            .map(|m| m.destination_service_name.clone())
+            .unwrap_or_default()
+    }
+
+    fn set_service_name(&mut self, name: String) {
+        if let Some(m) = self.control_plane_metadata.as_mut() {
+            m.destination_service_name = name;
+        } else {
+            self.control_plane_metadata =
+                Some(enforcer_proto::enforcer::v1::ControlPlaneMetadata {
+                    destination_service_name: name,
+                    ..Default::default()
+                });
+        }
+    }
+
+    fn set_method_name(&mut self, name: String) {
+        if let Some(m) = self.control_plane_metadata.as_mut() {
+            m.destination_method_name = name;
+        } else {
+            self.control_plane_metadata =
+                Some(enforcer_proto::enforcer::v1::ControlPlaneMetadata {
+                    destination_method_name: name,
+                    ..Default::default()
+                });
+        }
+    }
 }
 
 /// Public API grpc request type
@@ -77,14 +162,14 @@ impl Interceptor {
 
     /// Replace the service targeting fields with the interceptor if an interceptor is configured
     /// for the given service.
-    pub async fn replace_with_interceptor(
+    pub async fn replace_with_interceptor<T: TargetableRequest>(
         &self,
-        call_request: &mut CallRequest,
+        request: &mut T,
         request_type: RequestType,
     ) {
         let target_service_info = IsolateServiceInfo {
-            operator_domain: call_request.operator_domain.clone(),
-            service_name: call_request.service_name.clone(),
+            operator_domain: request.operator_domain(),
+            service_name: request.service_name(),
         };
 
         let interceptor_info_reader = self.interceptor_info.read().await;
@@ -94,13 +179,13 @@ impl Interceptor {
             return;
         };
 
-        call_request.operator_domain = interceptor_info.interceptor_operator_domain.clone();
-        call_request.service_name = interceptor_info.interceptor_service_name.clone();
+        request.set_operator_domain(interceptor_info.interceptor_operator_domain.clone());
+        request.set_service_name(interceptor_info.interceptor_service_name.clone());
 
-        call_request.method_name = match request_type {
+        request.set_method_name(match request_type {
             RequestType::Unary => interceptor_info.interceptor_method_for_unary.clone(),
             RequestType::Streaming => interceptor_info.interceptor_method_for_streaming.clone(),
-        }
+        });
     }
 
     async fn validate_intercepting_info(

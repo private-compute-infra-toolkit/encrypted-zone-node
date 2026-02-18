@@ -34,11 +34,14 @@ use prost::Message;
 use public_api::EzPublicApiService;
 use state_manager::IsolateStateManager;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio_stream::wrappers::TcpListenerStream;
+use tonic::metadata::MetadataValue;
 use tonic::transport::Server;
 use tonic::Code;
+use tonic::Request;
 
 const EZ_PUBLIC_API_RESPONSE_TEST_CHANNEL_SIZE: usize = 10;
 const OPAQUE_DOMAIN: &str = "opaque.domain";
@@ -112,6 +115,39 @@ async fn test_call_error_no_matching_isolate() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn test_call_propagates_timeout() {
+    let (port, shutdown_tx, fake_junction) = start_api_server().await;
+
+    let session_metadata = SessionMetadata { session_id: port as u64, ..Default::default() };
+
+    let valid_request = CallRequest {
+        operator_domain: "test_domain".to_string(),
+        service_name: "test_service".to_string(),
+        method_name: "test_method".to_string(),
+        session_metadata: Some(session_metadata.clone()),
+        input_params: Some(CallParameters::default()),
+        ..Default::default()
+    };
+
+    let mut request = Request::new(valid_request);
+    request.metadata_mut().insert("grpc-timeout", MetadataValue::from_static("5S"));
+
+    let _response_result = tokio::spawn(async move {
+        let mut client = EzPublicApiClient::connect(format!("http://localhost:{}", port))
+            .await
+            .expect("failed to connect to EzPublicApi");
+        client.call(request).await
+    })
+    .await
+    .unwrap();
+
+    let _ = shutdown_tx.send(());
+
+    let captured_timeout = fake_junction.last_timeout.lock().unwrap();
+    assert_eq!(*captured_timeout, Some(Duration::from_secs(5)));
 }
 
 #[tokio::test]

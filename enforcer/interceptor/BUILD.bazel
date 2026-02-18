@@ -1,0 +1,46 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "interceptor",
+    srcs = ["src/lib.rs"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//enforcer:manifest_rust",
+        "//enforcer/isolate:isolate_info",
+        "//enforcer/isolate:isolate_service_mapper",
+        "//enforcer/v1:enforcer_rust",
+        "//enforcer/v1:ez_service_rust",
+        "@crates//:anyhow",
+        "@crates//:tokio",
+    ],
+)
+
+rust_test(
+    name = "interceptor_test",
+    size = "small",
+    srcs = ["test/interceptor_test.rs"],
+    deps = [
+        ":interceptor",
+        "//enforcer:manifest_rust",
+        "//enforcer/isolate:isolate_info",
+        "//enforcer/isolate:isolate_service_mapper",
+        "//enforcer/v1:enforcer_rust",
+        "//enforcer/v1:ez_service_rust",
+        "@crates//:anyhow",
+        "@crates//:tokio",
+    ],
+)

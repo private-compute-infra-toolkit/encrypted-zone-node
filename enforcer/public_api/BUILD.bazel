@@ -23,9 +23,10 @@ load("//:build_flavors.bzl", "flavors")
         crate_name = "public_api",
         visibility = ["//visibility:public"],
         deps = [
-            ":interceptor",
             "//enforcer:manifest_rust",
             "//enforcer/data_scope",
+            "//enforcer/grpc_connector",
+            "//enforcer/interceptor",
             "//enforcer/health:health_manager{}".format(flavor.suffix),
             "//enforcer/error:ez_error",
             "//enforcer/error:ez_error_trait",
@@ -34,6 +35,7 @@ load("//:build_flavors.bzl", "flavors")
             "//enforcer/junction",
             "//enforcer/junction:junction_trait",
             "//enforcer/metrics",
+            "//enforcer/trace_context",
             "//enforcer/v1:data_scope_rust",
             "//enforcer/v1:enforcer_rust",
             "//enforcer/v1:ez_service_rust",
@@ -57,32 +59,19 @@ load("//:build_flavors.bzl", "flavors")
     for flavor in flavors
 ]
 
-rust_library(
-    name = "interceptor",
-    srcs = ["src/interceptor.rs"],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//enforcer:manifest_rust",
-        "//enforcer/isolate:isolate_info",
-        "//enforcer/isolate:isolate_service_mapper",
-        "//enforcer/v1:ez_service_rust",
-        "@crates//:anyhow",
-        "@crates//:tokio",
-    ],
-)
-
 rust_test(
     name = "public_api_tests",
     size = "small",
     srcs = ["test/public_api_tests.rs"],
     deps = [
-        ":interceptor",
         ":public_api",
         "//enforcer:manifest_rust",
         "//enforcer/container/manager:container_manager_requester",
         "//enforcer/data_scope",
         "//enforcer/error:ez_error",
+        "//enforcer/grpc_connector",
         "//enforcer/health:health_manager",
+        "//enforcer/interceptor",
         "//enforcer/isolate:isolate_info",
         "//enforcer/isolate:isolate_service_mapper",
         "//enforcer/junction:junction_test_utils",
@@ -99,6 +88,7 @@ rust_test(
         "@crates//:async-stream",
         "@crates//:dashmap",
         "@crates//:googleapis-tonic-google-rpc",
+        "@crates//:http",
         "@crates//:hyper-util",
         "@crates//:log",
         "@crates//:prost",
@@ -110,31 +100,16 @@ rust_test(
 )
 
 rust_test(
-    name = "interceptor_test",
-    size = "small",
-    srcs = ["test/interceptor_test.rs"],
-    deps = [
-        ":interceptor",
-        "//enforcer:manifest_rust",
-        "//enforcer/isolate:isolate_info",
-        "//enforcer/isolate:isolate_service_mapper",
-        "//enforcer/v1:ez_service_rust",
-        "@crates//:anyhow",
-        "@crates//:tokio",
-    ],
-)
-
-rust_test(
     name = "public_api_metrics_test",
     size = "small",
     srcs = ["test/public_api_metrics_test.rs"],
     deps = [
-        ":interceptor",
         ":public_api",
         "//enforcer:manifest_rust",
         "//enforcer/container/manager:container_manager_requester",
         "//enforcer/data_scope",
         "//enforcer/health:health_manager",
+        "//enforcer/interceptor",
         "//enforcer/isolate:isolate_info",
         "//enforcer/isolate:isolate_service_mapper",
         "//enforcer/junction:junction_test_utils",

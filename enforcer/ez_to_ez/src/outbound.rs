@@ -96,14 +96,27 @@ impl OutboundEzToEzHandler {
 
 #[tonic::async_trait]
 impl OutboundEzToEzClient for OutboundEzToEzHandler {
-    async fn remote_invoke(&self, request: InvokeEzRequest) -> Result<InvokeEzResponse> {
+    async fn remote_invoke(
+        &self,
+        request: InvokeEzRequest,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<InvokeEzResponse> {
         // Extract metadata before the request is moved.
         let original_metadata = request.control_plane_metadata.clone();
+        log::info!(
+            "OutboundEzToEz: outbound EZ-to-EZ control_plane_metadata: {:?}",
+            original_metadata
+        );
         let ez_call_request = invoke_ez_request_to_ez_call_request(request);
         let mut client = self.ez_to_ez_api_client.clone();
 
+        let mut tonic_request = tonic::Request::new(ez_call_request);
+        if let Some(duration) = timeout {
+            tonic_request.set_timeout(duration);
+        }
+
         let response = client
-            .ez_call(ez_call_request)
+            .ez_call(tonic_request)
             .await
             .map_err(|e| anyhow!("EzToEz outbound unary call failed: {}", e))?
             .into_inner();

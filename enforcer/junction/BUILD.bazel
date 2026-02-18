@@ -64,6 +64,7 @@ rust_test(
         "//enforcer/container/manager:container_manager_request",
         "//enforcer/container/manager:container_manager_requester",
         "//enforcer/data_scope",
+        "//enforcer/error:ez_error",
         "//enforcer/isolate:isolate_info",
         "//enforcer/isolate:isolate_service_mapper",
         "//enforcer/isolate:isolate_test_utils",

@@ -42,6 +42,7 @@ pub trait ExternalProxyChannel: std::fmt::Debug + Send + Sync {
         &self,
         isolate_id: IsolateId,
         request: InvokeEzRequest,
+        timeout: Option<std::time::Duration>,
     ) -> Result<InvokeEzResponse, ExternalProxyConnectorError>;
 
     // Handles streaming requests to the external proxy.

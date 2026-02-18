@@ -573,3 +573,190 @@ async fn test_observed_stream_request_error_handling() {
     let result = request_wrapper.next().await;
     assert!(result.is_none());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_observed_stream_pair_deferred() {
+    let (mut collector, metrics, provider) = setup_common_test().await;
+
+    let (req_tx, req_rx) =
+        mpsc::channel::<Result<ez_service_proto::enforcer::v1::CallRequest, tonic::Status>>(10);
+    let (res_tx, res_rx) =
+        mpsc::channel::<Result<ez_service_proto::enforcer::v1::CallRequest, tonic::Status>>(10);
+
+    let (mut request_wrapper, response_wrapper) = metrics::observed_stream::pair_deferred(
+        ReceiverStream::new(req_rx),
+        ReceiverStream::new(res_rx),
+        metrics.clone(),
+    );
+
+    // Send a request
+    req_tx.send(Ok(CallRequest { ..Default::default() })).await.unwrap();
+
+    // Consume the request
+    let _ = request_wrapper.next().await.unwrap();
+
+    // At this point, message size should NOT be recorded yet because it is deferred
+    // We check this by verifying no metrics are exported yet for message size.
+    // Note: collector.exported_metrics waits for metrics. If none come, it might time out or return empty if we wait short enough.
+    // But ForceFlush should flush what we have.
+    let _ = provider.force_flush();
+    let exported_early = collector.exported_metrics(1, Duration::from_millis(200)).await;
+
+    // Check if we have any message size metrics
+    let size_metric_early = exported_early
+        .iter()
+        .flat_map(|b| b.metrics.iter())
+        .find(|m| m.name == "test.message_size_bytes");
+
+    if let Some(metric) = size_metric_early {
+        let count: u64 = serde_json::to_value(metric)
+            .unwrap()
+            .pointer("/data/Histogram/data_points")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|dp| dp.get("count").and_then(|c| c.as_u64())).sum())
+            .unwrap_or(0);
+        assert_eq!(
+            count, 0,
+            "Should not record message size before finalize, but found count {}",
+            count
+        );
+    }
+
+    let attrs = MetricAttributes::new("test.domain", "TestService", "TestMethod");
+    request_wrapper.finalize_attributes(attrs);
+
+    // Now verification of metrics
+    let _ = provider.force_flush();
+    let exported_late = collector.exported_metrics(1, Duration::from_secs(1)).await;
+
+    let size_metric_late = exported_late
+        .iter()
+        .flat_map(|b| b.metrics.iter())
+        .find(|m| m.name == "test.message_size_bytes")
+        .expect("Message size metric should be present after finalize");
+
+    let count: u64 = serde_json::to_value(size_metric_late)
+        .unwrap()
+        .pointer("/data/Histogram/data_points")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|dp| dp.get("count").and_then(|c| c.as_u64())).sum())
+        .unwrap_or(0);
+
+    assert!(count >= 1, "Should record message size after finalize");
+
+    // Clean up
+    drop(req_tx);
+    drop(res_tx);
+    drop(response_wrapper);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_observed_stream_pair_with_attributes() {
+    let (mut collector, metrics, provider) = setup_common_test().await;
+
+    let (req_tx, req_rx) =
+        mpsc::channel::<Result<ez_service_proto::enforcer::v1::CallRequest, tonic::Status>>(10);
+    let (res_tx, res_rx) =
+        mpsc::channel::<Result<ez_service_proto::enforcer::v1::CallRequest, tonic::Status>>(10);
+
+    let attrs = MetricAttributes::new("test.domain", "TestService", "TestMethod");
+    let (mut request_wrapper, mut response_wrapper) =
+        metrics::observed_stream::pair_with_attributes(
+            ReceiverStream::new(req_rx),
+            ReceiverStream::new(res_rx),
+            metrics.clone(),
+            attrs,
+        );
+
+    // Response stream should be unblocked IMMEDIATELY, even before request is sent
+    res_tx.send(Ok(CallRequest { ..Default::default() })).await.unwrap();
+
+    // This expects the response to be available immediately
+    let result = timeout(Duration::from_millis(200), response_wrapper.next()).await;
+    assert!(
+        result.is_ok(),
+        "Response stream should be unblocked immediately with pre-defined attributes"
+    );
+    let msg = result.unwrap().unwrap().unwrap();
+    assert_eq!(msg, CallRequest { ..Default::default() });
+
+    // Send a request and verify it's recorded immediately
+    req_tx.send(Ok(CallRequest { ..Default::default() })).await.unwrap();
+    let _ = request_wrapper.next().await.unwrap();
+
+    let _ = provider.shutdown();
+    let exported = collector.exported_metrics(1, Duration::from_secs(1)).await;
+
+    let size_metric = exported
+        .iter()
+        .flat_map(|b| b.metrics.iter())
+        .find(|m| m.name == "test.message_size_bytes")
+        .expect("Message size metric should be present");
+
+    let count: u64 = serde_json::to_value(size_metric)
+        .unwrap()
+        .pointer("/data/Histogram/data_points")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|dp| dp.get("count").and_then(|c| c.as_u64())).sum())
+        .unwrap_or(0);
+
+    assert!(count >= 2, "Should record size for both req and res (2 total)");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_observed_stream_memory_cap() {
+    let (mut collector, metrics, provider) = setup_common_test().await;
+
+    let (req_tx, req_rx) =
+        mpsc::channel::<Result<ez_service_proto::enforcer::v1::CallRequest, tonic::Status>>(2000);
+    let (res_tx, res_rx) =
+        mpsc::channel::<Result<ez_service_proto::enforcer::v1::CallRequest, tonic::Status>>(10);
+
+    let (mut request_wrapper, response_wrapper) = metrics::observed_stream::pair_deferred(
+        ReceiverStream::new(req_rx),
+        ReceiverStream::new(res_rx),
+        metrics.clone(),
+    );
+
+    // Send more than MAX_PENDING_SIZES (1000) messages
+    let max_size = 1000;
+    let overflow = 100;
+    for _ in 0..(max_size + overflow) {
+        req_tx.send(Ok(CallRequest { ..Default::default() })).await.unwrap();
+    }
+
+    // Process them to ensure they hit the buffer
+    for _ in 0..(max_size + overflow) {
+        let _ = request_wrapper.next().await.unwrap();
+    }
+
+    let attrs = MetricAttributes::new("test.domain", "TestService", "TestMethod");
+    request_wrapper.finalize_attributes(attrs);
+
+    // Verify metrics count
+    let _ = provider.force_flush();
+    let exported = collector.exported_metrics(1, Duration::from_secs(1)).await;
+
+    let size_metric = exported
+        .iter()
+        .flat_map(|b| b.metrics.iter())
+        .find(|m| m.name == "test.message_size_bytes")
+        .expect("Message size metric should be present");
+
+    let count: u64 = serde_json::to_value(size_metric)
+        .unwrap()
+        .pointer("/data/Histogram/data_points")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|dp| dp.get("count").and_then(|c| c.as_u64())).sum())
+        .unwrap_or(0);
+
+    // Expect exactly MAX_PENDING_SIZES metrics, as the overflow should have been dropped
+    assert_eq!(
+        count, max_size as u64,
+        "Should record exactly MAX_PENDING_SIZES metrics, dropping the overflow"
+    );
+
+    drop(req_tx);
+    drop(res_tx);
+    drop(response_wrapper);
+}

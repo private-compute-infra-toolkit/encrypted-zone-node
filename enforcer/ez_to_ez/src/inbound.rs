@@ -20,6 +20,7 @@ use ez_to_ez_service_proto::enforcer::v1::ez_to_ez_api_server::EzToEzApiServer;
 use ez_to_ez_service_proto::enforcer::v1::{
     ez_to_ez_api_server::EzToEzApi, EzCallRequest, EzCallResponse, EzStatus,
 };
+use grpc_connector::try_parse_grpc_timeout;
 use junction_trait::{Junction, JunctionChannels};
 use payload_proto::enforcer::v1::EzPayloadScope;
 use simple_tonic_stream::SimpleStreamingWrapper;
@@ -48,17 +49,16 @@ impl EzToEzApi for InboundEzToEzHandler {
         &self,
         request: Request<EzCallRequest>,
     ) -> Result<Response<EzCallResponse>, Status> {
-        let ez_call_request = request.into_inner();
-        let invoke_isolate_request = ez_call_request_to_invoke_isolate_request(ez_call_request);
-
+        let timeout = try_parse_grpc_timeout(request.metadata()).unwrap_or(None);
+        let invoke_isolate_request =
+            ez_call_request_to_invoke_isolate_request(request.into_inner());
         let invoke_isolate_response = self
             .isolate_junction
-            .invoke_isolate(None, invoke_isolate_request, false)
+            .invoke_isolate(None, invoke_isolate_request, false, timeout)
             .await
             .map_err(|e| e.to_tonic_status())?;
 
         let ez_call_response = invoke_isolate_response_to_ez_call_response(invoke_isolate_response);
-
         Ok(Response::new(ez_call_response))
     }
 

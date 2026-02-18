@@ -235,6 +235,7 @@ impl ExternalProxyChannel for ExternalProxyConnector {
         &self,
         isolate_id: IsolateId,
         request: InvokeEzRequest,
+        timeout: Option<std::time::Duration>,
     ) -> Result<InvokeEzResponse, ExternalProxyConnectorError> {
         if let Err(e) = validate_external_call(&request) {
             log::warn!("External call rejected by policy for isolate {}: {}", isolate_id, e);
@@ -259,7 +260,11 @@ impl ExternalProxyChannel for ExternalProxyConnector {
 
         // Translate and send unary_call request
         let proxy_request = translate_to_proxy_request(request)?;
-        let response = self.client.clone().unary_call(proxy_request).await?;
+        let mut tonic_request = tonic::Request::new(proxy_request);
+        if let Some(duration) = timeout {
+            tonic_request.set_timeout(duration);
+        }
+        let response = self.client.clone().unary_call(tonic_request).await?;
 
         // Translate the proxy's response back and return.
         translate_from_proxy_response(response.into_inner(), new_metadata)

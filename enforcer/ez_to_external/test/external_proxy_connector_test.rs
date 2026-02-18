@@ -297,7 +297,7 @@ async fn test_proxy_external_end_to_end_unary_using_uds() {
     let test_datagrams = vec![vec![10, 20, 30]];
     let request = create_generic_test_request(test_datagrams.clone());
 
-    let response_result = connector.proxy_external(isolate_id, request.clone()).await;
+    let response_result = connector.proxy_external(isolate_id, request.clone(), None).await;
 
     assert!(response_result.is_ok());
     let response = response_result.unwrap();
@@ -326,7 +326,7 @@ async fn test_proxy_external_end_to_end_unary() {
     let test_datagrams = vec![vec![10, 20, 30]];
     let request = create_generic_test_request(test_datagrams.clone());
 
-    let response_result = connector.proxy_external(isolate_id, request.clone()).await;
+    let response_result = connector.proxy_external(isolate_id, request.clone(), None).await;
 
     assert!(response_result.is_ok());
     let response = response_result.unwrap();
@@ -592,7 +592,7 @@ async fn test_proxy_external_handles_server_error_using_tcp() {
     let request = create_generic_test_request(test_datagrams.clone());
 
     // Call the proxy method. The server will respond with an error.
-    let response_result = connector.proxy_external(isolate_id, request.clone()).await;
+    let response_result = connector.proxy_external(isolate_id, request.clone(), None).await;
 
     assert!(response_result.is_err(), "The call should fail due to a server error");
     assert!(matches!(response_result, Err(ExternalProxyConnectorError::StreamFailed(_))),);
@@ -611,7 +611,7 @@ async fn test_proxy_external_handles_server_error_using_uds() {
     let request = create_generic_test_request(test_datagrams.clone());
 
     // Call the proxy method. The server will respond with an error.
-    let response_result = connector.proxy_external(isolate_id, request.clone()).await;
+    let response_result = connector.proxy_external(isolate_id, request.clone(), None).await;
 
     assert!(response_result.is_err(), "The call should fail due to a server error");
     assert!(matches!(response_result, Err(ExternalProxyConnectorError::StreamFailed(_))),);
@@ -644,7 +644,7 @@ async fn unary_returns_transformed_metadata_in_response() {
         ..Default::default()
     };
 
-    let response_result = connector.proxy_external(isolate_id, test_request).await;
+    let response_result = connector.proxy_external(isolate_id, test_request, None).await;
 
     // 3. Check that the call was successful and the response is correct
     assert!(response_result.is_ok());
@@ -675,7 +675,7 @@ async fn unary_fails_on_missing_control_plane_metadata() {
         ..Default::default()
     };
 
-    let response_result = connector.proxy_external(isolate_id, test_request).await;
+    let response_result = connector.proxy_external(isolate_id, test_request, None).await;
 
     assert!(response_result.is_err());
     // Check for the specific error type and message for missing metadata
@@ -686,6 +686,35 @@ async fn unary_fails_on_missing_control_plane_metadata() {
     } else {
         panic!("Expected TranslationError, got {:?}", response_result);
     }
+
+    let _ = shutdown_tx.send(());
+}
+
+/// Tests that the timeout is correctly propagated to the underlying connector.
+#[tokio::test]
+async fn test_external_proxy_connector_timeout_propagation() {
+    let isolate_id = IsolateId::new(BinaryServicesIndex::new(true));
+    let (server_address, shutdown_tx, _temp_dir) =
+        setup_uds_server(MockProxyService::default()).await;
+
+    let connector = build_test_connector(server_address).await.unwrap();
+    let test_datagrams = vec![vec![10, 20, 30]];
+    let request = create_generic_test_request(test_datagrams.clone());
+    let timeout = Duration::from_secs(5);
+
+    // To properly test timeout propagation, we would need to mock the inner gRPC client
+    // or have the mock service simulate a delay. Since the current MockProxyService
+    // responds immediately, we can only verify that the call completes within the timeout.
+    // A more thorough test would involve a mock service that respects the timeout.
+    let response_result = tokio::time::timeout(
+        timeout + Duration::from_secs(1), // Add a little buffer
+        connector.proxy_external(isolate_id, request.clone(), Some(timeout)),
+    )
+    .await;
+
+    assert!(response_result.is_ok(), "Call should complete within the timeout");
+    let inner_result = response_result.unwrap();
+    assert!(inner_result.is_ok(), "Inner result should be successful");
 
     let _ = shutdown_tx.send(());
 }

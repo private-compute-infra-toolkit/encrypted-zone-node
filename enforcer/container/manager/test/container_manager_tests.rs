@@ -138,6 +138,7 @@ impl TestHarness {
                 manifest_validator: manifest_validator.clone(),
                 ez_to_ez_outbound_handler: None,
                 max_decoding_message_size: MAX_DECODING_SIZE,
+                interceptor: interceptor.clone(),
             });
 
         let container_manager_args = ContainerManagerArgs {

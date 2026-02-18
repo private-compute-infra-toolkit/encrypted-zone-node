@@ -24,6 +24,7 @@ use outbound_ez_to_ez_client::OutboundEzToEzClient;
 use outbound_ez_to_ez_handler::OutboundEzToEzHandler;
 use payload_proto::enforcer::v1::EzPayloadData;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
@@ -31,8 +32,15 @@ use tokio_stream::StreamExt;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status, Streaming};
 
-#[derive(Default)]
-struct FakeEzToEzProxy {}
+struct FakeEzToEzProxy {
+    response_delay: Option<Duration>,
+}
+
+impl FakeEzToEzProxy {
+    fn new(response_delay: Option<Duration>) -> Self {
+        Self { response_delay }
+    }
+}
 
 #[tonic::async_trait]
 impl EzToEzApi for FakeEzToEzProxy {
@@ -40,6 +48,9 @@ impl EzToEzApi for FakeEzToEzProxy {
         &self,
         request: Request<EzCallRequest>,
     ) -> Result<Response<EzCallResponse>, Status> {
+        if let Some(delay) = self.response_delay {
+            tokio::time::sleep(delay).await;
+        }
         let req = request.into_inner();
         Ok(Response::new(EzCallResponse {
             payload_scope: req.payload_scope,
@@ -79,8 +90,8 @@ impl EzToEzApi for FakeEzToEzProxy {
     }
 }
 
-async fn start_fake_proxy_server() -> (u16, oneshot::Sender<()>) {
-    let fake_proxy = FakeEzToEzProxy::default();
+async fn start_fake_proxy_server(response_delay: Option<Duration>) -> (u16, oneshot::Sender<()>) {
+    let fake_proxy = FakeEzToEzProxy::new(response_delay);
     let sockaddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
     let listener = TcpListener::bind(sockaddr).await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -119,14 +130,14 @@ fn create_test_request(input_payload: &str) -> InvokeEzRequest {
 
 #[tokio::test]
 async fn test_outbound_unary_flow() {
-    let (port, shutdown_tx) = start_fake_proxy_server().await;
+    let (port, shutdown_tx) = start_fake_proxy_server(None).await;
     let server_address = format!("http://localhost:{}", port);
     let handler = OutboundEzToEzHandler::new(server_address).await.unwrap();
 
     let expected_payload = "hello unary";
     let request = create_test_request(expected_payload);
 
-    let response = handler.remote_invoke(request).await.unwrap();
+    let response = handler.remote_invoke(request, None).await.unwrap();
 
     assert_eq!(response.status.unwrap().code, 0);
     let output_payload = response.ez_response_payload.unwrap().datagrams[0].clone();
@@ -136,8 +147,39 @@ async fn test_outbound_unary_flow() {
 }
 
 #[tokio::test]
+async fn test_outbound_unary_call_timeout_propagation() {
+    // NOTE: Delay is longer than the timeout to ensure client times out.
+    let server_delay = Duration::from_millis(200);
+    let (port, shutdown_tx) = start_fake_proxy_server(Some(server_delay)).await;
+    let server_address = format!("http://localhost:{}", port);
+    let handler = OutboundEzToEzHandler::new(server_address).await.unwrap();
+
+    let request = create_test_request("timeout test");
+    let client_timeout = Duration::from_millis(100);
+
+    let handle =
+        tokio::spawn(async move { handler.remote_invoke(request, Some(client_timeout)).await });
+
+    let result = handle.await.unwrap();
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+
+    // Ideally, we should check for a specific timeout error code or message.
+    // For now, we check if the error message contains "deadline exceeded" or "timed out".
+    let err_msg = err.to_string();
+    assert!(
+        err_msg.contains("deadline exceeded") || err_msg.contains("Timeout expired"),
+        "Expected timeout error, got: {}",
+        err_msg
+    );
+
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
 async fn test_outbound_streaming_flow() {
-    let (port, shutdown_tx) = start_fake_proxy_server().await;
+    let (port, shutdown_tx) = start_fake_proxy_server(None).await;
     let server_address = format!("http://localhost:{}", port);
     let handler = OutboundEzToEzHandler::new(server_address).await.unwrap();
 

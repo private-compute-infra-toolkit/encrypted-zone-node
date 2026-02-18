@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+const MAX_PENDING_SIZES: usize = 1000;
+
 use crate::common::{CallTracker, MetricAttributes, ServiceMetrics};
 use futures::task::AtomicWaker;
 use prost::Message;
@@ -50,9 +52,78 @@ where
     TRes: Message,
     MetricAttributes: From<&'a TReq>,
 {
+    pair_common(request_stream, response_stream, metrics, None, false)
+}
+
+/// Same as pair, but defers CallTracker activation until explicit completion.
+/// Useful for late-binding attributes.
+/// You must call finalize_attributes before processing the second message
+/// to prevent losing the first message size metric.
+pub fn pair_deferred<'a, SReq, SRes, M, TReq, TRes, EReq, ERes>(
+    request_stream: SReq,
+    response_stream: SRes,
+    metrics: M,
+) -> (ObservedRequestStream<SReq, M>, ObservedResponseStream<SRes, M>)
+where
+    SReq: Stream<Item = Result<TReq, EReq>> + Unpin,
+    SRes: Stream<Item = Result<TRes, ERes>> + Unpin,
+    M: ServiceMetrics + Clone,
+    TReq: Message + 'a,
+    TRes: Message,
+    MetricAttributes: From<&'a TReq>,
+{
+    pair_common(request_stream, response_stream, metrics, None, true)
+}
+
+/// Same as pair, but initializes metrics immediately with provided attributes.
+/// This is useful when attributes (like route type) are determined before the first message is processed.
+pub fn pair_with_attributes<'a, SReq, SRes, M, TReq, TRes, EReq, ERes>(
+    request_stream: SReq,
+    response_stream: SRes,
+    metrics: M,
+    attributes: MetricAttributes,
+) -> (ObservedRequestStream<SReq, M>, ObservedResponseStream<SRes, M>)
+where
+    SReq: Stream<Item = Result<TReq, EReq>> + Unpin,
+    SRes: Stream<Item = Result<TRes, ERes>> + Unpin,
+    M: ServiceMetrics + Clone,
+    TReq: Message + 'a,
+    TRes: Message,
+    MetricAttributes: From<&'a TReq>,
+{
+    pair_common(request_stream, response_stream, metrics, Some(attributes), false)
+}
+
+fn pair_common<'a, SReq, SRes, M, TReq, TRes, EReq, ERes>(
+    request_stream: SReq,
+    response_stream: SRes,
+    metrics: M,
+    initial_attributes: Option<MetricAttributes>,
+    deferred_init: bool,
+) -> (ObservedRequestStream<SReq, M>, ObservedResponseStream<SRes, M>)
+where
+    SReq: Stream<Item = Result<TReq, EReq>> + Unpin,
+    SRes: Stream<Item = Result<TRes, ERes>> + Unpin,
+    M: ServiceMetrics + Clone,
+    TReq: Message + 'a,
+    TRes: Message,
+    MetricAttributes: From<&'a TReq>,
+{
+    let attributes_initialized = initial_attributes.is_some();
+    let cached_attributes = initial_attributes
+        .clone()
+        .unwrap_or_else(|| MetricAttributes::new("unknown", "unknown", "unknown"));
+
+    let (attr_lock, tracker_lock) = if let Some(attrs) = initial_attributes {
+        let tracker = CallTracker::new(metrics.clone(), attrs.base());
+        (Some(attrs), Some(tracker))
+    } else {
+        (None, None)
+    };
+
     let shared_state = Arc::new(SharedState {
-        attr: Mutex::new(None),
-        call_tracker: Mutex::new(None),
+        attr: Mutex::new(attr_lock),
+        call_tracker: Mutex::new(tracker_lock),
         waker: AtomicWaker::new(),
     });
 
@@ -60,16 +131,18 @@ where
         stream: request_stream,
         metrics: metrics.clone(),
         shared_state: shared_state.clone(),
-        cached_attributes: MetricAttributes::new("unknown", "unknown", "unknown"),
-        attributes_initialized: false,
+        cached_attributes: cached_attributes.clone(),
+        attributes_initialized,
+        deferred_init,
+        pending_message_sizes: Vec::new(),
     };
 
     let res_wrapper = ObservedResponseStream {
         stream: response_stream,
         metrics,
         shared_state,
-        cached_attributes: MetricAttributes::new("unknown", "unknown", "unknown"),
-        attributes_initialized: false,
+        cached_attributes,
+        attributes_initialized,
     };
 
     (req_wrapper, res_wrapper)
@@ -85,6 +158,8 @@ pub struct ObservedRequestStream<S, M: ServiceMetrics> {
     shared_state: Arc<SharedState<M>>,
     cached_attributes: MetricAttributes,
     attributes_initialized: bool,
+    deferred_init: bool,
+    pending_message_sizes: Vec<u64>,
 }
 
 impl<S, M, T, E> ObservedRequestStream<S, M>
@@ -107,7 +182,12 @@ where
             let extracted_attr = MetricAttributes::from(msg);
 
             // Create and store the CallTracker in SharedState
-            let tracker = CallTracker::new(self.metrics.clone(), extracted_attr.base());
+            // Create and store the CallTracker in SharedState
+            let tracker = if self.deferred_init {
+                CallTracker::new_deferred(self.metrics.clone(), extracted_attr.base())
+            } else {
+                CallTracker::new(self.metrics.clone(), extracted_attr.base())
+            };
             let mut tracker_guard =
                 self.shared_state.call_tracker.lock().unwrap_or_else(|e| e.into_inner());
             *tracker_guard = Some(tracker);
@@ -121,6 +201,37 @@ where
             self.cached_attributes = attr.clone();
             self.attributes_initialized = true;
         }
+    }
+    /// Completes activation of the stream metrics with the provided attributes.
+    /// Updates stored attributes and starts the CallTracker.
+    /// Must be called before the stream processes a second message
+    /// to prevent metric loss for pending messages.
+    pub fn finalize_attributes(&mut self, attributes: MetricAttributes) {
+        self.cached_attributes = attributes.clone();
+
+        let mut attr_guard = self.shared_state.attr.lock().unwrap_or_else(|e| e.into_inner());
+        *attr_guard = Some(attributes.clone());
+
+        let mut tracker_guard =
+            self.shared_state.call_tracker.lock().unwrap_or_else(|e| e.into_inner());
+
+        if let Some(tracker) = tracker_guard.as_mut() {
+            tracker.update_attributes(attributes.base());
+            tracker.activate();
+        } else {
+            // If the stream hasn't processed the first message yet, pre-create the tracker.
+            // Since we are completing activation, we create an ACTIVE tracker.
+            let tracker = CallTracker::new(self.metrics.clone(), attributes.base());
+            *tracker_guard = Some(tracker);
+        }
+        for size in self.pending_message_sizes.drain(..) {
+            self.metrics.record_message_size_bytes(attributes.request(), size);
+        }
+        self.attributes_initialized = true;
+        self.deferred_init = false;
+
+        // Wake up response stream if waiting for attributes
+        self.shared_state.waker.wake();
     }
 }
 
@@ -143,10 +254,21 @@ where
                 this.initialize_attributes(msg);
             }
 
-            this.metrics.record_message_size_bytes(
-                this.cached_attributes.request(),
-                msg.encoded_len() as u64,
-            );
+            if this.deferred_init {
+                if this.pending_message_sizes.len() < MAX_PENDING_SIZES {
+                    this.pending_message_sizes.push(msg.encoded_len() as u64);
+                } else {
+                    log::warn!(
+                        "Dropped metrics: Pending message buffer full ({}), stream attributes not finalized.",
+                        MAX_PENDING_SIZES
+                    );
+                }
+            } else {
+                this.metrics.record_message_size_bytes(
+                    this.cached_attributes.request(),
+                    msg.encoded_len() as u64,
+                );
+            }
         }
 
         match poll {

@@ -35,8 +35,9 @@ pub const UNKNOWN_ISOLATE_DOMAIN: &str = "unknown_isolate";
 #[derive(Debug, Clone, Derivative)]
 #[derivative(Default)]
 pub struct FakeJunction {
+    pub last_timeout: Arc<Mutex<Option<std::time::Duration>>>,
     #[derivative(Default(
-        value = "Box::new(DefaultEchoIsolate::new(ScopeDragInstruction::KeepSame))"
+        value = "Box::new(DefaultEchoIsolate::new(ScopeDragInstruction::KeepSame, None))"
     ))]
     pub fake_isolate: Box<dyn FakeIsolate>,
     pub connected_isolates: Arc<DashMap<IsolateId, String>>,
@@ -52,7 +53,9 @@ impl Junction for FakeJunction {
         _client_isolate_id_option: Option<IsolateId>,
         invoke_isolate_request: InvokeIsolateRequest,
         _is_from_public_api: bool,
+        timeout: Option<std::time::Duration>,
     ) -> Result<InvokeIsolateResponse, ez_error::EzError> {
+        *self.last_timeout.lock().unwrap() = timeout;
         self.call_count.fetch_add(1, Ordering::SeqCst);
         self.invoked_isolate_requests.lock().unwrap().push(invoke_isolate_request.clone());
         if invoke_isolate_request

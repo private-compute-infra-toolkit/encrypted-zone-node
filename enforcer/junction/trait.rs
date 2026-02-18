@@ -35,6 +35,7 @@ pub trait Junction: Send + Sync + DynClone {
         client_isolate_id_option: Option<IsolateId>,
         invoke_isolate_request: InvokeIsolateRequest,
         is_from_public_api: bool,
+        timeout: Option<std::time::Duration>,
     ) -> Result<InvokeIsolateResponse, EzError>;
 
     /// Start streaming connection with IsolateJunction. Returns [JunctionChannels] which holds the

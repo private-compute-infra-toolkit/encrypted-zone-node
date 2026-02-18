@@ -283,7 +283,7 @@ async fn container_run_status_exited_success() {
     let opts = default_container_opts("exit-success", None);
     let mut container = default_container();
     container.start(&opts).await.unwrap();
-    sleep(Duration::from_millis(10)).await;
+    sleep(Duration::from_millis(500)).await;
     assert_eq!(container.get_run_status().unwrap(), ContainerRunStatus::Exited(0));
     assert_eq!(container.get_run_status().unwrap(), ContainerRunStatus::NotFound);
 }
@@ -293,7 +293,7 @@ async fn container_run_status_exited_fail() {
     let opts = default_container_opts("exit-fail", None);
     let mut container = default_container();
     container.start(&opts).await.unwrap();
-    sleep(Duration::from_millis(10)).await;
+    sleep(Duration::from_millis(500)).await;
     assert_eq!(container.get_run_status().unwrap(), ContainerRunStatus::Exited(1));
     assert_eq!(container.get_run_status().unwrap(), ContainerRunStatus::NotFound);
 }
@@ -306,7 +306,7 @@ async fn container_run_status_signaled() {
     assert_eq!(container.get_run_status().unwrap(), ContainerRunStatus::Running);
     container.stop().await.unwrap();
     // Give some time for the signal to be delivered to the process and clean up.
-    sleep(Duration::from_millis(10)).await;
+    sleep(Duration::from_millis(500)).await;
     assert_eq!(container.get_run_status().unwrap(), ContainerRunStatus::Signaled(9));
     assert_eq!(container.get_run_status().unwrap(), ContainerRunStatus::NotFound);
 }

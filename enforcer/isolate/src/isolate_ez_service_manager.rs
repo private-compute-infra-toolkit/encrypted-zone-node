@@ -42,6 +42,7 @@ pub struct IsolateEzServiceManagerDependencies {
     pub manifest_validator: ManifestValidator,
     pub data_scope_requester: DataScopeRequester,
     pub max_decoding_message_size: usize,
+    pub interceptor: interceptor::Interceptor,
 }
 
 /// Manager to maintain IsolateEzService servers for each Isolate. Enforcer has
@@ -112,6 +113,7 @@ impl IsolateEzServiceManager {
             manifest_validator: self.deps.manifest_validator.clone(),
             data_scope_requester: self.deps.data_scope_requester.clone(),
             ez_to_ez_outbound_handler: self.deps.ez_to_ez_outbound_handler.clone(),
+            interceptor: self.deps.interceptor.clone(),
         };
 
         let isolate_ez_service = IsolateEzBridgeService::new(bridge_deps);

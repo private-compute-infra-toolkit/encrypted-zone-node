@@ -25,6 +25,7 @@ use ez_service_proto::enforcer::v1::{
     CallParameters, CallRequest, CallResponse, EncryptedField, GetHealthReportRequest,
     GetHealthReportResponse, SessionMetadata,
 };
+use grpc_connector::try_parse_grpc_timeout;
 use health_manager::HealthManager;
 use interceptor::{Interceptor, RequestType};
 use junction::error::IsolateStatusCode;
@@ -34,11 +35,13 @@ use metrics::observed_stream;
 use metrics::public_api::PublicApiMetrics;
 use payload_proto::enforcer::v1::EzPayloadData;
 use prost::Message;
+use std::collections::HashMap;
 use std::iter::zip;
 use tokio::sync::mpsc::Sender;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status, Streaming};
+use trace_context::get_trace_context;
 
 type CallResponseResult = Result<Response<CallResponse>, Status>;
 
@@ -85,6 +88,8 @@ impl EzPublicApi for EzPublicApiService {
     type StreamCallStream = ReceiverStream<Result<CallResponse, Status>>;
     #[tracing::instrument]
     async fn call(&self, request: Request<CallRequest>) -> CallResponseResult {
+        let timeout = try_parse_grpc_timeout(request.metadata()).unwrap_or(None);
+        let trace_context = get_trace_context(&request);
         let mut call_request = request.into_inner();
 
         let metric_attr = MetricAttributes::from(&call_request);
@@ -107,13 +112,20 @@ impl EzPublicApi for EzPublicApiService {
         let session_id = session_metadata.session_id;
 
         // Send request to IsolateJunction
-        let invoke_isolate_request = create_invoke_isolate_request(call_request, session_id);
+        let metadata_headers = trace_context;
+        let invoke_isolate_request =
+            create_invoke_isolate_request(call_request, session_id, metadata_headers);
+        log::info!(
+            "PublicApi: invoke isolate request control_plane_metadata: {:?}",
+            invoke_isolate_request.control_plane_metadata
+        );
         self.metrics.record_message_size_bytes(
             metric_attr.request(),
             invoke_isolate_request.encoded_len() as u64,
         );
+
         let invoke_isolate_response_result =
-            self.isolate_junction.invoke_isolate(None, invoke_isolate_request, true).await;
+            self.isolate_junction.invoke_isolate(None, invoke_isolate_request, true, timeout).await;
 
         match invoke_isolate_response_result {
             Ok(invoke_isolate_response) => {
@@ -136,6 +148,7 @@ impl EzPublicApi for EzPublicApiService {
         &self,
         request: Request<Streaming<CallRequest>>,
     ) -> Result<Response<Self::StreamCallStream>, Status> {
+        let trace_context = get_trace_context(&request);
         let call_request_stream = request.into_inner();
 
         let (api_to_client_response_tx, api_to_client_response_rx) =
@@ -164,6 +177,7 @@ impl EzPublicApi for EzPublicApiService {
             isolate_junction_channel.client_to_junction,
             interceptor_clone,
             self.metrics.clone(),
+            trace_context,
         ));
 
         tokio::spawn(process_invoke_isolate_response_stream(
@@ -190,6 +204,7 @@ async fn process_call_request_stream(
     isolate_junction_channel: Sender<InvokeIsolateRequest>,
     interceptor: Interceptor,
     metrics: PublicApiMetrics,
+    trace_context: HashMap<String, String>,
 ) {
     let Some(mut initial_call_request) = call_request_stream.next().await else {
         let _ = api_to_client_response_tx
@@ -210,16 +225,17 @@ async fn process_call_request_stream(
             let _ = api_to_client_response_tx.send(Err(request_validation_status)).await;
             return;
         }
-        let Some(session_metadata) = initial_call_request.session_metadata.clone() else {
+        let Some(ref session_metadata) = initial_call_request.session_metadata else {
             let _ = api_to_client_response_tx
                 .send(Err(Status::internal("failed to read session metadata")))
                 .await;
             return;
         };
+        let session_id = session_metadata.session_id;
+
         interceptor
             .replace_with_interceptor(&mut initial_call_request, RequestType::Streaming)
             .await;
-        let session_id = session_metadata.session_id;
 
         let metric_ctx = MetricContext { metrics: &metrics, metric_attr: &metric_attr };
 
@@ -228,6 +244,7 @@ async fn process_call_request_stream(
             isolate_junction_channel.clone(),
             session_id,
             metric_ctx,
+            trace_context.clone(),
         )
         .await;
 
@@ -237,7 +254,6 @@ async fn process_call_request_stream(
         }
 
         // Handle Subsequent Requests
-        let session_id = session_metadata.session_id;
         while let Some(call_request) = call_request_stream.next().await {
             let _timer = metrics.track_message_processing(metric_attr.request());
             let metric_ctx = MetricContext { metrics: &metrics, metric_attr: &metric_attr };
@@ -247,6 +263,7 @@ async fn process_call_request_stream(
                 isolate_junction_channel.clone(),
                 session_id,
                 metric_ctx,
+                trace_context.clone(),
             )
             .await;
             if send_result.code() != tonic::Code::Ok {
@@ -299,11 +316,14 @@ async fn send_to_junction(
     isolate_junction_channel: Sender<InvokeIsolateRequest>,
     session_id: u64,
     ctx: MetricContext<'_>,
+    metadata_headers: HashMap<String, String>,
 ) -> Status {
     if call_request.input_params.is_none() {
         return IsolateStatusCode::MissingField("input_params".to_string()).to_tonic_status();
     }
-    let invoke_isolate_request = create_invoke_isolate_request(call_request, session_id);
+    let invoke_isolate_request =
+        create_invoke_isolate_request(call_request, session_id, metadata_headers);
+    log::info!("Sending invoke isolate request: {:?}", invoke_isolate_request);
 
     let isolate_bridge_send_result = isolate_junction_channel.send(invoke_isolate_request).await;
     if let Err(isolate_bridge_send_error) = isolate_bridge_send_result {
@@ -316,6 +336,7 @@ async fn send_to_junction(
 fn create_invoke_isolate_request(
     call_request: CallRequest,
     session_id: u64,
+    metadata_headers: HashMap<String, String>,
 ) -> InvokeIsolateRequest {
     let (isolate_input_iscope, isolate_input) =
         convert_isolate_input_to_iscope_and_payload(call_request.input_params);
@@ -341,6 +362,7 @@ fn create_invoke_isolate_request(
             destination_ez_instance_id: String::new(),
             // No shared memory handles from remote callers.
             shared_memory_handles: Vec::new(),
+            metadata_headers,
         }),
         isolate_input_iscope,
         isolate_input,

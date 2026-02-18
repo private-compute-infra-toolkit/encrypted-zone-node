@@ -18,9 +18,12 @@ use data_scope::manifest_validator::ManifestValidator;
 use data_scope::request::AddManifestScopeRequest;
 use data_scope::{request::AddIsolateRequest, requester::DataScopeRequester};
 use data_scope_proto::enforcer::v1::DataScopeType;
+use enforcer_proto::enforcer::v1::ez_isolate_bridge_server::{
+    EzIsolateBridge, EzIsolateBridgeServer,
+};
 use enforcer_proto::enforcer::v1::{
-    ControlPlaneMetadata, EzPayloadIsolateScope, InvokeIsolateRequest, IsolateDataScope,
-    IsolateState,
+    ControlPlaneMetadata, EzPayloadIsolateScope, InvokeIsolateRequest, InvokeIsolateResponse,
+    IsolateDataScope, IsolateState,
 };
 use isolate_info::{IsolateId, IsolateServiceInfo};
 use isolate_service_mapper::IsolateServiceMapper;
@@ -37,11 +40,81 @@ use payload_proto::enforcer::v1::EzPayloadData;
 use shared_memory_manager::SharedMemManager;
 use state_manager::IsolateStateManager;
 use std::collections::{HashMap, HashSet};
+use tokio::net::UnixListener;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot;
 use tokio::time::{timeout, Duration};
+use tokio_stream::wrappers::UnixListenerStream;
+use tonic::transport::Server;
+use tonic::{Request, Response, Status, Streaming};
 
 const CLONE_ECHO_ISOLATE_SERVICE_NAME: &str = "clone_echo_isolate_service";
+
+#[derive(Clone)]
+struct MetadataCheckingIsolate {
+    expected_header_key: String,
+    expected_header_value: String,
+}
+
+#[tonic::async_trait]
+impl EzIsolateBridge for MetadataCheckingIsolate {
+    type StreamInvokeIsolateStream =
+        tokio_stream::wrappers::ReceiverStream<Result<InvokeIsolateResponse, Status>>;
+
+    async fn stream_invoke_isolate(
+        &self,
+        _request: Request<Streaming<InvokeIsolateRequest>>,
+    ) -> Result<Response<Self::StreamInvokeIsolateStream>, Status> {
+        unimplemented!()
+    }
+
+    async fn invoke_isolate(
+        &self,
+        request: Request<InvokeIsolateRequest>,
+    ) -> Result<Response<InvokeIsolateResponse>, Status> {
+        let metadata = request.metadata();
+        if let Some(val) = metadata.get(&self.expected_header_key) {
+            if val == self.expected_header_value.as_str() {
+                let response = create_echo_invoke_isolate_response(request.into_inner());
+                return Ok(Response::new(response));
+            }
+        }
+        Err(Status::invalid_argument("Missing or incorrect header"))
+    }
+
+    async fn update_isolate_state(
+        &self,
+        _request: Request<enforcer_proto::enforcer::v1::UpdateIsolateStateRequest>,
+    ) -> Result<Response<enforcer_proto::enforcer::v1::UpdateIsolateStateResponse>, Status> {
+        unimplemented!()
+    }
+}
+
+async fn start_metadata_checking_isolate_server(
+    test_isolate_id: IsolateId,
+    expected_key: String,
+    expected_value: String,
+) -> oneshot::Sender<()> {
+    let fake_isolate = MetadataCheckingIsolate {
+        expected_header_key: expected_key,
+        expected_header_value: expected_value,
+    };
+
+    let unix_listener =
+        UnixListener::bind(format!("{}{}", DEFAULT_ISOLATE_UNIX_SOCKET, test_isolate_id)).unwrap();
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+    tokio::spawn(async move {
+        Server::builder()
+            .add_service(EzIsolateBridgeServer::new(fake_isolate))
+            .serve_with_incoming_shutdown(UnixListenerStream::new(unix_listener), async {
+                shutdown_rx.await.ok();
+            })
+            .await
+    });
+    shutdown_tx
+}
 
 struct TestHarness {
     isolate_junction: IsolateJunction,
@@ -57,6 +130,7 @@ impl TestHarness {
         scope_drag_instruction: ScopeDragInstruction,
         is_ratified: bool,
         manifest_input_scope: DataScopeType,
+        delay: Option<Duration>,
     ) -> Self {
         // Using real implementations of all IsolateJunction deps (except Isolate)
         let isolate_service_mapper = IsolateServiceMapper::default();
@@ -116,7 +190,7 @@ impl TestHarness {
 
         let isolate_id = IsolateId::new(binary_services_index);
         let isolate_server_shutdown_tx =
-            start_fake_isolate_server(isolate_id, scope_drag_instruction).await;
+            start_fake_isolate_server(isolate_id, scope_drag_instruction, delay).await;
 
         // Add fake Isolate to DataScopeRequester
         // This is usually done by ContainerManager calling IsolateStateManager
@@ -153,9 +227,86 @@ impl TestHarness {
             ScopeDragInstruction::KeepUnspecified,
             false,
             DataScopeType::UserPrivate,
+            None,
         )
         .await
     }
+}
+
+#[tokio::test]
+async fn test_metadata_propagation_to_isolate() {
+    let isolate_service_mapper = IsolateServiceMapper::default();
+    let (container_manager_request_tx, _container_manager_request_rx) =
+        tokio::sync::mpsc::channel(JUNCTION_TEST_CHANNEL_SIZE);
+    let container_manager_requester = ContainerManagerRequester::new(container_manager_request_tx);
+    let shared_memory_manager = SharedMemManager::new(container_manager_requester.clone());
+    let data_scope_requester = DataScopeRequester::new(u64::MAX);
+    let manifest_validator = ManifestValidator::default();
+    let isolate_state_manager =
+        IsolateStateManager::new(data_scope_requester.clone(), container_manager_requester.clone());
+    let isolate_junction = IsolateJunction::new(
+        data_scope_requester.clone(),
+        isolate_service_mapper.clone(),
+        shared_memory_manager.clone(),
+        isolate_state_manager.clone(),
+        manifest_validator.clone(),
+    );
+
+    let isolate_service_info = IsolateServiceInfo {
+        operator_domain: ECHO_ISOLATE_OPERATOR_DOMAIN.to_string(),
+        service_name: ECHO_ISOLATE_SERVICE_NAME.to_string(),
+    };
+
+    let binary_services_index = isolate_service_mapper
+        .new_binary_index(vec![isolate_service_info.clone()], false)
+        .await
+        .expect("Should be a valid binary services index");
+
+    manifest_validator
+        .add_scope_info(AddManifestScopeRequest {
+            binary_services_index,
+            max_input_scope: DataScopeType::UserPrivate,
+            max_output_scope: DataScopeType::UserPrivate,
+        })
+        .await
+        .expect("Should succeed to add input output scopes in manifest validator");
+
+    let isolate_id = IsolateId::new(binary_services_index);
+
+    // Start our custom isolate server
+    let header_key = "x-custom-header";
+    let header_value = "custom-value";
+    let isolate_server_shutdown_tx = start_metadata_checking_isolate_server(
+        isolate_id,
+        header_key.to_string(),
+        header_value.to_string(),
+    )
+    .await;
+
+    let add_isolate_request = create_add_isolate_request(isolate_id);
+    isolate_state_manager.add_isolate(add_isolate_request).await;
+    isolate_state_manager.update_state(isolate_id, IsolateState::Ready).await.unwrap();
+
+    assert!(isolate_junction
+        .connect_isolate(isolate_id, format!("{}{}", DEFAULT_ISOLATE_UNIX_SOCKET, isolate_id),)
+        .await
+        .is_ok());
+
+    let mut invoke_isolate_request = create_random_request(&isolate_service_info);
+
+    // Add the header to metadata
+    let mut metadata_headers = HashMap::new();
+    metadata_headers.insert(header_key.to_string(), header_value.to_string());
+    if let Some(cp_metadata) = invoke_isolate_request.control_plane_metadata.as_mut() {
+        cp_metadata.metadata_headers = metadata_headers;
+    }
+
+    let invoke_result =
+        isolate_junction.invoke_isolate(None, invoke_isolate_request, false, None).await;
+
+    let _ = isolate_server_shutdown_tx.send(());
+
+    assert!(invoke_result.is_ok(), "Invoke isolate should succeed if header matches");
 }
 
 #[tokio::test]
@@ -169,7 +320,7 @@ async fn test_junction_unary_flow() {
     );
     let invoke_isolate_response = test_harness
         .isolate_junction
-        .invoke_isolate(None, invoke_isolate_request.clone(), false)
+        .invoke_isolate(None, invoke_isolate_request.clone(), false, None)
         .await
         .unwrap();
 
@@ -193,7 +344,7 @@ async fn test_junction_application_error_unary_flow() {
     );
     let invoke_isolate_response = test_harness
         .isolate_junction
-        .invoke_isolate(None, invoke_isolate_request.clone(), false)
+        .invoke_isolate(None, invoke_isolate_request.clone(), false, None)
         .await
         .unwrap();
 
@@ -221,7 +372,7 @@ async fn test_junction_unary_flow_manifest_validation_failure() {
 
     let invoke_result = test_harness
         .isolate_junction
-        .invoke_isolate(None, invoke_isolate_request.clone(), false)
+        .invoke_isolate(None, invoke_isolate_request.clone(), false, None)
         .await;
 
     // Shutdown fake Isolate server
@@ -284,6 +435,7 @@ async fn test_streaming_subsequent_request_manifest_validation_failure() {
         ScopeDragInstruction::KeepUnspecified,
         false,
         DataScopeType::DomainOwned,
+        None,
     )
     .await;
 
@@ -377,6 +529,7 @@ async fn test_isolate_retires_after_sensitive_session_and_resets_when_idle() {
         ScopeDragInstruction::KeepUnspecified,
         false,
         DataScopeType::UserPrivate,
+        None,
     )
     .await;
 
@@ -530,7 +683,7 @@ async fn test_junction_supports_multiple_services() {
     );
     let invoke_isolate_response = test_harness
         .isolate_junction
-        .invoke_isolate(None, invoke_isolate_request.clone(), false)
+        .invoke_isolate(None, invoke_isolate_request.clone(), false, None)
         .await
         .unwrap();
 
@@ -541,7 +694,7 @@ async fn test_junction_supports_multiple_services() {
 
     let clone_invoke_isolate_response = test_harness
         .isolate_junction
-        .invoke_isolate(None, clone_invoke_isolate_request.clone(), false)
+        .invoke_isolate(None, clone_invoke_isolate_request.clone(), false, None)
         .await
         .unwrap();
 
@@ -564,6 +717,7 @@ async fn test_junction_unary_flow_inflight_counter() {
         ScopeDragInstruction::KeepUnspecified,
         false,
         DataScopeType::UserPrivate,
+        None,
     )
     .await;
 
@@ -585,7 +739,7 @@ async fn test_junction_unary_flow_inflight_counter() {
     // This request should trigger retiring of the Isolate
     let _ = test_harness
         .isolate_junction
-        .invoke_isolate(None, invoke_isolate_request, false)
+        .invoke_isolate(None, invoke_isolate_request, false, None)
         .await
         .expect("Invoke Isolate should succeed");
 
@@ -609,6 +763,7 @@ async fn test_junction_streaming_flow_inflight_counter() {
         ScopeDragInstruction::KeepUnspecified,
         false,
         DataScopeType::UserPrivate,
+        None,
     )
     .await;
 
@@ -667,6 +822,7 @@ async fn test_unary_scope_enforcement_failure_public_api() {
         ScopeDragInstruction::KeepSame,
         false,
         DataScopeType::UserPrivate,
+        None,
     )
     .await;
 
@@ -678,7 +834,7 @@ async fn test_unary_scope_enforcement_failure_public_api() {
     // Make the call from the "public API". The junction should reject a response with a UserPrivate scope.
     test_harness
         .isolate_junction
-        .invoke_isolate(None, invoke_isolate_request, true)
+        .invoke_isolate(None, invoke_isolate_request, true, None)
         .await
         .expect_err("Unary request should fail");
 
@@ -697,7 +853,7 @@ async fn test_unary_scope_enforcement_failure_public_api_sensitive_scope() {
     // Make the call from the "public API". The junction should reject a response with a UserPrivate scope.
     test_harness
         .isolate_junction
-        .invoke_isolate(None, invoke_isolate_request, true)
+        .invoke_isolate(None, invoke_isolate_request, true, None)
         .await
         .expect_err("Unary request should fail");
 
@@ -713,6 +869,7 @@ async fn test_unary_scope_enforcement_failure_ratified_isolate_public_api() {
         ScopeDragInstruction::KeepSame,
         true,
         DataScopeType::UserPrivate,
+        None,
     )
     .await;
 
@@ -725,7 +882,7 @@ async fn test_unary_scope_enforcement_failure_ratified_isolate_public_api() {
     // as public API egress checks are still enforced for sensitive scopes.
     test_harness
         .isolate_junction
-        .invoke_isolate(None, invoke_isolate_request.clone(), true)
+        .invoke_isolate(None, invoke_isolate_request.clone(), true, None)
         .await
         .expect_err(
             "Ratified isolate should not be allowed to egress sensitive scope via public API",
@@ -745,6 +902,7 @@ async fn test_unary_scope_enforcement_failure_manifest_output_scope() {
         ScopeDragInstruction::IncreaseByOne,
         false,
         DataScopeType::UserPrivate,
+        None,
     )
     .await;
 
@@ -758,7 +916,7 @@ async fn test_unary_scope_enforcement_failure_manifest_output_scope() {
     // manifest's allowed max_output_scope (UserPrivate). This should be rejected.
     test_harness
         .isolate_junction
-        .invoke_isolate(None, invoke_isolate_request, false)
+        .invoke_isolate(None, invoke_isolate_request, false, None)
         .await
         .expect_err("Unary call shouldn't be allowed");
 
@@ -773,6 +931,7 @@ async fn test_unary_scope_enforcement_failure_scope_downgrade() {
         ScopeDragInstruction::DecreaseByOne,
         false,
         DataScopeType::UserPrivate,
+        None,
     )
     .await;
 
@@ -786,7 +945,7 @@ async fn test_unary_scope_enforcement_failure_scope_downgrade() {
     // The Isolate will respond with Public (DomainOwned - 1)
     test_harness
         .isolate_junction
-        .invoke_isolate(None, invoke_isolate_request, false)
+        .invoke_isolate(None, invoke_isolate_request, false, None)
         .await
         .expect_err("Unary call shouldn't be allowed");
 
@@ -829,6 +988,7 @@ async fn test_streaming_manifest_output_scope_failure_initial_request() {
         ScopeDragInstruction::IncreaseByOne,
         false,
         DataScopeType::UserPrivate,
+        None,
     )
     .await;
 
@@ -865,6 +1025,7 @@ async fn test_enforcement_failure_scope_downgrade() {
         ScopeDragInstruction::DecreaseByOne,
         false,
         DataScopeType::UserPrivate,
+        None,
     )
     .await;
 
@@ -904,6 +1065,7 @@ async fn test_unary_unspecified_scope_is_overridden() {
         ScopeDragInstruction::KeepUnspecified,
         false,
         DataScopeType::UserPrivate,
+        None,
     )
     .await;
 
@@ -916,7 +1078,7 @@ async fn test_unary_unspecified_scope_is_overridden() {
     // override it with the Isolate's current scope (UserPrivate).
     let response = test_harness
         .isolate_junction
-        .invoke_isolate(None, invoke_isolate_request, false)
+        .invoke_isolate(None, invoke_isolate_request, false, None)
         .await
         .expect("Unary call should be allowed");
 
@@ -939,6 +1101,7 @@ async fn test_streaming_unspecified_scope_is_overridden() {
         ScopeDragInstruction::KeepUnspecified,
         false,
         DataScopeType::UserPrivate,
+        None,
     )
     .await;
 
@@ -1001,6 +1164,81 @@ fn create_random_request(isolate_service_info: &IsolateServiceInfo) -> InvokeIso
         }),
         isolate_input: Some(EzPayloadData { datagrams: vec![random_request_data.to_vec()] }),
     }
+}
+
+#[tokio::test]
+async fn test_junction_unary_timeout() {
+    // Create IsolateJunction w/ fake echo Isolate that has a delay
+    let test_harness = TestHarness::new_with_arguments(
+        u64::MAX,
+        ScopeDragInstruction::KeepSame,
+        false,
+        DataScopeType::UserPrivate,
+        Some(Duration::from_secs(5)),
+    )
+    .await;
+
+    // Create InvokeIsolateRequest
+    let invoke_isolate_request = create_random_request(
+        test_harness.isolate_service_info_map.get(ECHO_ISOLATE_SERVICE_NAME).unwrap(),
+    );
+
+    // Invoke the isolate with a short timeout
+    let invoke_result = test_harness
+        .isolate_junction
+        .invoke_isolate(None, invoke_isolate_request, false, Some(Duration::from_millis(100)))
+        .await;
+
+    // Shutdown fake Isolate server
+    let _ = test_harness.isolate_server_shutdown_tx.send(());
+
+    // Assert that the call timed out
+    assert!(invoke_result.is_err());
+    let err = invoke_result.unwrap_err();
+    assert!(matches!(
+        err,
+        ez_error::EzError::Status(status) if status.code() == tonic::Code::Cancelled
+    ));
+}
+
+#[tokio::test]
+async fn test_junction_unary_timeout_internal_route() {
+    // Create IsolateJunction w/ fake echo Isolate that has a delay
+    let test_harness = TestHarness::new_with_arguments(
+        u64::MAX,
+        ScopeDragInstruction::KeepSame,
+        false,
+        DataScopeType::UserPrivate,
+        Some(Duration::from_secs(5)),
+    )
+    .await;
+
+    // Create InvokeIsolateRequest
+    let mut invoke_isolate_request = create_random_request(
+        test_harness.isolate_service_info_map.get(ECHO_ISOLATE_SERVICE_NAME).unwrap(),
+    );
+
+    // Mark the request as an internal route
+    if let Some(cp_metadata) = invoke_isolate_request.control_plane_metadata.as_mut() {
+        cp_metadata.requester_is_local = true;
+    }
+
+    // Invoke the isolate with a short timeout
+    let invoke_result = test_harness
+        .isolate_junction
+        .invoke_isolate(None, invoke_isolate_request, false, Some(Duration::from_millis(100)))
+        .await;
+
+    // Shutdown fake Isolate server
+    let _ = test_harness.isolate_server_shutdown_tx.send(());
+
+    // Assert that the call timed out
+    assert!(invoke_result.is_err());
+    let err = invoke_result.unwrap_err();
+    assert!(matches!(
+        err,
+        ez_error::EzError::Status(status) if status.code() == tonic::Code::Cancelled
+    ));
 }
 
 fn create_add_isolate_request(isolate_id: IsolateId) -> AddIsolateRequest {

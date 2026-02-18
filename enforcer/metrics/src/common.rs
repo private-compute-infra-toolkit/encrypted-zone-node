@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use enforcer_proto::enforcer::v1::ControlPlaneMetadata;
+use enforcer_proto::enforcer::v1::InvokeEzRequest;
 use ez_service_proto::enforcer::v1::CallRequest;
 use opentelemetry::{
     metrics::{Counter, Histogram, UpDownCounter},
@@ -75,27 +76,48 @@ pub struct CallTracker<T: ServiceMetrics> {
     metrics: T,
     attributes: Arc<Vec<KeyValue>>,
     start_time: Instant,
+    active: bool,
 }
 
 impl<T: ServiceMetrics> CallTracker<T> {
     pub fn new(metrics: T, attributes: Arc<Vec<KeyValue>>) -> Self {
-        if let Some(requests) = metrics.requests() {
-            requests.add(1, &attributes);
+        let mut tracker = Self::new_deferred(metrics, attributes);
+        tracker.activate();
+        tracker
+    }
+
+    pub fn new_deferred(metrics: T, attributes: Arc<Vec<KeyValue>>) -> Self {
+        Self { metrics, attributes, start_time: Instant::now(), active: false }
+    }
+
+    pub fn activate(&mut self) {
+        if !self.active {
+            if let Some(requests) = self.metrics.requests() {
+                requests.add(1, &self.attributes);
+            }
+            if let Some(active_requests) = self.metrics.active_requests() {
+                active_requests.add(1, &self.attributes);
+            }
+            self.active = true;
         }
-        if let Some(active_requests) = metrics.active_requests() {
-            active_requests.add(1, &attributes);
+    }
+
+    pub fn update_attributes(&mut self, attributes: Arc<Vec<KeyValue>>) {
+        if !self.active {
+            self.attributes = attributes;
         }
-        Self { metrics, attributes, start_time: Instant::now() }
     }
 }
 
 impl<T: ServiceMetrics> Drop for CallTracker<T> {
     fn drop(&mut self) {
-        if let Some(active_requests) = self.metrics.active_requests() {
-            active_requests.add(-1, &self.attributes);
-        }
-        if let Some(duration_sec) = self.metrics.duration_sec() {
-            duration_sec.record(self.start_time.elapsed().as_secs_f64(), &self.attributes);
+        if self.active {
+            if let Some(active_requests) = self.metrics.active_requests() {
+                active_requests.add(-1, &self.attributes);
+            }
+            if let Some(duration_sec) = self.metrics.duration_sec() {
+                duration_sec.record(self.start_time.elapsed().as_secs_f64(), &self.attributes);
+            }
         }
     }
 }
@@ -218,5 +240,11 @@ impl From<Option<&ControlPlaneMetadata>> for MetricAttributes {
         } else {
             MetricAttributes::new("", "", "")
         }
+    }
+}
+
+impl From<&InvokeEzRequest> for MetricAttributes {
+    fn from(req: &InvokeEzRequest) -> Self {
+        MetricAttributes::from(req.control_plane_metadata.as_ref())
     }
 }

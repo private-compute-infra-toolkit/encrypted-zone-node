@@ -247,6 +247,7 @@ fn main() -> anyhow::Result<()> {
             data_scope_requester: data_scope_requester.clone(),
             ez_to_ez_outbound_handler,
             max_decoding_message_size,
+            interceptor: interceptor.clone(),
         };
 
         let isolate_ez_service_mngr = IsolateEzServiceManager::new(manager_deps);

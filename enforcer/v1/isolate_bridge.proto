@@ -98,6 +98,11 @@ message ControlPlaneMetadata {
   // map the memory without further calls to the enforcer. If validation of any
   // handle fails, the entire request will fail.
   repeated string shared_memory_handles = 8;
+
+  // Propagate metadata headers for requests going in and out of Isolates.
+  // WARNING: This field should only be used for non-sensitive data or fields.
+  // TODO: b/482844871 - Sanitize metadata_headers in non-debug modes.
+  map<string, string> metadata_headers = 12;
 }
 
 // Analogous to EzPayloadScope, but with IsolateDataScope instead of

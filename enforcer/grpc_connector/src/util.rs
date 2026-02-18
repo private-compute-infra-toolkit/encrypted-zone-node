@@ -120,6 +120,9 @@ pub fn try_parse_grpc_timeout(headers: &tonic::metadata::MetadataMap) -> Result<
                 _ => anyhow::bail!("Invalid unit in grpc-timeout: {timeout_unit}"),
             }
         }
-        None => Ok(None),
+        None => {
+            log::warn!("No grpc-timeout header found");
+            Ok(None)
+        }
     }
 }

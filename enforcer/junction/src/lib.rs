@@ -37,7 +37,11 @@ use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio_retry::strategy::FixedInterval;
 use tokio_retry::Retry;
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::transport::{Channel, Endpoint, Uri};
+use tonic::{
+    metadata::MetadataValue,
+    transport::{Channel, Endpoint, Uri},
+    Request,
+};
 use tower::service_fn;
 pub mod error;
 use dashmap::DashMap;
@@ -93,6 +97,7 @@ impl Junction for IsolateJunction {
         client_isolate_id_option: Option<IsolateId>,
         mut invoke_isolate_request: InvokeIsolateRequest,
         is_from_public_api: bool,
+        timeout: Option<std::time::Duration>,
     ) -> Result<InvokeIsolateResponse, EzError> {
         let metric_attr =
             MetricAttributes::from(invoke_isolate_request.control_plane_metadata.as_ref());
@@ -132,7 +137,12 @@ impl Junction for IsolateJunction {
 
                 self.state_manager.increment_inflight_counter(destination_isolate_info.id).await;
                 let isolate_rpc_start_time = Instant::now();
-                let invoke_isolate_result = client.invoke_isolate(invoke_isolate_request).await;
+                let mut request = Request::new(invoke_isolate_request);
+                if let Some(t) = timeout {
+                    request.set_timeout(t);
+                }
+                let request = extract_and_parse_metadata_headers(request);
+                let invoke_isolate_result = client.invoke_isolate(request).await;
                 self.metrics
                     .isolate_rpc_duration_sec
                     .record(isolate_rpc_start_time.elapsed().as_secs_f64(), &metric_attr.base());
@@ -698,4 +708,23 @@ fn log_destination_unavailable_error(invoke_isolate_request: InvokeIsolateReques
         control_plane.destination_operator_domain,
         control_plane.destination_service_name
     );
+}
+
+fn extract_and_parse_metadata_headers(
+    request: Request<InvokeIsolateRequest>,
+) -> Request<InvokeIsolateRequest> {
+    let (mut metadata, extensions, message) = request.into_parts();
+
+    if let Some(control_plane_metadata) = &message.control_plane_metadata {
+        for (key, value) in &control_plane_metadata.metadata_headers {
+            if let Ok(val) = MetadataValue::try_from(value.as_str()) {
+                if let Ok(key) = key.parse::<tonic::metadata::MetadataKey<tonic::metadata::Ascii>>()
+                {
+                    metadata.insert(key, val);
+                }
+            }
+        }
+    }
+
+    Request::from_parts(metadata, extensions, message)
 }

@@ -83,11 +83,15 @@ pub enum ScopeDragInstruction {
 #[derive(Clone)]
 pub struct DefaultEchoIsolate {
     scope_drag_instruction: ScopeDragInstruction,
+    delay: Option<tokio::time::Duration>,
 }
 
 impl DefaultEchoIsolate {
-    pub fn new(scope_drag_instruction: ScopeDragInstruction) -> Self {
-        Self { scope_drag_instruction }
+    pub fn new(
+        scope_drag_instruction: ScopeDragInstruction,
+        delay: Option<tokio::time::Duration>,
+    ) -> Self {
+        Self { scope_drag_instruction, delay }
     }
 }
 
@@ -135,11 +139,15 @@ impl FakeIsolate for DefaultEchoIsolate {
         stream_call_count: Arc<AtomicUsize>,
         invoke_isolate_requests: Arc<Mutex<Vec<InvokeIsolateRequest>>>,
     ) {
+        let delay = self.delay;
         while let Some(invoke_isolate_request) = client_to_junction_rx.recv().await {
             invoke_isolate_requests.lock().unwrap().push(invoke_isolate_request.clone());
             let mut invoke_isolate_response =
                 create_echo_invoke_isolate_response(invoke_isolate_request.clone());
             adjust_scope(&self.scope_drag_instruction, &mut invoke_isolate_response);
+            if let Some(delay) = delay {
+                tokio::time::sleep(delay).await;
+            }
             let _ = junction_to_client_tx.send(Ok(invoke_isolate_response)).await;
             stream_call_count.fetch_add(1, Ordering::SeqCst);
         }
@@ -169,6 +177,7 @@ impl EzIsolateBridge for DefaultEchoIsolate {
             channel(ISOLATE_TEST_CHANNEL_SIZE);
 
         let scope_drag_instruction = self.scope_drag_instruction.clone();
+        let delay = self.delay;
         tokio::spawn(async move {
             while let Some(invoke_isolate_request) = invoke_isolate_request_receiver.message().await
             {
@@ -183,6 +192,9 @@ impl EzIsolateBridge for DefaultEchoIsolate {
                 let mut invoke_isolate_response =
                     create_echo_invoke_isolate_response(invoke_isolate_request.clone());
                 adjust_scope(&scope_drag_instruction, &mut invoke_isolate_response);
+                if let Some(delay) = delay {
+                    tokio::time::sleep(delay).await;
+                }
                 let _ = invoke_isolate_response_tx.send(Ok(invoke_isolate_response)).await;
             }
         });
@@ -198,6 +210,9 @@ impl EzIsolateBridge for DefaultEchoIsolate {
             }
         }
         let mut invoke_isolate_response = create_echo_invoke_isolate_response(request);
+        if let Some(delay) = self.delay {
+            tokio::time::sleep(delay).await;
+        }
         adjust_scope(&self.scope_drag_instruction, &mut invoke_isolate_response);
         Ok(Response::new(invoke_isolate_response))
     }
@@ -219,8 +234,9 @@ impl EzIsolateBridge for DefaultEchoIsolate {
 pub async fn start_fake_isolate_server(
     test_isolate_id: IsolateId,
     scope_drag_instruction: ScopeDragInstruction,
+    delay: Option<tokio::time::Duration>,
 ) -> oneshot::Sender<()> {
-    let fake_isolate = DefaultEchoIsolate::new(scope_drag_instruction);
+    let fake_isolate = DefaultEchoIsolate::new(scope_drag_instruction, delay);
 
     let unix_listener =
         UnixListener::bind(format!("{}{}", DEFAULT_ISOLATE_UNIX_SOCKET, test_isolate_id)).unwrap();

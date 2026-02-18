@@ -23,6 +23,7 @@ pub struct IsolateEzServiceMetrics {
     pub errors: Counter<u64>,
     pub active_requests: UpDownCounter<i64>,
     pub message_processing_duration: Histogram<f64>,
+    pub message_size_bytes: Histogram<u64>,
 }
 
 impl IsolateEzServiceMetrics {
@@ -61,7 +62,20 @@ impl IsolateEzServiceMetrics {
             .with_unit("s")
             .build();
 
-        Self { requests, duration_sec, errors, active_requests, message_processing_duration }
+        let message_size_bytes = unsafe_meter
+            .u64_histogram("enforcer.isolate_ez_service.message_size")
+            .with_description("Size of messages (requests and responses) in bytes.")
+            .with_unit("By")
+            .build();
+
+        Self {
+            requests,
+            duration_sec,
+            errors,
+            active_requests,
+            message_processing_duration,
+            message_size_bytes,
+        }
     }
 }
 
@@ -90,5 +104,9 @@ impl ServiceMetrics for IsolateEzServiceMetrics {
 
     fn message_processing_duration(&self) -> Option<&Histogram<f64>> {
         Some(&self.message_processing_duration)
+    }
+
+    fn message_size_bytes(&self) -> Option<&Histogram<u64>> {
+        Some(&self.message_size_bytes)
     }
 }

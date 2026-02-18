@@ -39,6 +39,16 @@ rust_library(
     ],
 )
 
+rust_library(
+    name = "metrics_test_utils",
+    srcs = ["test/test_utils.rs"],
+    deps = [
+        ":metrics",
+        "@crates//:fake-opentelemetry-collector",
+        "@crates//:serde_json",
+    ],
+)
+
 rust_test(
     name = "metrics_test",
     size = "small",
