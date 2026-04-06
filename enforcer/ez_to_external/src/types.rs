@@ -15,7 +15,7 @@
 use enforcer_proto::enforcer::v1::{InvokeEzRequest, InvokeEzResponse};
 use isolate_info::IsolateId;
 use tokio::sync::mpsc::Receiver;
-use tonic::async_trait;
+use tonic::{async_trait, Status};
 
 #[derive(thiserror::Error, Debug)]
 pub enum ExternalProxyConnectorError {
@@ -25,12 +25,8 @@ pub enum ExternalProxyConnectorError {
     StreamFailed(Box<tonic::Status>),
     #[error("Translation error: {0}")]
     TranslationError(String),
-}
-
-impl From<tonic::Status> for ExternalProxyConnectorError {
-    fn from(status: tonic::Status) -> Self {
-        ExternalProxyConnectorError::StreamFailed(Box::new(status))
-    }
+    #[error("Proxy unary call failed: {0}")]
+    UnaryCallFailed(tonic::Status),
 }
 
 // Trait defining the contract for an external proxy channel.
@@ -50,7 +46,7 @@ pub trait ExternalProxyChannel: std::fmt::Debug + Send + Sync {
         &self,
         isolate_id: IsolateId,
         mut from_bridge_rx: Receiver<InvokeEzRequest>,
-    ) -> Result<Receiver<InvokeEzResponse>, ExternalProxyConnectorError>;
+    ) -> Result<Receiver<Result<InvokeEzResponse, Status>>, ExternalProxyConnectorError>;
 
     /// Creates a clone of the channel which is returned as a trait object.
     fn clone_channel(&self) -> Box<dyn ExternalProxyChannel>;

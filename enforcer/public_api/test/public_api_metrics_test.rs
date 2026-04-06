@@ -23,7 +23,7 @@ use interceptor::Interceptor;
 use isolate_info::IsolateServiceInfo;
 use isolate_service_mapper::IsolateServiceMapper;
 use junction_test_utils::FakeJunction;
-use manifest_proto::enforcer::InterceptingServices;
+use manifest_proto::enforcer::v1::InterceptingServices;
 use metrics::setup_otel_metrics;
 use public_api::EzPublicApiService;
 use state_manager::IsolateStateManager;

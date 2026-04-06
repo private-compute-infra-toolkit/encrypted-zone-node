@@ -1,4 +1,4 @@
-// Copyright 2025 Google LLC
+// Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -34,6 +34,14 @@ pub enum ContainerManagerRequest {
     MountReadOnlyFile {
         req: MountReadOnlyFile,
         resp: ContainerManagerResponseCallback<MountFileResponse>,
+    },
+    MountWritableDirectory {
+        req: MountWritableDirectory,
+        resp: ContainerManagerResponseCallback<MountDirectoryResponse>,
+    },
+    MountReadOnlyDirectory {
+        req: MountReadOnlyDirectory,
+        resp: ContainerManagerResponseCallback<MountDirectoryResponse>,
     },
     GetRunStatus {
         req: GetRunStatusRequest,
@@ -73,6 +81,29 @@ pub struct MountReadOnlyFile {
 
 #[derive(Debug)]
 pub struct MountFileResponse {}
+
+#[derive(Debug)]
+pub struct MountWritableDirectory {
+    // Target Isolate
+    pub isolate_id: IsolateId,
+    // Directory name recognized by Enforcer
+    pub enforcer_dir_name: String,
+    // Directory name recognized by Container
+    pub container_dir_name: String,
+}
+
+#[derive(Debug)]
+pub struct MountReadOnlyDirectory {
+    // Target Isolate
+    pub isolate_id: IsolateId,
+    // Directory name recognized by Enforcer
+    pub enforcer_dir_name: String,
+    // Directory name recognized by Container
+    pub container_dir_name: String,
+}
+
+#[derive(Debug)]
+pub struct MountDirectoryResponse {}
 
 #[derive(Debug)]
 pub struct GetRunStatusRequest {

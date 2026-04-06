@@ -14,13 +14,46 @@
 
 use enforcer_proto::enforcer::v1::ControlPlaneMetadata;
 use enforcer_proto::enforcer::v1::InvokeEzRequest;
+use external_proxy_proto::enforcer::v1::EzExternalProxyRequest;
 use ez_service_proto::enforcer::v1::CallRequest;
+use ez_to_ez_service_proto::enforcer::v1::EzCallRequest;
 use opentelemetry::{
     metrics::{Counter, Histogram, UpDownCounter},
     KeyValue,
 };
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
+
+pub fn exponential_boundaries(start: f64, factor: f64, count: usize) -> Vec<f64> {
+    (0..=count).map(|i| start * factor.powi(i as i32)).collect()
+}
+
+pub fn default_latency_boundaries() -> Vec<f64> {
+    exponential_boundaries(0.001, 2.0, 20)
+}
+
+/// Returns the enforcer.reset counter metric.
+pub fn build_reset_counter(meter: &opentelemetry::metrics::Meter) -> Counter<u64> {
+    meter
+        .u64_counter("enforcer.reset")
+        .with_description("Records the number of Isolate resets.")
+        .build()
+}
+
+/// Records enforcer.reset with trigger identifier.
+pub fn record_reset(
+    counter: &Counter<u64>,
+    operator: impl Into<opentelemetry::Value>,
+    service: impl Into<opentelemetry::Value>,
+    trigger: impl Into<opentelemetry::Value>,
+) {
+    let attributes = [
+        KeyValue::new("operator", operator),
+        KeyValue::new("service", service),
+        KeyValue::new("trigger", trigger),
+    ];
+    counter.add(1, &attributes);
+}
 
 /// A trait for common metrics functionality.
 pub trait ServiceMetrics: Clone + Send + Sync + 'static {
@@ -246,5 +279,21 @@ impl From<Option<&ControlPlaneMetadata>> for MetricAttributes {
 impl From<&InvokeEzRequest> for MetricAttributes {
     fn from(req: &InvokeEzRequest) -> Self {
         MetricAttributes::from(req.control_plane_metadata.as_ref())
+    }
+}
+
+impl From<&EzCallRequest> for MetricAttributes {
+    fn from(req: &EzCallRequest) -> Self {
+        MetricAttributes::from(req.control_plane_metadata.as_ref())
+    }
+}
+
+impl From<&EzExternalProxyRequest> for MetricAttributes {
+    fn from(req: &EzExternalProxyRequest) -> Self {
+        if let Some(resource) = &req.resource {
+            MetricAttributes::new(&resource.target, &resource.service_name, &resource.method_name)
+        } else {
+            MetricAttributes::new("unknown", "unknown", "unknown")
+        }
     }
 }

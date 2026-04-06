@@ -1,4 +1,4 @@
-// Copyright 2025 Google LLC
+// Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -31,16 +31,17 @@ use data_scope_proto::enforcer::v1::DataScopeType;
 use enforcer_proto::enforcer::v1::{
     isolate_ez_bridge_client::IsolateEzBridgeClient, ControlPlaneMetadata, CreateMemshareRequest,
     EzPayloadIsolateScope, InvokeEzRequest, InvokeEzResponse, IsolateDataScope, IsolateState,
-    IsolateStatus, NotifyIsolateStateRequest, NotifyIsolateStateResponse,
+    NotifyIsolateStateRequest, NotifyIsolateStateResponse,
 };
 use ez_service_proto::enforcer::v1::CallRequest;
+use fileshare_manager::FileshareManager;
 use hyper_util::rt::TokioIo;
 use interceptor::{Interceptor, RequestType};
 use isolate_ez_service_manager::{IsolateEzServiceManager, IsolateEzServiceManagerDependencies};
 use isolate_info::{BinaryServicesIndex, IsolateId, IsolateServiceIndex, IsolateServiceInfo};
 use isolate_service_mapper::IsolateServiceMapper;
 use junction_test_utils::FakeJunction;
-use manifest_proto::enforcer::IsolateRuntimeConfigs;
+use manifest_proto::enforcer::v1::IsolateRuntimeConfigs;
 use payload_proto::enforcer::v1::EzPayloadData;
 use shared_memory_manager::SharedMemManager;
 use simple_tonic_stream::SimpleStreamingWrapper;
@@ -124,6 +125,7 @@ impl TestHarness {
         let isolate_service_mapper = IsolateServiceMapper::default();
         let manifest_validator = ManifestValidator::default();
         let shared_memory_manager = SharedMemManager::new(container_manager_requester.clone());
+        let fileshare_manager = FileshareManager::new(container_manager_requester.clone());
         let isolate_junction = FakeJunction::default();
         let interceptor = Interceptor::new(isolate_service_mapper.clone());
 
@@ -132,6 +134,7 @@ impl TestHarness {
                 isolate_junction: Box::new(isolate_junction.clone()),
                 isolate_state_manager: isolate_state_manager.clone(),
                 shared_memory_manager: shared_memory_manager.clone(),
+                fileshare_manager: fileshare_manager.clone(),
                 external_proxy_connector: None,
                 isolate_service_mapper: isolate_service_mapper.clone(),
                 data_scope_requester: data_scope_requester.clone(),
@@ -149,6 +152,7 @@ impl TestHarness {
             isolate_ez_service_mngr: isolate_ez_service_manager.clone(),
             manifest_validator: manifest_validator.clone(),
             shared_mem_manager: shared_memory_manager.clone(),
+            fileshare_manager: fileshare_manager.clone(),
             manifest_path: manifest_path.to_string(),
             common_bind_mounts: vec![],
             max_decoding_message_size: MAX_DECODING_SIZE,
@@ -414,7 +418,8 @@ async fn test_isolate_reset() {
     let mem_share_response = harness
         .shared_memory_manager
         .create_shared_mem_file(isolate_ids[0], CreateMemshareRequest { region_size: 128 })
-        .await;
+        .await
+        .expect("Should create shared mem file");
 
     harness
         .shared_memory_manager
@@ -527,7 +532,7 @@ async fn test_isolate_reset() {
 async fn test_start_one_isolate_with_override() {
     let etc_hosts = "172.28.58.209	csd.c.googlers.com csd";
     let configs = IsolateRuntimeConfigs {
-        configs: vec![manifest_proto::enforcer::IsolateRuntimeConfig {
+        configs: vec![manifest_proto::enforcer::v1::IsolateRuntimeConfig {
             publisher_id: HELLOWORLD_DOMAIN.to_string(),
             binary_filename: HELLOWORLD_BINARY.to_string(),
             command_line_arguments: vec!["--new_arg".to_string()],
@@ -888,6 +893,7 @@ fn create_random_request(isolate_service_info: &IsolateServiceInfo) -> InvokeEzR
             destination_service_name: isolate_service_info.service_name.clone(),
             destination_method_name: SAY_HELLO_METHOD.to_string(),
             shared_memory_handles: Vec::new(),
+            fileshare_handles: Vec::new(),
             destination_ez_instance_id: "".to_string(),
             ..Default::default()
         }),
@@ -908,7 +914,6 @@ fn create_random_request(isolate_service_info: &IsolateServiceInfo) -> InvokeEzR
 fn create_echo_invoke_ez_response(invoke_isolate_request: InvokeEzRequest) -> InvokeEzResponse {
     InvokeEzResponse {
         control_plane_metadata: invoke_isolate_request.control_plane_metadata,
-        status: Some(IsolateStatus::default()),
         ez_response_iscope: invoke_isolate_request.isolate_request_iscope,
         ez_response_payload: invoke_isolate_request.isolate_request_payload,
     }

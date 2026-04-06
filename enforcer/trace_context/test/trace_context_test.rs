@@ -12,7 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use opentelemetry::propagation::Extractor;
+use opentelemetry::{
+    propagation::Extractor,
+    trace::{TraceContextExt, Tracer, TracerProvider},
+    Context,
+};
+use opentelemetry_sdk::trace as sdktrace;
 use tonic::Request;
 use trace_context::{get_trace_context, TonicHeaderExtractor};
 
@@ -35,19 +40,34 @@ fn test_tonic_header_extractor() {
 }
 
 #[test]
-fn test_get_trace_context_with_headers() {
-    let mut request = Request::new(());
-    let metadata = request.metadata_mut();
-    let trace_id = "0af7651916cd43dd8448eb211c80319c";
-    let span_id = "b7ad6b7169203331";
-    let traceparent = format!("00-{}-{}-01", trace_id, span_id);
-    metadata.insert("traceparent", traceparent.parse().unwrap());
-    metadata.insert("tracestate", "rojo=00f067aa0ba902b7".parse().unwrap());
+fn test_get_trace_context_with_active_span() {
+    let provider = sdktrace::SdkTracerProvider::default();
+    let tracer = provider.tracer("test");
 
-    let context = get_trace_context(&request);
+    let span = tracer.start("test-span");
+    let cx = Context::current_with_span(span);
 
-    assert_eq!(context.get("traceparent"), Some(&traceparent));
-    assert_eq!(context.get("tracestate"), Some(&"rojo=00f067aa0ba902b7".to_string()));
+    // The guard must be kept for the scope of the test.
+    let _guard = cx.attach();
+
+    let current_context = Context::current();
+    let current_span = current_context.span();
+    let span_context = current_span.span_context();
+    assert!(span_context.is_valid());
+
+    let request = Request::new(());
+    let headers = get_trace_context(&request);
+
+    // A traceparent and tracestate should be injected.
+    assert_eq!(headers.len(), 2);
+    let traceparent = headers.get("traceparent").unwrap();
+
+    let parts: Vec<&str> = traceparent.split('-').collect();
+    assert_eq!(parts.len(), 4);
+    assert_eq!(parts[0], "00");
+    assert_eq!(parts[1], &span_context.trace_id().to_string());
+    assert_eq!(parts[2], &span_context.span_id().to_string());
+    assert_eq!(parts[3], "01");
 }
 
 #[test]

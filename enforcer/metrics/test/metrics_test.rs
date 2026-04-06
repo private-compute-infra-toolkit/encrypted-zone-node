@@ -14,6 +14,7 @@
 
 use std::time::Duration;
 
+use ez_service_proto::enforcer::v1::CallRequest;
 use fake_opentelemetry_collector::{ExportedMetric, FakeCollectorServer};
 use futures::StreamExt;
 use metrics::common::{MetricAttributes, ServiceMetrics};
@@ -23,47 +24,60 @@ use opentelemetry::metrics::MeterProvider;
 use opentelemetry::KeyValue;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use std::sync::Arc;
-
-use ez_service_proto::enforcer::v1::CallRequest;
-use opentelemetry::metrics::{Counter, Histogram, UpDownCounter};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tokio_stream::wrappers::ReceiverStream;
 
-#[derive(Clone, PartialEq, prost::Message)]
+use metrics_test_utils::TestMetrics;
+
+#[derive(Clone, Debug, PartialEq)]
 struct TestMessage {
-    #[prost(string, tag = "1")]
-    pub content: String,
+    id: String,
+    content: String,
 }
 
-#[derive(Clone)]
-struct TestMetrics {
-    errors: Counter<u64>,
-    active_requests: UpDownCounter<i64>,
-    duration_sec: Histogram<f64>,
-    message_processing_duration: Histogram<f64>,
-    message_size_bytes: Histogram<u64>,
+impl prost::Message for TestMessage {
+    fn encode_raw(&self, _buf: &mut impl prost::bytes::BufMut) {}
+    fn merge_field(
+        &mut self,
+        _tag: u32,
+        _wire_type: prost::encoding::WireType,
+        _buf: &mut impl prost::bytes::Buf,
+        _ctx: prost::encoding::DecodeContext,
+    ) -> Result<(), prost::DecodeError> {
+        Ok(())
+    }
+    fn encoded_len(&self) -> usize {
+        self.content.len()
+    }
+    fn clear(&mut self) {}
 }
 
-impl ServiceMetrics for TestMetrics {
-    fn errors(&self) -> Option<&Counter<u64>> {
-        Some(&self.errors)
-    }
+#[derive(Clone, Debug, PartialEq)]
+struct TestResponse {
+    payload: String,
+}
 
-    fn active_requests(&self) -> Option<&UpDownCounter<i64>> {
-        Some(&self.active_requests)
+impl prost::Message for TestResponse {
+    fn encode_raw(&self, _buf: &mut impl prost::bytes::BufMut) {}
+    fn merge_field(
+        &mut self,
+        _tag: u32,
+        _wire_type: prost::encoding::WireType,
+        _buf: &mut impl prost::bytes::Buf,
+        _ctx: prost::encoding::DecodeContext,
+    ) -> Result<(), prost::DecodeError> {
+        Ok(())
     }
-
-    fn duration_sec(&self) -> Option<&Histogram<f64>> {
-        Some(&self.duration_sec)
+    fn encoded_len(&self) -> usize {
+        self.payload.len()
     }
+    fn clear(&mut self) {}
+}
 
-    fn message_processing_duration(&self) -> Option<&Histogram<f64>> {
-        Some(&self.message_processing_duration)
-    }
-
-    fn message_size_bytes(&self) -> Option<&Histogram<u64>> {
-        Some(&self.message_size_bytes)
+impl From<&TestMessage> for MetricAttributes {
+    fn from(_req: &TestMessage) -> Self {
+        MetricAttributes::new("test.domain", "TestService", "TestMethod")
     }
 }
 
@@ -94,15 +108,7 @@ async fn setup_common_test() -> (FakeCollectorServer, TestMetrics, SdkMeterProvi
         .expect("Failed to setup OTel metrics");
     let provider = providers.safe.expect("Safe provider missing");
     let meter = provider.meter("test_meter");
-    let metrics = TestMetrics {
-        errors: meter.u64_counter("test.errors").build(),
-        active_requests: meter.i64_up_down_counter("test.active_requests").build(),
-        duration_sec: meter.f64_histogram("test.duration").build(),
-        message_processing_duration: meter
-            .f64_histogram("test.message_processing_duration")
-            .build(),
-        message_size_bytes: meter.u64_histogram("test.message_size_bytes").build(),
-    };
+    let metrics = TestMetrics::new(&meter);
     (collector, metrics, provider)
 }
 
@@ -759,4 +765,129 @@ async fn test_observed_stream_memory_cap() {
     drop(req_tx);
     drop(res_tx);
     drop(response_wrapper);
+}
+
+// ------------------------------------------------------------------------------------------------
+//  ObservedProxyChannel Linked Pair Tests
+// ------------------------------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_observed_channel_lifecycle() {
+    let (mut collector, metrics, provider) = setup_common_test().await;
+
+    let (req_tx, mut rx_req) = mpsc::channel::<TestMessage>(10);
+    let (res_tx, mut rx_res) = mpsc::channel::<Result<TestResponse, std::io::Error>>(10);
+
+    let (req_tx_wrapper, res_tx_wrapper) =
+        metrics::observed_proxy_channel::create_linked_senders(req_tx, res_tx, metrics.clone());
+
+    let sender = tokio::spawn(async move {
+        let req = TestMessage { id: "req-1".to_string(), content: "test payload".to_string() };
+        req_tx_wrapper.send_request(req).await.unwrap();
+
+        let res = TestResponse { payload: "response payload".to_string() };
+        res_tx_wrapper.send_response(Ok(res)).await.unwrap();
+    });
+
+    let receiver = tokio::spawn(async move {
+        let recv_req = rx_req.recv().await.unwrap();
+        assert_eq!(
+            recv_req,
+            TestMessage { id: "req-1".to_string(), content: "test payload".to_string() }
+        );
+
+        let recv_res = rx_res.recv().await.unwrap();
+        assert_eq!(recv_res.unwrap(), TestResponse { payload: "response payload".to_string() });
+    });
+
+    sender.await.unwrap();
+    receiver.await.unwrap();
+
+    let _ = provider.shutdown();
+    let exported = collector.exported_metrics(2, Duration::from_secs(2)).await;
+
+    let find_metric = |name: &str| {
+        exported
+            .iter()
+            .flat_map(|batch| batch.metrics.iter())
+            .find(|m| m.name == name)
+            .unwrap_or_else(|| panic!("Metric {} not found", name))
+    };
+
+    let size_metric = find_metric("test.message_size_bytes");
+
+    let json = serde_json::to_value(size_metric).unwrap();
+    let total_count: u64 = json
+        .pointer("/data/Histogram/data_points")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|dp| dp.get("count").and_then(|c| c.as_u64())).sum())
+        .unwrap_or(0);
+
+    assert_eq!(total_count, 2, "Should record size for 2 requests sent into the channel");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_observed_channel_response_blocks_on_request() {
+    let (_collector, metrics, _provider) = setup_common_test().await;
+
+    let (req_tx, _rx_req) = mpsc::channel::<TestMessage>(10);
+    let (res_tx, _keep_alive_rx) = mpsc::channel::<Result<TestResponse, std::io::Error>>(10);
+
+    let (req_tx_wrapper, res_tx_wrapper) =
+        metrics::observed_proxy_channel::create_linked_senders(req_tx, res_tx, metrics.clone());
+
+    let res_start = std::time::Instant::now();
+
+    let sender = tokio::spawn(async move {
+        // Response attempts to send immediately, but should block waiting for request attributes
+        let res = TestResponse { payload: "response payload".to_string() };
+        res_tx_wrapper.send_response(Ok(res)).await.unwrap();
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let req = TestMessage { id: "req-1".to_string(), content: "test payload".to_string() };
+    req_tx_wrapper.send_request(req).await.unwrap();
+
+    sender.await.unwrap();
+
+    let duration = res_start.elapsed();
+    assert!(
+        duration >= Duration::from_millis(50),
+        "Response should have blocked for at least 50ms waiting for Request attributes"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_observed_channel_unknown_attributes_fallback() {
+    let (mut collector, metrics, provider) = setup_common_test().await;
+
+    let (req_tx, _rx_req) = mpsc::channel::<TestMessage>(10);
+    let (res_tx, _rx_res) = mpsc::channel::<Result<TestResponse, std::io::Error>>(10);
+
+    let (req_tx_wrapper, res_tx_wrapper) =
+        metrics::observed_proxy_channel::create_linked_senders(req_tx, res_tx, metrics.clone());
+
+    // Drop the request sender explicitly before sending any requests
+    drop(req_tx_wrapper);
+
+    // Send response. It should immediately unblock due to fallback, sending unknown attributes
+    let res = TestResponse { payload: "response payload".to_string() };
+    res_tx_wrapper.send_response(Ok(res)).await.unwrap();
+
+    // Verify "unknown" metrics were published
+    let _ = provider.force_flush();
+    let exported = collector.exported_metrics(1, Duration::from_secs(1)).await;
+
+    let size_metric = exported
+        .iter()
+        .flat_map(|b| b.metrics.iter())
+        .find(|m| m.name == "test.message_size_bytes")
+        .expect("Message size metric should be present");
+
+    let size_json = serde_json::to_string(&size_metric).unwrap();
+    assert!(
+        size_json.contains("unknown"),
+        "Metrics should be tagged with 'unknown' when initializer is dropped early"
+    );
 }

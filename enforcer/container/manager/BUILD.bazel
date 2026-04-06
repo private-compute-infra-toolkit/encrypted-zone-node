@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -49,11 +49,15 @@ rust_library(
 rust_library(
     name = "manifest_parser",
     srcs = ["src/manifest_parser.rs"],
+    compile_data = ["//enforcer/proto:test_manifest_descriptor_set"],
+    rustc_env = {
+        "TEST_MANIFEST_DESCRIPTOR_SET_PATH": "$(execpath //enforcer/proto:test_manifest_descriptor_set)",
+    },
     visibility = ["//visibility:public"],
     deps = [
-        "//enforcer:manifest_rust",
         "//enforcer/v1:data_scope_rust",
         "//enforcer/v1:enforcer_rust",
+        "//enforcer/v1:manifest_rust",
         "@crates//:anyhow",
         "@crates//:prost-reflect",
         "@crates//:serde_json",
@@ -74,11 +78,11 @@ rust_library(
         deps = [
             ":container_manager_request",
             ":manifest_parser",
-            "//enforcer:manifest_rust",
             "//enforcer/container",
             "//enforcer/container:utils",
             "//enforcer/data_scope",
             "//enforcer/interceptor",
+            "//enforcer/isolate:fileshare_manager",
             "//enforcer/isolate:isolate_ez_service_manager",
             "//enforcer/isolate:isolate_info",
             "//enforcer/isolate:isolate_service_mapper",
@@ -86,6 +90,7 @@ rust_library(
             "//enforcer/junction:junction_trait",
             "//enforcer/state:state_manager",
             "//enforcer/v1:data_scope_rust",
+            "//enforcer/v1:manifest_rust",
             "@crates//:anyhow",
             "@crates//:dashmap",
             "@crates//:log",
@@ -110,14 +115,18 @@ rust_test(
     name = "manifest_parser_test",
     size = "small",
     srcs = ["test/manifest_parser_test.rs"],
+    compile_data = ["//enforcer/proto:test_manifest_descriptor_set"],
     data = [
         ":testdata",
         "//enforcer/proto:test_manifest_descriptor_set",
     ],
+    rustc_env = {
+        "TEST_MANIFEST_DESCRIPTOR_SET_PATH": "$(execpath //enforcer/proto:test_manifest_descriptor_set)",
+    },
     deps = [
         ":manifest_parser",
-        "//enforcer:manifest_rust",
         "//enforcer/v1:data_scope_rust",
+        "//enforcer/v1:manifest_rust",
         "@crates//:anyhow",
         "@crates//:prost-reflect",
     ],
@@ -138,15 +147,18 @@ rust_test(
         "//enforcer/container/test_data:test_binary",
         "//enforcer/proto:test_manifest_descriptor_set",
     ],
+    rustc_env = {
+        "TEST_MANIFEST_DESCRIPTOR_SET_PATH": "$(execpath //enforcer/proto:test_manifest_descriptor_set)",
+    },
     deps = [
         ":container_manager",
         ":container_manager_request",
         ":container_manager_requester",
-        "//enforcer:manifest_rust",
         "//enforcer/container:container_custom",
         "//enforcer/container:container_test_utils",
         "//enforcer/data_scope",
         "//enforcer/interceptor",
+        "//enforcer/isolate:fileshare_manager",
         "//enforcer/isolate:isolate_ez_service_manager",
         "//enforcer/isolate:isolate_info",
         "//enforcer/isolate:isolate_service_mapper",
@@ -157,6 +169,7 @@ rust_test(
         "//enforcer/v1:data_scope_rust",
         "//enforcer/v1:enforcer_rust",
         "//enforcer/v1:ez_service_rust",
+        "//enforcer/v1:manifest_rust",
         "//enforcer/v1:payload_rust",
         "//simple_tonic_stream",
         "@crates//:anyhow",

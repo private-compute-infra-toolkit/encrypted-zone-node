@@ -32,6 +32,8 @@ pub enum IsolateStatusCode {
     MissingField(String),
     #[error("MemShare operation failed")]
     MemShareFailed,
+    #[error("FileShare operation failed")]
+    FileShareFailed,
     #[error("Enforcer to Isolate IPC failed")]
     EnforcerBridgeError,
     #[error("Internal error")]
@@ -59,9 +61,10 @@ impl ToEzError for IsolateStatusCode {
             }
 
             // Internal Errors (Non-retryable)
-            // Note:  MemShareFailure happens after Enforcer gets InvokeIsolateResponse,
+            // Note:  MemShareFailure / FileShareFailure happens after Enforcer gets InvokeIsolateResponse,
             // this error goes to the client and we should not expose any information here.
             IsolateStatusCode::MemShareFailed => (tonic::Code::Internal, None, None),
+            IsolateStatusCode::FileShareFailed => (tonic::Code::Internal, None, None),
             IsolateStatusCode::InternalError => (tonic::Code::Internal, None, None),
         };
 
@@ -70,6 +73,7 @@ impl ToEzError for IsolateStatusCode {
             IsolateStatusCode::MissingControlPlaneMetadata => ErrorSource::Isolate,
             IsolateStatusCode::MissingField(_) => ErrorSource::Enforcer,
             IsolateStatusCode::MemShareFailed => ErrorSource::Enforcer,
+            IsolateStatusCode::FileShareFailed => ErrorSource::Enforcer,
             IsolateStatusCode::EnforcerBridgeError => ErrorSource::EnforcerBridge,
             IsolateStatusCode::InternalError => ErrorSource::Enforcer,
             IsolateStatusCode::EmptyStream => ErrorSource::Enforcer,

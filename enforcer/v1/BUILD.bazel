@@ -12,9 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+load("@com_google_protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
 load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
+load("@com_google_protobuf//bazel:py_proto_library.bzl", "py_proto_library")
 load("@rules_buf//buf:defs.bzl", "buf_lint_test")
+load("@rules_pkg//pkg:mappings.bzl", "pkg_attributes", "pkg_files")
 load("@rules_proto//proto:defs.bzl", "proto_descriptor_set")
+load("@rules_proto_grpc_cpp//:defs.bzl", "cpp_grpc_library")
 load("@rules_rust_prost//:defs.bzl", "rust_prost_library")
 
 proto_library(
@@ -26,11 +30,29 @@ proto_library(
     visibility = ["//visibility:public"],
 )
 
+cc_proto_library(
+    name = "data_scope_cc_proto",
+    visibility = ["//visibility:public"],
+    deps = [":data_scope_proto"],
+)
+
+cpp_grpc_library(
+    name = "data_scope_grpc_proto",
+    protos = [":data_scope_proto"],
+    visibility = ["//visibility:public"],
+)
+
 buf_lint_test(
     name = "data_scope_lint",
     size = "small",
     config = ":buf.yaml",
     targets = [":data_scope_proto"],
+)
+
+rust_prost_library(
+    name = "data_scope_rust",
+    proto = ":data_scope_proto",
+    visibility = ["//visibility:public"],
 )
 
 proto_library(
@@ -43,6 +65,28 @@ proto_library(
         ":data_scope_proto",
         ":enforcer_proto",
     ],
+)
+
+cc_proto_library(
+    name = "ez_service_cc_proto",
+    visibility = ["//visibility:public"],
+    deps = [":ez_service_proto"],
+)
+
+cpp_grpc_library(
+    name = "ez_service_grpc_proto",
+    protos = [":ez_service_proto"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":data_scope_grpc_proto",
+        ":enforcer_grpc_proto",
+    ],
+)
+
+rust_prost_library(
+    name = "ez_service_rust",
+    proto = ":ez_service_proto",
+    visibility = ["//visibility:public"],
 )
 
 buf_lint_test(
@@ -69,6 +113,25 @@ proto_library(
     ],
 )
 
+cc_proto_library(
+    name = "payload_cc_proto",
+    visibility = ["//visibility:public"],
+    deps = [":payload_proto"],
+)
+
+cpp_grpc_library(
+    name = "payload_grpc_proto",
+    protos = [":payload_proto"],
+    visibility = ["//visibility:public"],
+    deps = [":data_scope_grpc_proto"],
+)
+
+rust_prost_library(
+    name = "payload_rust",
+    proto = ":payload_proto",
+    visibility = ["//visibility:public"],
+)
+
 buf_lint_test(
     name = "payload_lint",
     size = "small",
@@ -79,7 +142,6 @@ buf_lint_test(
 proto_library(
     name = "enforcer_proto",
     srcs = [
-        "ez_external_proxy_service.proto",
         "ez_isolate_bridge.proto",
         "isolate_bridge.proto",
         "isolate_data_scope.proto",
@@ -91,6 +153,22 @@ proto_library(
     deps = [
         ":data_scope_proto",
         ":payload_proto",
+    ],
+)
+
+cc_proto_library(
+    name = "enforcer_cc_proto",
+    visibility = ["//visibility:public"],
+    deps = [":enforcer_proto"],
+)
+
+cpp_grpc_library(
+    name = "enforcer_grpc_proto",
+    protos = [":enforcer_proto"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":data_scope_grpc_proto",
+        ":payload_grpc_proto",
     ],
 )
 
@@ -108,26 +186,50 @@ proto_descriptor_set(
 )
 
 rust_prost_library(
-    name = "data_scope_rust",
-    proto = ":data_scope_proto",
-    visibility = ["//visibility:public"],
-)
-
-rust_prost_library(
-    name = "payload_rust",
-    proto = ":payload_proto",
-    visibility = ["//visibility:public"],
-)
-
-rust_prost_library(
-    name = "ez_service_rust",
-    proto = ":ez_service_proto",
-    visibility = ["//visibility:public"],
-)
-
-rust_prost_library(
     name = "enforcer_rust",
     proto = ":enforcer_proto",
+    visibility = ["//visibility:public"],
+)
+
+proto_library(
+    name = "manifest_proto",
+    srcs = ["ez_manifest.proto"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":data_scope_proto",
+    ],
+)
+
+cc_proto_library(
+    name = "manifest_cc_proto",
+    visibility = ["//visibility:public"],
+    deps = [":manifest_proto"],
+)
+
+buf_lint_test(
+    name = "manifest_lint",
+    size = "small",
+    config = ":buf.yaml",
+    targets = [":manifest_proto"],
+)
+
+proto_descriptor_set(
+    name = "manifest_descriptor_set",
+    visibility = ["//visibility:public"],
+    deps = [":manifest_proto"],
+)
+
+rust_prost_library(
+    name = "manifest_rust",
+    proto = ":manifest_proto",
+    visibility = ["//visibility:public"],
+)
+
+pkg_files(
+    name = "enforcer_proto_pkg",
+    srcs = [":manifest_descriptor_set"],
+    attributes = pkg_attributes(mode = "0400"),
+    prefix = "/enforcer/proto/v1",
     visibility = ["//visibility:public"],
 )
 
@@ -139,6 +241,18 @@ proto_library(
         ":data_scope_proto",
         "@com_google_protobuf//:descriptor_proto",
     ],
+)
+
+cc_proto_library(
+    name = "options_cc_proto",
+    visibility = ["//visibility:public"],
+    deps = [":options_proto"],
+)
+
+py_proto_library(
+    name = "options_py_proto",
+    visibility = ["//visibility:public"],
+    deps = [":options_proto"],
 )
 
 buf_lint_test(
@@ -181,6 +295,36 @@ rust_prost_library(
 )
 
 proto_library(
+    name = "external_proxy_proto",
+    srcs = [
+        "ez_external_proxy_service.proto",
+    ],
+)
+
+cc_proto_library(
+    name = "external_proxy_cc_proto",
+    deps = [":external_proxy_proto"],
+)
+
+cpp_grpc_library(
+    name = "external_proxy_grpc_proto",
+    protos = [":external_proxy_proto"],
+)
+
+buf_lint_test(
+    name = "external_proxy_lint",
+    size = "small",
+    config = ":buf.yaml",
+    targets = [":external_proxy_proto"],
+)
+
+rust_prost_library(
+    name = "external_proxy_rust",
+    proto = ":external_proxy_proto",
+    visibility = ["//visibility:public"],
+)
+
+proto_library(
     name = "error_detail_proto",
     srcs = ["error_detail.proto"],
     visibility = ["//visibility:public"],
@@ -196,5 +340,47 @@ rust_prost_library(
 rust_prost_library(
     name = "google_rpc_error_details_rust",
     proto = "@googleapis//google/rpc:error_details_proto",
+    visibility = ["//visibility:public"],
+)
+
+proto_library(
+    name = "ez_mtls_proto",
+    srcs = ["ez_mtls.proto"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@oak//proto/attestation:endorsement_proto",
+        "@oak//proto/attestation:evidence_proto",
+    ],
+)
+
+rust_prost_library(
+    name = "ez_mtls_rust",
+    proto = ":ez_mtls_proto",
+    visibility = ["//visibility:public"],
+)
+
+buf_lint_test(
+    name = "ez_mtls_lint",
+    size = "small",
+    config = ":buf.yaml",
+    targets = [":ez_mtls_proto"],
+)
+
+cc_proto_library(
+    name = "ez_mtls_cc_proto",
+    visibility = ["//visibility:public"],
+    deps = [":ez_mtls_proto"],
+)
+
+cpp_grpc_library(
+    name = "ez_mtls_grpc_proto",
+    generate_mocks = True,
+    protos = [
+        ":ez_mtls_proto",
+        "@oak//proto:digest_proto",
+        "@oak//proto/attestation:endorsement_proto",
+        "@oak//proto/attestation:eventlog_proto",
+        "@oak//proto/attestation:evidence_proto",
+    ],
     visibility = ["//visibility:public"],
 )

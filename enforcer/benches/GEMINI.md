@@ -17,28 +17,30 @@ library.
 
 ## Common Operations
 
--   **Running Benchmarks:** Refer to the `README.md` in this directory for detailed instructions.
--   **Adding New Benchmarks:** Instructions are in `README.md`. Key files to modify:
+-   **Running Benchmarks:** Refer to `/docs/Microbenchmarks.md` for detailed instructions.
+-   **Adding New Benchmarks:** Instructions are in `/docs/Microbenchmarks.md`. Key files to modify:
     1.  New file in `benchmarks/`.
     2.  `benchmarks/mod.rs` (add `pub mod <new_module>;`).
     3.  `main.rs` (add to `criterion_main!`).
     4.  `BUILD.bazel` (if new dependencies are needed).
--   **Interpreting Results:** Criterion.rs generates HTML reports, as detailed in `README.md`.
+-   **Interpreting Results:** Criterion.rs generates HTML reports, as detailed in
+    `/docs/Microbenchmarks.md`.
 -   **Dependencies:** Add to `BUILD.bazel`.
 -   **Renaming:** Be cautious when renaming benchmark functions/groups, as noted in the `WARNING` in
-    `README.md`.
+    `/docs/Microbenchmarks.md`.
 
 ## Internal Considerations (For AI Awareness)
 
 -   While the benchmark execution uses the open-source Criterion.rs, be aware that the results _may_
     be further processed or uploaded by internal tooling. The names of benchmarks are likely keys
-    for this. Do not expose internal tool names or details in public-facing files like `README.md`.
+    for this. Do not expose internal tool names or details in public-facing files like
+    `/docs/Microbenchmarks.md`.
 
 ## How AI Can Assist
 
 -   Generating boilerplate for new benchmark files.
 -   Updating `benchmarks/mod.rs` and `main.rs` when adding new benchmarks.
 -   Modifying `BUILD.bazel` for dependencies.
--   Providing run commands from `README.md`.
+-   Providing run commands from `/docs/Microbenchmarks.md`.
 -   Reminding users about the naming constraints when modifications to benchmark names are
     requested.

@@ -14,33 +14,48 @@
 
 use crate::types::{ExternalProxyChannel, ExternalProxyConnectorError};
 use data_scope::data_scope_validator::validate_external_call;
-use enforcer_proto::enforcer::v1::ez_external_proxy_service_client::EzExternalProxyServiceClient;
-use enforcer_proto::enforcer::v1::{ControlPlaneMetadata, EzPayloadIsolateScope, IsolateDataScope};
 use enforcer_proto::enforcer::v1::{
-    EzExternalProxyRequest, EzExternalProxyResponse, EzExternalResource, InvokeEzRequest,
-    InvokeEzResponse, IsolateStatus,
+    ControlPlaneMetadata, EzPayloadIsolateScope, InvokeEzRequest, InvokeEzResponse,
+    IsolateDataScope,
 };
-/// Prefix to Route External Requests to the ExternalProxyConnector.
-use external_proxy_connector_constants::EXTERNAL_PREFIX;
-use grpc_connector::connect;
+use external_proxy_proto::enforcer::v1::{
+    ez_external_proxy_service_client::EzExternalProxyServiceClient, EzExternalProxyRequest,
+    EzExternalProxyResponse, EzExternalResource,
+};
+use grpc_connector::{
+    GrpcChannelPool, DEFAULT_CONNECT_RETRY_COUNT, DEFAULT_CONNECT_RETRY_DELAY_MS,
+    DEFAULT_CONNECT_RETRY_SCALING, DEFAULT_POOL_SIZE,
+};
 use isolate_info::IsolateId;
+use metrics::common::{CallTracker, MessageTimerGuard, MetricAttributes, ServiceMetrics};
+use metrics::external_proxy_connector::ExternalProxyConnectorMetrics;
+use metrics::observed_proxy_channel::ObservedSender;
 use payload_proto::data_scope_proto::enforcer::v1::DataScopeType;
 use payload_proto::enforcer::v1::EzPayloadData;
+use prost::Message;
+use std::collections::HashMap;
 use std::env;
-use tokio::sync::mpsc::{self, Receiver};
+use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 use tonic::async_trait;
-use tonic::transport::Channel;
+use tonic::Status;
 
 const PROXY_CHANNEL_SIZE: usize = 1024;
+
+type ProxyRequestSender = ObservedSender<EzExternalProxyRequest, ExternalProxyConnectorMetrics>;
+type BridgeResponseSender =
+    ObservedSender<Result<InvokeEzResponse, Status>, ExternalProxyConnectorMetrics>;
 
 /// Forwards requests to external proxy.
 #[derive(Clone, Debug)]
 pub struct ExternalProxyConnector {
     /// The gRPC client for the EzExternalProxyService.
-    client: EzExternalProxyServiceClient<Channel>,
+    client_channel_pool: GrpcChannelPool,
+    max_decoding_message_size: usize,
+    /// Metrics for the external proxy
+    metrics: ExternalProxyConnectorMetrics,
 }
 
 impl ExternalProxyConnector {
@@ -52,21 +67,31 @@ impl ExternalProxyConnector {
         let retry_delay_ms = env::var("PROXY_CONNECT_RETRY_DELAY_MS")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(grpc_connector::DEFAULT_CONNECT_RETRY_DELAY_MS);
+            .unwrap_or(DEFAULT_CONNECT_RETRY_DELAY_MS);
 
         let retry_count = env::var("PROXY_CONNECT_RETRY_COUNT")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(grpc_connector::DEFAULT_CONNECT_RETRY_COUNT);
+            .unwrap_or(DEFAULT_CONNECT_RETRY_COUNT);
 
-        let channel = connect(address, retry_count, retry_delay_ms)
-            .await
-            .map_err(|e| ExternalProxyConnectorError::ConnectionFailed(e.to_string()))?;
+        let retry_scaling = env::var("PROXY_CONNECT_RETRY_SCALING")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_CONNECT_RETRY_SCALING);
 
-        Ok(Self {
-            client: EzExternalProxyServiceClient::new(channel)
-                .max_decoding_message_size(max_decoding_message_size),
-        })
+        let client_channel_pool = GrpcChannelPool::new(
+            address.to_string(),
+            DEFAULT_POOL_SIZE,
+            retry_count,
+            retry_delay_ms,
+            retry_scaling,
+        )
+        .await
+        .map_err(|e| ExternalProxyConnectorError::ConnectionFailed(e.to_string()))?;
+
+        let metrics = ExternalProxyConnectorMetrics::new();
+
+        Ok(Self { client_channel_pool, max_decoding_message_size, metrics })
     }
 
     /// Helper function to process the ControlPlaneMetadata from the first request.
@@ -75,7 +100,7 @@ impl ExternalProxyConnector {
         metadata_tx_opt: &mut Option<oneshot::Sender<ControlPlaneMetadata>>,
         invoke_request: &InvokeEzRequest,
         isolate_id: IsolateId,
-        to_bridge_tx: &mpsc::Sender<InvokeEzResponse>,
+        to_bridge_tx: &BridgeResponseSender,
     ) -> bool {
         // Only process if metadata hasn't been set yet.
         if response_metadata.is_none() {
@@ -100,11 +125,9 @@ impl ExternalProxyConnector {
                         "First InvokeEzRequest for isolate {} missing control_plane_metadata.",
                         isolate_id
                     );
-                    let err = ExternalProxyConnectorError::TranslationError(
-                    "SDK is always expected to populate control_plane_metadata, but it was None"
-                        .to_string(),
-                );
-                    if Self::send_to_bridge(to_bridge_tx, error_to_response(err, None))
+                    let err_msg = "SDK is always expected to populate control_plane_metadata, but it was None".to_string();
+                    if to_bridge_tx
+                        .unobserved_send(Err(Status::invalid_argument(err_msg)))
                         .await
                         .is_err()
                     {
@@ -117,15 +140,15 @@ impl ExternalProxyConnector {
         true
     }
 
-    /// Handles the request stream: receives from bridge, validates, translates, and sends to proxy.
-    /// We use the oneshot channel to pass the `ControlPlaneMetadata` from the first `InvokeEzRequest`
+    // Handles the request stream: receives from bridge, validates, translates, and sends to proxy.
+    // We use the oneshot channel to pass the `ControlPlaneMetadata` from the first `InvokeEzRequest`
     // received by `handle_requests` to the concurrent `handle_responses` task, which must wait for
     // this metadata before it can process and send any responses.
     async fn handle_requests(
         isolate_id: IsolateId,
         mut from_bridge_rx: Receiver<InvokeEzRequest>,
-        to_proxy_tx: mpsc::Sender<EzExternalProxyRequest>,
-        to_bridge_tx: mpsc::Sender<InvokeEzResponse>,
+        to_proxy_tx: ProxyRequestSender,
+        to_bridge_tx: BridgeResponseSender,
         metadata_tx: oneshot::Sender<ControlPlaneMetadata>,
     ) {
         let mut response_metadata: Option<ControlPlaneMetadata> = None;
@@ -146,16 +169,11 @@ impl ExternalProxyConnector {
             }
             if let Err(e) = validate_external_call(&invoke_request) {
                 log::warn!("External call rejected by policy for isolate {}: {}", isolate_id, e);
-                let err = ExternalProxyConnectorError::TranslationError(format!(
-                    "Permission Denied: {}",
-                    e
-                ));
-                if Self::send_to_bridge(
-                    &to_bridge_tx,
-                    error_to_response(err, response_metadata.clone()),
-                )
-                .await
-                .is_err()
+                let err_msg = format!("Permission Denied: {e:#?}");
+                if to_bridge_tx
+                    .unobserved_send(Err(Status::permission_denied(err_msg)))
+                    .await
+                    .is_err()
                 {
                     break;
                 }
@@ -164,19 +182,17 @@ impl ExternalProxyConnector {
 
             match translate_to_proxy_request(invoke_request) {
                 Ok(proxy_request) => {
-                    if to_proxy_tx.send(proxy_request).await.is_err() {
+                    if to_proxy_tx.send_request(proxy_request).await.is_err() {
                         log::warn!("Proxy request channel closed. Stopping forward task.");
                         break;
                     }
                 }
                 Err(e) => {
                     log::error!("Failed to translate request for proxy: {:?}", e);
-                    if Self::send_to_bridge(
-                        &to_bridge_tx,
-                        error_to_response(e, response_metadata.clone()),
-                    )
-                    .await
-                    .is_err()
+                    if to_bridge_tx
+                        .unobserved_send(Err(Status::invalid_argument(e.to_string())))
+                        .await
+                        .is_err()
                     {
                         break;
                     }
@@ -189,8 +205,9 @@ impl ExternalProxyConnector {
     /// Handles the response stream: receives from proxy, translates, and sends to bridge.
     async fn handle_responses(
         mut response_stream: tonic::codec::Streaming<EzExternalProxyResponse>,
-        to_bridge_tx: mpsc::Sender<InvokeEzResponse>,
+        to_bridge_tx: BridgeResponseSender,
         metadata_rx: oneshot::Receiver<ControlPlaneMetadata>,
+        metrics: ExternalProxyConnectorMetrics,
     ) {
         let response_metadata = match metadata_rx.await {
             Ok(m) => m,
@@ -200,31 +217,19 @@ impl ExternalProxyConnector {
             }
         };
         while let Some(proxy_response_result) = response_stream.next().await {
+            let _msg_timer = MessageTimerGuard::new(&metrics, &[]);
             let response_to_send = match proxy_response_result {
                 Ok(proxy_response) => {
-                    translate_from_proxy_response(proxy_response, response_metadata.clone())
+                    Ok(translate_from_proxy_response(proxy_response, response_metadata.clone()))
                 }
-                Err(status) => Err(ExternalProxyConnectorError::from(status)),
+                Err(status) => Err(status),
             };
 
-            let final_response = response_to_send
-                .unwrap_or_else(|err| error_to_response(err, Some(response_metadata.clone())));
-
-            if Self::send_to_bridge(&to_bridge_tx, final_response).await.is_err() {
+            if to_bridge_tx.send_response(response_to_send).await.is_err() {
                 break;
             }
         }
         log::info!("gRPC stream from external proxy has ended.");
-    }
-    /// Sends a response to the bridge channel and logs a warning if the send fails.
-    async fn send_to_bridge(
-        to_bridge_tx: &mpsc::Sender<InvokeEzResponse>,
-        response: InvokeEzResponse,
-    ) -> Result<(), ()> {
-        if let Err(e) = to_bridge_tx.send(response).await {
-            log::warn!("Failed to send response to bridge: channel closed: {}", e);
-        }
-        Ok(())
     }
 }
 
@@ -260,36 +265,71 @@ impl ExternalProxyChannel for ExternalProxyConnector {
 
         // Translate and send unary_call request
         let proxy_request = translate_to_proxy_request(request)?;
+        let attrs = MetricAttributes::from(&proxy_request);
+        self.metrics.record_message_size_bytes(attrs.request(), proxy_request.encoded_len() as u64);
+
+        let _tracker = CallTracker::new(self.metrics.clone(), attrs.base());
+        let base_attrs = attrs.base();
+        let _msg_timer = MessageTimerGuard::new(&self.metrics, &base_attrs);
+
         let mut tonic_request = tonic::Request::new(proxy_request);
         if let Some(duration) = timeout {
             tonic_request.set_timeout(duration);
         }
-        let response = self.client.clone().unary_call(tonic_request).await?;
+        let mut client = EzExternalProxyServiceClient::new(self.client_channel_pool.next_channel())
+            .max_decoding_message_size(self.max_decoding_message_size);
+        let response = client
+            .unary_call(tonic_request)
+            .await
+            .map_err(ExternalProxyConnectorError::UnaryCallFailed)?;
+
+        let proxy_response = response.into_inner();
+        self.metrics
+            .record_message_size_bytes(attrs.response(), proxy_response.encoded_len() as u64);
 
         // Translate the proxy's response back and return.
-        translate_from_proxy_response(response.into_inner(), new_metadata)
+        Ok(translate_from_proxy_response(proxy_response, new_metadata))
     }
 
     /// Proxies a bidirectional stream between an Isolate and the external proxy.
+    ///
+    /// # Deadlock Warning
+    ///
+    /// This function spawns a background task that waits for the first request from the
+    /// `from_bridge_rx` receiver to extract `ControlPlaneMetadata` before establishing the
+    /// connection to the external proxy. Callers **must** ensure that at least one request is sent
+    /// to `from_bridge_rx` to avoid a deadlock where the stream is never established.
+    ///
+    /// # Error Handling
+    ///
+    /// Unlike typical gRPC methods, this function does *not* return `Err` if the connection
+    /// to the external proxy fails initially. Instead, it returns a `Receiver` for responses,
+    /// and any connection or stream errors are sent as `InvokeEzResponse` messages with a
+    /// non-OK status code through that receiver.
     async fn stream_proxy_external(
         &self,
         isolate_id: IsolateId,
         from_bridge_rx: Receiver<InvokeEzRequest>,
-    ) -> Result<Receiver<InvokeEzResponse>, ExternalProxyConnectorError> {
-        let mut client = self.client.clone();
-        let (to_bridge_tx, to_bridge_rx) = mpsc::channel(PROXY_CHANNEL_SIZE);
-        let (to_proxy_tx, to_proxy_rx) = mpsc::channel(PROXY_CHANNEL_SIZE);
+    ) -> Result<Receiver<Result<InvokeEzResponse, Status>>, ExternalProxyConnectorError> {
+        let mut client = EzExternalProxyServiceClient::new(self.client_channel_pool.next_channel())
+            .max_decoding_message_size(self.max_decoding_message_size);
+
+        let channels = metrics::observed_proxy_channel::create_proxy_channels::<
+            EzExternalProxyRequest,
+            Result<InvokeEzResponse, Status>,
+            ExternalProxyConnectorMetrics,
+        >(PROXY_CHANNEL_SIZE, self.metrics.clone());
 
         let (metadata_tx, metadata_rx) = oneshot::channel();
 
-        let request_stream = ReceiverStream::new(to_proxy_rx);
+        let request_stream = ReceiverStream::new(channels.req_rx);
         let request = tonic::Request::new(request_stream);
 
         tokio::spawn(Self::handle_requests(
             isolate_id,
             from_bridge_rx,
-            to_proxy_tx,
-            to_bridge_tx.clone(),
+            channels.req_tx,
+            channels.res_tx.clone(),
             metadata_tx,
         ));
 
@@ -300,13 +340,19 @@ impl ExternalProxyChannel for ExternalProxyConnector {
                     isolate_id
                 );
                 let response_stream = response.into_inner();
-                tokio::spawn(Self::handle_responses(response_stream, to_bridge_tx, metadata_rx));
-                Ok(to_bridge_rx)
+                tokio::spawn(Self::handle_responses(
+                    response_stream,
+                    channels.res_tx.clone(),
+                    metadata_rx,
+                    self.metrics.clone(),
+                ));
             }
             Err(e) => {
-                return Err(ExternalProxyConnectorError::StreamFailed(Box::new(e)));
+                let _ = channels.res_tx.unobserved_send(Err(e)).await;
             }
         }
+
+        Ok(channels.res_rx)
     }
 
     // Allows ExternalProxyChannel to be cloned.
@@ -336,10 +382,7 @@ pub fn translate_to_proxy_request(
     }
     let payload_bytes = payload.datagrams.into_iter().next().unwrap();
 
-    let target_domain = metadata
-        .destination_operator_domain
-        .strip_prefix(EXTERNAL_PREFIX)
-        .unwrap_or(&metadata.destination_operator_domain);
+    let target_domain = &metadata.destination_operator_domain;
 
     let resource = EzExternalResource {
         target: target_domain.to_string(),
@@ -347,20 +390,22 @@ pub fn translate_to_proxy_request(
         method_name: metadata.destination_method_name,
     };
 
-    Ok(EzExternalProxyRequest { resource: Some(resource), external_request_payload: payload_bytes })
+    Ok(EzExternalProxyRequest {
+        resource: Some(resource),
+        external_request_payload: payload_bytes,
+        request_metadata: HashMap::new(),
+    })
 }
 
 /// Translates a response from the external proxy back into the InvokeEzResponse format.
 fn translate_from_proxy_response(
     res: EzExternalProxyResponse,
     response_metadata: ControlPlaneMetadata,
-) -> Result<InvokeEzResponse, ExternalProxyConnectorError> {
+) -> InvokeEzResponse {
     let payload = EzPayloadData { datagrams: vec![res.external_response_payload] };
-    let status = IsolateStatus { code: 0, message: "OK".to_string() };
 
-    Ok(InvokeEzResponse {
+    InvokeEzResponse {
         ez_response_payload: Some(payload),
-        status: Some(status),
         control_plane_metadata: Some(response_metadata),
         ez_response_iscope: Some(EzPayloadIsolateScope {
             datagram_iscopes: vec![IsolateDataScope {
@@ -368,31 +413,5 @@ fn translate_from_proxy_response(
                 mapped_scope_owner: None,
             }],
         }),
-    })
-}
-
-// TODO: Have a common file for all gRPC Error Codes.
-/// Converts a connector error into an InvokeEzResponse with a non-OK status.
-fn error_to_response(
-    err: ExternalProxyConnectorError,
-    response_metadata: Option<ControlPlaneMetadata>,
-) -> InvokeEzResponse {
-    let status = match err {
-        ExternalProxyConnectorError::ConnectionFailed(msg) => {
-            IsolateStatus { code: 14, message: msg }
-        }
-        ExternalProxyConnectorError::StreamFailed(status) => {
-            IsolateStatus { code: status.code() as i32, message: status.message().to_string() }
-        }
-        ExternalProxyConnectorError::TranslationError(msg) => {
-            IsolateStatus { code: 3, message: msg }
-        }
-    };
-
-    InvokeEzResponse {
-        ez_response_payload: None,
-        status: Some(status),
-        control_plane_metadata: response_metadata,
-        ez_response_iscope: None,
     }
 }

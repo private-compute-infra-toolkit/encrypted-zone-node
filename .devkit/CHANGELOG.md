@@ -2,6 +2,127 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## 3.0.0 (2026-04-02)
+
+
+### ⚠ BREAKING CHANGES
+
+* The Go toolchain is no longer available in the
+build-environment images. Any scripts or builds relying on go
+inside the container will fail unless they install it separately
+through the devkit.json image configuration optios.
+
+
+### Dependencies
+
+* **deps:** Upgrade gemini-cli to 0.35.2
+
+
+### Features
+
+* use uv for python dependencies
+* mount only ~/.devkit/logs in the container
+* refactor devkit/coverage to run on host via uv
+* run devkit tools on host
+* run devkit/bep Python code from outside of docker containers
+* separate python progress logs from standard output
+* simplify bazelisk installation and remove go from build-env
+
+## 2.15.0 (2026-03-26)
+
+
+### Dependencies
+
+* **deps:** Upgrade gemini-cli to 0.35.0
+* **deps:** Upgrade gemini-cli to 0.35.1
+
+
+### Features
+
+* implement container event handler background service
+
+## 2.14.0 (2026-03-23)
+
+
+### Dependencies
+
+* **deps:** Update ruff to 0.15.7
+* **deps:** Update VSCode to 1.110.1
+* **deps:** Upgrade gemini-cli to 0.33.2
+* **deps:** Upgrade gemini-cli to 0.34.0
+
+
+### Features
+
+* Add --local flag to build script
+* Add --no-cache flag to build script
+* add background docker image cleanup
+* add get_all_docker_image_tags function and refactor build logic
+* add get_image_prefix to build script
+* add image name allowlist and regex filtering to docker cleanup
+* add manual entry point and configurable params to docker cleanup
+* enforce devkit/ prefix in docker image namespaces
+* implement actual docker image removal in cleanup script
+* implement docker image cleanup logic and batch processing
+* integrate docker image tag listing in background cleanup
+* log stdout and stderr from docker rmi in cleanup script
+* Rewrite scripts/docker_run into Python
+* Support docker images namespaces
+* support multiple target images in build script
+
+
+### Bug Fixes
+
+* Adjust function signature types per Python style guide ([84098e7]( )), closes [/google.github.io/styleguide/pyguide.html#31912]( )
+* Use proper images search path
+
+
+### Documentation
+
+* Do not use pages subdirectory
+
+## 2.13.0 (2026-03-13)
+
+
+### Dependencies
+
+* **deps:** Autoupdate pre-commit hooks
+* **deps:** Bump github actions versions
+* **deps:** Bump version of mypy pre-commit hook to 1.19.1
+* **deps:** Upgrade gemini-cli to 0.33.0
+* **deps:** Upgrade gemini-cli to 0.33.1
+* **deps:** Upgrade ripgrep to 15.1.0
+
+
+### Features
+
+* Install ripgrep using github debian package
+
+## 2.12.0 (2026-03-05)
+
+
+### Dependencies
+
+* **deps:** Upgrade gemini-cli to 0.29.3
+* **deps:** Upgrade gemini-cli to 0.29.5
+* **deps:** Upgrade gemini-cli to 0.29.7
+* **deps:** Upgrade gemini-cli to 0.30.0
+* **deps:** Upgrade gemini-cli to 0.31.0
+* **deps:** Upgrade gemini-cli to 0.32.1
+
+
+### Features
+
+* **devkit:** add vim to development environment
+* Enable terminal with colors by default
+
+## 2.11.0 (2026-02-19)
+
+
+### Dependencies
+
+* **deps:** Upgrade gemini-cli to 0.29.2
+
 ## 2.10.0 (2026-02-12)
 
 

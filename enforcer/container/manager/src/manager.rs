@@ -1,4 +1,4 @@
-// Copyright 2025 Google LLC
+// Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,8 +15,9 @@
 use anyhow::{ensure, Context, Result};
 use container::{Container, ContainerOptions, ContainerRoot, MountOptions, NetworkOptions};
 use container_manager_request::{
-    ContainerManagerRequest, GetRunStatusRequest, GetRunStatusResponse, MountFileResponse,
-    MountReadOnlyFile, MountWritableFile, ResetIsolateRequest, ResetIsolateResponse,
+    ContainerManagerRequest, GetRunStatusRequest, GetRunStatusResponse, MountDirectoryResponse,
+    MountFileResponse, MountReadOnlyDirectory, MountReadOnlyFile, MountWritableDirectory,
+    MountWritableFile, ResetIsolateRequest, ResetIsolateResponse,
 };
 use dashmap::DashMap;
 use data_scope::manifest_validator::ManifestValidator;
@@ -25,6 +26,7 @@ use data_scope::request::{
 };
 use data_scope_proto::enforcer::v1::DataScopeType;
 use derivative::Derivative;
+use fileshare_manager::FileshareManager;
 use interceptor::Interceptor;
 use isolate_ez_service_manager::IsolateEzServiceManager;
 use isolate_info::BinaryServicesIndex;
@@ -32,9 +34,9 @@ use isolate_info::{IsolateId, IsolateServiceInfo};
 use isolate_service_mapper::IsolateServiceMapper;
 use junction_trait::Junction;
 use manifest_parser::{get_strictest_scope, parse_manifest};
-use manifest_proto::enforcer::ez_backend_dependency::RouteType;
-use manifest_proto::enforcer::ez_manifest::ManifestType;
-use manifest_proto::enforcer::{
+use manifest_proto::enforcer::v1::ez_backend_dependency::RouteType;
+use manifest_proto::enforcer::v1::ez_manifest::ManifestType;
+use manifest_proto::enforcer::v1::{
     BinaryManifest, EzBackendDependency, EzManifest, EzServiceSpec, IsolateRuntimeConfigs,
 };
 use nix::sys::stat::Mode;
@@ -55,11 +57,11 @@ use tokio::sync::mpsc::Receiver;
 // This dir will be mounted for a [TempDir] in Enforcer for each Isolate.
 const SHARING_DIR_NAME: &str = "/enforcer-isolate-shared";
 // UDS name for EZ -> Isolate Bridge. This will exist under [SHARING_DIR_NAME] for Container.
-const EZ_ISOLATE_BRIDGE_UDS: &str = "/ez-isolate-bridge-uds";
+const EZ_ISOLATE_BRIDGE_UDS: &str = "ez-isolate-bridge-uds";
 // UDS name for Isolate -> EZ Bridge. This will exist under [SHARING_DIR_NAME] for Container.
-const ISOLATE_EZ_BRIDGE_ENFORCER_UDS: &str = "/isolate-ez-bridge-uds";
+const ISOLATE_EZ_BRIDGE_ENFORCER_UDS: &str = "isolate-ez-bridge-uds";
 // Name of FIFO used to signal from Enforcer to Isolate that the Isolate -> EZ Bridge is ready.
-const ISOLATE_EZ_BRIDGE_ENFORCER_UDS_READY: &str = "/isolate-ez-bridge-uds.ready";
+const ISOLATE_EZ_BRIDGE_ENFORCER_UDS_READY: &str = "isolate-ez-bridge-uds.ready";
 const DEV_SHM_PATH: &str = "/dev/shm";
 const RATIFIED_ISOLATE_DOMAIN: &str = "EZ_Trusted";
 
@@ -76,6 +78,7 @@ pub struct ContainerManager<ContainerT: Container> {
     isolate_service_mapper: IsolateServiceMapper,
     isolate_ez_service_mngr: IsolateEzServiceManager,
     shared_mem_manager: SharedMemManager,
+    fileshare_manager: FileshareManager,
     interceptor: Interceptor,
 }
 
@@ -87,6 +90,7 @@ pub struct ContainerManagerArgs {
     pub isolate_service_mapper: IsolateServiceMapper,
     pub isolate_ez_service_mngr: IsolateEzServiceManager,
     pub shared_mem_manager: SharedMemManager,
+    pub fileshare_manager: FileshareManager,
     pub manifest_validator: ManifestValidator,
     pub interceptor: Interceptor,
     // TODO Remove this once we have IsolateManager RPC in place
@@ -129,6 +133,7 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             isolate_service_mapper: args.isolate_service_mapper,
             isolate_ez_service_mngr: args.isolate_ez_service_mngr,
             shared_mem_manager: args.shared_mem_manager,
+            fileshare_manager: args.fileshare_manager,
             interceptor: args.interceptor,
         };
 
@@ -489,6 +494,12 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
                 ContainerManagerRequest::MountReadOnlyFile { req, resp } => {
                     let _ = resp.send(self.process_mount_read_only_file_request(req).await);
                 }
+                ContainerManagerRequest::MountWritableDirectory { req, resp } => {
+                    let _ = resp.send(self.process_mount_writable_directory_request(req).await);
+                }
+                ContainerManagerRequest::MountReadOnlyDirectory { req, resp } => {
+                    let _ = resp.send(self.process_mount_read_only_directory_request(req).await);
+                }
                 ContainerManagerRequest::GetRunStatus { req, resp } => {
                     let _ = resp.send(self.process_get_run_status_request(req).await);
                 }
@@ -620,6 +631,7 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             .await?;
         self.isolate_ez_service_mngr.stop_isolate_ez_server(reset_isolate_req.isolate_id).await;
         let _ = self.shared_mem_manager.remove_isolate(reset_isolate_req.isolate_id).await;
+        let _ = self.fileshare_manager.remove_isolate(reset_isolate_req.isolate_id).await;
 
         let container_startup_args_ref = self
             .container_startup_args_map
@@ -692,6 +704,47 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
         Ok(MountFileResponse {})
     }
 
+    async fn process_mount_writable_directory_request(
+        &self,
+        req: MountWritableDirectory,
+    ) -> Result<MountDirectoryResponse> {
+        let mut isolate_container_ref = self
+            .isolate_container_map
+            .get_mut(&req.isolate_id)
+            .context("Isolate not recognized while mounting writable directory")?;
+        let isolate_container = isolate_container_ref.value_mut();
+
+        let enforcer_dir_path = get_file_mount_enforcer_path(&req.enforcer_dir_name);
+        fs::create_dir_all(&enforcer_dir_path).context("Could not create enforcer directory")?;
+
+        isolate_container
+            .container
+            .mount(&enforcer_dir_path, &req.container_dir_name)
+            .context("Could not mount writable directory")?;
+
+        Ok(MountDirectoryResponse {})
+    }
+
+    async fn process_mount_read_only_directory_request(
+        &self,
+        req: MountReadOnlyDirectory,
+    ) -> Result<MountDirectoryResponse> {
+        let mut isolate_container_ref = self
+            .isolate_container_map
+            .get_mut(&req.isolate_id)
+            .context("Isolate not recognized while mounting read-only directory")?;
+        let isolate_container = isolate_container_ref.value_mut();
+
+        let enforcer_dir_path = get_file_mount_enforcer_path(&req.enforcer_dir_name);
+
+        isolate_container
+            .container
+            .mount_readonly(&enforcer_dir_path, &req.container_dir_name)
+            .context("Could not mount read-only directory")?;
+
+        Ok(MountDirectoryResponse {})
+    }
+
     async fn process_get_run_status_request(
         &self,
         req: GetRunStatusRequest,
@@ -706,19 +759,19 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
 }
 
 fn get_ez_isolate_bridge_enforcer_side_uds_path(sharing_dir: &TempDir) -> String {
-    sharing_dir.path().display().to_string() + EZ_ISOLATE_BRIDGE_UDS
+    sharing_dir.path().join(EZ_ISOLATE_BRIDGE_UDS).display().to_string()
 }
 
 fn get_isolate_ez_bridge_enforcer_side_uds_path(sharing_dir: &TempDir) -> String {
-    sharing_dir.path().display().to_string() + ISOLATE_EZ_BRIDGE_ENFORCER_UDS
+    sharing_dir.path().join(ISOLATE_EZ_BRIDGE_ENFORCER_UDS).display().to_string()
 }
 
 fn get_isolate_ez_bridge_ready_enforcer_side_fifo_path(sharing_dir: &TempDir) -> String {
-    sharing_dir.path().display().to_string() + ISOLATE_EZ_BRIDGE_ENFORCER_UDS_READY
+    sharing_dir.path().join(ISOLATE_EZ_BRIDGE_ENFORCER_UDS_READY).display().to_string()
 }
 
 fn get_file_mount_enforcer_path(enforcer_file_name: &str) -> String {
-    DEV_SHM_PATH.to_owned() + "/" + enforcer_file_name
+    std::path::Path::new(DEV_SHM_PATH).join(enforcer_file_name).display().to_string()
 }
 
 fn get_etc_hosts_path(publisher_id: &str, binary_filename: &str) -> PathBuf {

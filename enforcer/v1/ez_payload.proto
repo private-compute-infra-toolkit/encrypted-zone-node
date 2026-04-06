@@ -18,9 +18,6 @@ package enforcer.v1;
 
 import "enforcer/v1/ez_data_scope.proto";
 
-// Specifies import path for the generated Go code used to auto-generate SDK code from proto annotations.
-option go_package = "github.com/private-compute-infra-toolkit/ez/sdk/v1";
-
 // Holds an ordered list of datagrams that belong in various EzDataScopes (held
 // in a separate ordered list -- see EzPayloadScope). This message is defined
 // separately from EzPayloadScope solely to facilitate easier decoupling of

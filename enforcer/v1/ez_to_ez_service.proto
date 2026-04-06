@@ -30,17 +30,6 @@ service EzToEzApi {
   rpc EzStreamingCall(stream EzCallRequest) returns (stream EzCallResponse) {}
 }
 
-// Wire-format matches that of grpc's standard google.rpc.Status message,
-// but doesn't have external dependencies and doesn't allow extra details.
-//
-// Note: It is NOT safe to copy Status codes coming from untrusted code
-// without filtering the protobuf fields carefully. Unknown fields may
-// unintentionally be carried along.
-message EzStatus {
-  int32 code = 1;
-  string message = 2;
-}
-
 message EzCallRequest {
   // Includes routing data. Fields requester_is_local and responder_is_local
   // must be overwritten by receiving enforcer before forwarding to Isolate.
@@ -54,6 +43,4 @@ message EzCallResponse {
   // Outputs to be returned to the caller. Required.
   enforcer.v1.EzPayloadScope payload_scope = 1;
   enforcer.v1.EzPayloadData payload_data = 2;
-  // Required.
-  EzStatus status = 3;
 }

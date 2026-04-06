@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::common::ServiceMetrics;
+use crate::common::{self, ServiceMetrics};
 use crate::global;
 use opentelemetry::metrics::{Counter, Histogram, Meter, UpDownCounter};
 
@@ -42,6 +42,7 @@ impl IsolateEzServiceMetrics {
 
         let duration_sec = unsafe_meter
             .f64_histogram("enforcer.isolate_ez_service.request.duration")
+            .with_boundaries(common::default_latency_boundaries())
             .with_description("Latency of unary and streaming calls handled by the Isolate Bridge.")
             .with_unit("s")
             .build();
@@ -58,6 +59,7 @@ impl IsolateEzServiceMetrics {
 
         let message_processing_duration = unsafe_meter
             .f64_histogram("enforcer.isolate_ez_service.message.processing_duration")
+            .with_boundaries(common::default_latency_boundaries())
             .with_description("Time spent processing stream message.")
             .with_unit("s")
             .build();

@@ -1,4 +1,4 @@
-// Copyright 2025 Google LLC
+// Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,8 +14,7 @@
 
 use anyhow::Context;
 use std::ffi::CStr;
-use std::fs::File;
-use std::fs::OpenOptions;
+use std::fs::{self, File, OpenOptions};
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use tar::Archive;
@@ -34,17 +33,31 @@ pub fn unpack_file_system(tar_file_path: &str) -> anyhow::Result<TempDir> {
     Ok(tmp_dir)
 }
 
-pub fn create_mount_destinaton(parent: PathBuf, destination: &str) -> anyhow::Result<()> {
+/// Create a mount destination for the container.
+pub fn create_mount_destinaton(
+    parent: PathBuf,
+    destination: &str,
+    is_directory: bool,
+) -> anyhow::Result<()> {
     if destination.starts_with('/') {
         anyhow::bail!("destination cannot be an absolute path");
     }
     let mount_destination = parent.join(destination);
-    OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(mount_destination)
-        .context("File open failed for mount_destination")?;
+    if is_directory {
+        fs::create_dir_all(mount_destination)
+            .context("Directory create failed for mount_destination")?;
+    } else {
+        if let Some(parent_dir) = mount_destination.parent() {
+            fs::create_dir_all(parent_dir)
+                .context("Parent directory create failed for mount_destination")?;
+        }
+        OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(mount_destination)
+            .context("File open failed for mount_destination")?;
+    }
     Ok(())
 }
 

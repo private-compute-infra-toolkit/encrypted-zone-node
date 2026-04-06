@@ -17,6 +17,12 @@ Enforcer. This is useful for identifying performance bottlenecks and tracking im
     -   Support for A/B testing between different implementations.
     -   Detailed HTML reports.
 
+## Compiling Microbenchmarks
+
+```sh
+devkit/build bazel build //enforcer/benches:enforcer_bench
+```
+
 ## Running Benchmarks
 
 To run all benchmarks defined in this directory, the `--bench` flag must be passed to the benchmark
@@ -28,8 +34,8 @@ execution root.
 
 Here is an example of running the benchmarks with a custom report directory:
 
-```bash
-CRITERION_HOME=/tmp/ez_bench_results bazel run //enforcer/benches:enforcer_bench -- --bench
+```sh
+CRITERION_HOME=/tmp/ez_bench_results bazel-bin/enforcer/benches/enforcer_bench --bench
 ```
 
 Criterion.rs will execute the benchmarks, print a summary to the console, and generate the HTML
@@ -37,14 +43,14 @@ report in `${CRITERION_HOME}/report/index.html` (e.g., `/tmp/ez_bench_results/re
 
 > **TIP:** To see all available options and help for the benchmark executable, pass `-- --help`:
 >
-> ```bash
-> bazel run //enforcer/benches:enforcer_bench -- --help
+> ```sh
+> bazel-bin/enforcer/benches/enforcer_bench --help
 > ```
 >
 > **TIP:** To list all available benchmark functions, pass `-- --list`:
 >
-> ```bash
-> bazel run //enforcer/benches:enforcer_bench -- --list
+> ```sh
+> bazel-bin/enforcer/benches/enforcer_bench --list
 > ```
 
 ## Adding New Benchmarks

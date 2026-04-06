@@ -30,7 +30,8 @@ coverage --test_tag_filters=-require_privileged
 try-import %workspace%/.bazelrc.clang
 
 build --incompatible_strict_action_env
-build --strip=always
+# Preserve symbols so that pprof diagnostic profiles can show human-readable function names.
+build --strip=never
 try-import %workspace%/google_internal/.bazelrc
 
 build:run_all_tests --cache_test_results=no
@@ -55,3 +56,6 @@ build:debug --strip=never
 
 # Rust analyzer
 build --@rules_rust//:rustc_output_diagnostics=true --output_groups=+rust_lib_rustc_output,+rust_metadata_rustc_output
+
+# Tokio Console
+build --@rules_rust//rust/settings:extra_rustc_flags="--cfg=tokio_unstable"

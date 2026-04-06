@@ -19,10 +19,6 @@ package enforcer.v1;
 import "enforcer/v1/data_scope_type.proto";
 import "enforcer/v1/isolate_state.proto";
 
-// Specifies import path for the generated Go code used to auto-generate SDK
-// code from proto annotations.
-option go_package = "github.com/private-compute-infra-toolkit/ez/sdk/v1";
-
 // Health report of all Isolates run by the Enforcer.
 message EzIsolateHealthReport {
   // List of all Isolates.

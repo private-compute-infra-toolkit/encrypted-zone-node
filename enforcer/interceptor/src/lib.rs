@@ -17,7 +17,7 @@ use enforcer_proto::enforcer::v1::InvokeEzRequest;
 use ez_service_proto::enforcer::v1::CallRequest;
 use isolate_info::IsolateServiceInfo;
 use isolate_service_mapper::IsolateServiceMapper;
-use manifest_proto::enforcer::InterceptingServices;
+use manifest_proto::enforcer::v1::InterceptingServices;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -196,13 +196,12 @@ impl Interceptor {
             operator_domain: interceptor_info.intercepting_operator_domain,
             service_name: interceptor_info.intercepting_service_name,
         };
-        let Some(opaque_binary_service_index) =
+        if let Some(opaque_binary_service_index) =
             self.isolate_service_mapper.get_binary_index(&opaque_service_info).await
-        else {
-            anyhow::bail!("Unrecognized Opaque Service provided in InterceptingServices")
-        };
-        if opaque_binary_service_index.is_ratified_binary() {
-            anyhow::bail!("Intercepting Ratified Isolate services is not allowed")
+        {
+            if opaque_binary_service_index.is_ratified_binary() {
+                anyhow::bail!("Intercepting Ratified Isolate services is not allowed")
+            }
         }
 
         let ratified_service_info = IsolateServiceInfo {

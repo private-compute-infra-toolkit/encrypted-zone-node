@@ -7,8 +7,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use grpc_connector::connect;
 use grpc_connector::try_parse_grpc_timeout;
+use grpc_connector::GrpcChannelPool;
 use grpc_connector_test_proto::enforcer::grpc_connector::test::{
     test_service_server::{TestService, TestServiceServer},
     TestRequest, TestResponse,
@@ -81,7 +81,7 @@ async fn setup_tcp_server() -> (String, oneshot::Sender<()>) {
 #[tokio::test]
 async fn test_connect_tcp_success() {
     let (addr, shutdown_tx) = setup_tcp_server().await;
-    let result = connect(addr, 1, 10).await;
+    let result = GrpcChannelPool::new(addr, 1, 1, 10, 2).await;
     assert!(result.is_ok());
     let _ = shutdown_tx.send(());
 }
@@ -89,20 +89,22 @@ async fn test_connect_tcp_success() {
 #[tokio::test]
 async fn test_connect_uds_success() {
     let (addr, shutdown_tx, _temp_dir) = setup_uds_server().await;
-    let result = connect(addr, 1, 10).await;
+    let result = GrpcChannelPool::new(addr, 1, 1, 10, 2).await;
     assert!(result.is_ok());
     let _ = shutdown_tx.send(());
 }
 
 #[tokio::test]
 async fn test_connect_tcp_failure() {
-    let result = connect("http://127.0.0.1:1".to_string(), 2, 10).await;
+    let result = GrpcChannelPool::new("http://127.0.0.1:1".to_string(), 1, 2, 10, 2).await;
     assert!(result.is_err());
 }
 
 #[tokio::test]
 async fn test_connect_uds_failure() {
-    let result = connect("unix:/tmp/nonexistent-socket-for-test.sock".to_string(), 2, 10).await;
+    let result =
+        GrpcChannelPool::new("unix:/tmp/nonexistent-socket-for-test.sock".to_string(), 1, 2, 10, 2)
+            .await;
     assert!(result.is_err());
 }
 
@@ -113,7 +115,7 @@ async fn test_connect_tcp_retry_and_succeed() {
     let server_address = format!("http://{}", addr);
     drop(listener); // Close the listener to ensure the first connection fails.
 
-    let connect_future = connect(server_address, 5, 100);
+    let connect_future = GrpcChannelPool::new(server_address, 5, 1, 100, 2);
 
     // Give it time to fail once.
     tokio::time::sleep(Duration::from_millis(150)).await;
@@ -147,7 +149,7 @@ async fn test_connect_uds_retry_and_succeed() {
     let server_address = format!("unix:{}", uds_path.to_str().unwrap());
 
     // The file doesn't exist, so the first connection will fail.
-    let connect_future = connect(server_address, 5, 100);
+    let connect_future = GrpcChannelPool::new(server_address, 5, 1, 100, 2);
 
     // Give it time to fail once.
     tokio::time::sleep(Duration::from_millis(150)).await;

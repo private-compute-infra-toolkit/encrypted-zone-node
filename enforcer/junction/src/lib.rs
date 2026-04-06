@@ -1,4 +1,4 @@
-// Copyright 2025 Google LLC
+// Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,23 +26,15 @@ use enforcer_proto::enforcer::v1::{
 };
 use ez_error::EzError;
 use ez_error_trait::ToEzError;
-use hyper_util::rt::TokioIo;
+use fileshare_manager::{FileshareManager, FileshareManagerError};
+use grpc_connector::{GrpcChannelPool, DEFAULT_POOL_SIZE};
 use isolate_info::{BinaryServicesIndex, IsolateId, IsolateServiceInfo};
 use isolate_service_mapper::IsolateServiceMapper;
 use shared_memory_manager::SharedMemManager;
-use simple_tonic_stream::SimpleStreamingWrapper;
 use std::time::Instant;
-use tokio::net::UnixStream;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
-use tokio_retry::strategy::FixedInterval;
-use tokio_retry::Retry;
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::{
-    metadata::MetadataValue,
-    transport::{Channel, Endpoint, Uri},
-    Request,
-};
-use tower::service_fn;
+use tonic::{metadata::MetadataValue, Request, Status, Streaming};
 pub mod error;
 use dashmap::DashMap;
 use data_scope::data_scope_validator::{
@@ -61,7 +53,7 @@ use tokio::sync::oneshot;
 pub(crate) const CHANNEL_SIZE: usize = 128;
 const RETRY_COUNT: usize = 60;
 const RETRY_DELAY_MILLIS: u64 = 1000;
-const LOCAL_HOST_URI_PREFIX: &str = "http://localhost:";
+const RETRY_SCALING: u64 = 2;
 
 #[derive(Debug)]
 struct DestinationIsolateInfo {
@@ -82,7 +74,8 @@ pub struct IsolateJunction {
     isolate_service_mapper: IsolateServiceMapper,
     data_scope_requester: DataScopeRequester,
     shared_mem_manager: SharedMemManager,
-    isolate_client_map: Arc<DashMap<IsolateId, EzIsolateBridgeClient<Channel>>>,
+    isolate_channel_pool_map: Arc<DashMap<IsolateId, GrpcChannelPool>>,
+    fileshare_manager: FileshareManager,
     state_manager: IsolateStateManager,
     manifest_validator: ManifestValidator,
     metrics: JunctionMetrics,
@@ -92,6 +85,14 @@ pub struct IsolateJunction {
 impl Junction for IsolateJunction {
     // TODO Support session stickiness for each client based on their preference
     // (either at channel level or at request level)
+    #[tracing::instrument(
+        name = "Enforcer.IsolateJunction.invoke_isolate",
+        skip(invoke_isolate_request),
+        fields(
+            control_plane_metadata = ?invoke_isolate_request.control_plane_metadata,
+            isolate_input_iscope = ?invoke_isolate_request.isolate_input_iscope,
+        )
+    )]
     async fn invoke_isolate(
         &self,
         client_isolate_id_option: Option<IsolateId>,
@@ -101,10 +102,13 @@ impl Junction for IsolateJunction {
     ) -> Result<InvokeIsolateResponse, EzError> {
         let metric_attr =
             MetricAttributes::from(invoke_isolate_request.control_plane_metadata.as_ref());
+        tracing::debug!("after getting metric_attr");
         let _call_tracker = self.metrics.track_call(metric_attr.base());
+        tracing::debug!("after getting call_tracker");
 
         let destination_isolate_ids_result =
             self.get_isolate_id_based_on_scope(&invoke_isolate_request).await;
+        tracing::debug!("after getting destination_isolate_ids_result");
         match destination_isolate_ids_result {
             Ok(destination_isolate_info) => {
                 // If the DataScopeManager determined this Isolate should be retired after this
@@ -124,16 +128,19 @@ impl Junction for IsolateJunction {
                             return Err(e.to_ez_error());
                         }
                     };
-                let Some(isolate_client_ref) = self.isolate_client_map.get(&destination_isolate_id)
+                let Some(isolate_channel_pool_ref) =
+                    self.isolate_channel_pool_map.get(&destination_isolate_id)
                 else {
                     // TODO Retry connecting to the Isolate or remove it from DSM.
                     self.metrics.record_error(&metric_attr.base(), "invalid_destination_target");
                     log_destination_unavailable_error(invoke_isolate_request);
                     return Err(IsolateStatusCode::DestinationChannelClosed.to_ez_error());
                 };
-                let mut client = isolate_client_ref.value().clone();
+                let isolate_channel_pool = isolate_channel_pool_ref.value().clone();
                 // Drop the key/value reference immediately after the clone() to release any locks.
-                drop(isolate_client_ref);
+                drop(isolate_channel_pool_ref);
+
+                let mut client = EzIsolateBridgeClient::new(isolate_channel_pool.next_channel());
 
                 self.state_manager.increment_inflight_counter(destination_isolate_info.id).await;
                 let isolate_rpc_start_time = Instant::now();
@@ -168,6 +175,25 @@ impl Junction for IsolateJunction {
                                 log::warn!("MemShare failed: {:?}", mem_share_result);
                                 self.metrics.record_error(&metric_attr.base(), "mem_share_failed");
                                 return Err(IsolateStatusCode::MemShareFailed.to_ez_error());
+                            }
+                        }
+                        if !control_plane_metadata.fileshare_handles.is_empty() {
+                            let file_share_result = self
+                                .handle_fileshare(
+                                    control_plane_metadata,
+                                    destination_isolate_id,
+                                    client_isolate_id_option,
+                                )
+                                .await;
+                            if let Err(e) = file_share_result {
+                                log::warn!("FileShare failed: {:?}", e);
+                                self.metrics.record_error(&metric_attr.base(), "file_share_failed");
+                                if let Some(fileshare_err) =
+                                    e.downcast_ref::<FileshareManagerError>()
+                                {
+                                    return Err(fileshare_err.to_ez_error());
+                                }
+                                return Err(IsolateStatusCode::FileShareFailed.to_ez_error());
                             }
                         }
                         self.validate_invoke_response(
@@ -271,14 +297,20 @@ impl Junction for IsolateJunction {
                 )
                 .await;
             let Ok((isolate_tx_channel, invoke_isolate_response_stream)) = connect_result else {
+                let connect_error = connect_result.unwrap_err();
+                let connect_ez_error =
+                    EzError::Status(match connect_error.downcast_ref::<Status>() {
+                        Some(status) => status.clone(),
+                        _ => Status::internal(format!(
+                            "Error initiating stream with Isolate: {connect_error:#?}"
+                        )),
+                    });
                 // If send fails, decrement the counter we just incremented.
                 isolate_junction_clone
                     .state_manager
                     .decrement_inflight_counter(destination_isolate_info.id)
                     .await;
-                let _ = junction_to_client_tx
-                    .send(Err(IsolateStatusCode::DestinationChannelClosed.to_ez_error()))
-                    .await;
+                let _ = junction_to_client_tx.send(Err(connect_ez_error)).await;
                 return;
             };
 
@@ -326,16 +358,17 @@ impl Junction for IsolateJunction {
         isolate_address: String,
     ) -> anyhow::Result<()> {
         // TODO Make the overall delay configurable
-        let retry_strategy = FixedInterval::from_millis(RETRY_DELAY_MILLIS).take(RETRY_COUNT);
-        let transport_channel = Retry::spawn(retry_strategy, move || {
-            retryable_connect(LOCAL_HOST_URI_PREFIX.to_owned() + &isolate_address.clone())
-        })
+        let channel_pool = GrpcChannelPool::new(
+            format!("unix:{}", isolate_address),
+            DEFAULT_POOL_SIZE,
+            RETRY_COUNT,
+            RETRY_DELAY_MILLIS,
+            RETRY_SCALING,
+        )
         .await?;
-
-        let client = EzIsolateBridgeClient::new(transport_channel);
-        // Store the `EzIsolateBridgeClient`, we will use this `TonicClient` to make rpc requests
+        // Store the `GrpcChannelPool`, we will use this `GrpcChannelPool` to make rpc requests
         // to the `Isolate` for each connect_client/streaming_connect.
-        self.isolate_client_map.insert(isolate_id, client);
+        self.isolate_channel_pool_map.insert(isolate_id, channel_pool);
 
         Ok(())
     }
@@ -346,15 +379,16 @@ impl IsolateJunction {
         &self,
         isolate_id: IsolateId,
         initial_request: InvokeIsolateRequest,
-    ) -> anyhow::Result<(Sender<InvokeIsolateRequest>, SimpleStreamingWrapper<InvokeIsolateResponse>)>
-    {
-        let Some(isolate_client_ref) = self.isolate_client_map.get(&isolate_id) else {
+    ) -> anyhow::Result<(Sender<InvokeIsolateRequest>, Streaming<InvokeIsolateResponse>)> {
+        let Some(isolate_channel_pool_ref) = self.isolate_channel_pool_map.get(&isolate_id) else {
             log::info!("Missing isolate connection from connection map for isolate {}", isolate_id);
             return Err(IsolateStatusCode::InternalError.into());
         };
-        let mut client = isolate_client_ref.value().clone();
+        let isolate_channel_pool = isolate_channel_pool_ref.value().clone();
         // Drop the key/value reference immediately after the `clone()` to release any locks.
-        drop(isolate_client_ref);
+        drop(isolate_channel_pool_ref);
+
+        let mut client = EzIsolateBridgeClient::new(isolate_channel_pool.next_channel());
 
         let (junction_to_isolate_tx, junction_to_isolate_rx) =
             channel::<InvokeIsolateRequest>(CHANNEL_SIZE);
@@ -363,8 +397,7 @@ impl IsolateJunction {
         junction_to_isolate_tx.send(initial_request).await?;
 
         let inbound = client.stream_invoke_isolate(outbound_stream).await?;
-        let invoke_isolate_response_stream: SimpleStreamingWrapper<InvokeIsolateResponse> =
-            inbound.into_inner().into();
+        let invoke_isolate_response_stream = inbound.into_inner();
 
         Ok((junction_to_isolate_tx, invoke_isolate_response_stream))
     }
@@ -373,6 +406,7 @@ impl IsolateJunction {
         data_scope_requester: DataScopeRequester,
         isolate_service_mapper: IsolateServiceMapper,
         shared_mem_manager: SharedMemManager,
+        fileshare_manager: FileshareManager,
         state_manager: IsolateStateManager,
         manifest_validator: ManifestValidator,
     ) -> Self {
@@ -381,7 +415,8 @@ impl IsolateJunction {
             isolate_service_mapper,
             data_scope_requester,
             shared_mem_manager,
-            isolate_client_map: Arc::new(DashMap::new()),
+            isolate_channel_pool_map: Arc::new(DashMap::new()),
+            fileshare_manager,
             state_manager,
             manifest_validator,
             metrics,
@@ -479,7 +514,7 @@ impl IsolateJunction {
     // Proxy InvokeIsolateResponses from Isolate to client for streaming rpc
     async fn proxy_streaming_isolate_responses(
         self,
-        mut invoke_isolate_response_stream: SimpleStreamingWrapper<InvokeIsolateResponse>,
+        mut invoke_isolate_response_stream: Streaming<InvokeIsolateResponse>,
         junction_to_client_tx: Sender<Result<InvokeIsolateResponse, EzError>>,
         request_context: RequestContext,
         metrics_context_rx: oneshot::Receiver<(
@@ -492,15 +527,30 @@ impl IsolateJunction {
             Err(_) => return,
         };
 
-        while let Some(invoke_isolate_response) = invoke_isolate_response_stream.message().await {
-            let _timer = self.metrics.track_message_processing(metric_attr.response());
-            self.process_invoke_isolate_response(
-                invoke_isolate_response,
-                junction_to_client_tx.clone(),
-                &request_context,
-                &metric_attr.base(),
-            )
-            .await;
+        loop {
+            let invoke_result = invoke_isolate_response_stream.message().await;
+            match invoke_result {
+                Ok(Some(response)) => {
+                    let _timer = self.metrics.track_message_processing(metric_attr.response());
+                    self.process_invoke_isolate_response(
+                        response,
+                        junction_to_client_tx.clone(),
+                        &request_context,
+                        &metric_attr.base(),
+                    )
+                    .await;
+                }
+                Ok(None) => {
+                    log::info!(
+                        "Received half-close/writes-done signal from bridge; closing stream"
+                    );
+                    break;
+                }
+                Err(e) => {
+                    let _ = junction_to_client_tx.send(Err(EzError::Status(e))).await;
+                    break;
+                }
+            }
         }
         // Decrement the inflight counter once the streaming RPC completes.
         self.state_manager.decrement_inflight_counter(request_context.isolate_id).await;
@@ -536,6 +586,27 @@ impl IsolateJunction {
                         let _ = junction_to_client_tx
                             .send(Err(IsolateStatusCode::MemShareFailed.to_ez_error()))
                             .await;
+                    }
+                }
+                if !control_plane_metadata.fileshare_handles.is_empty() {
+                    let file_share_result = self
+                        .handle_fileshare(
+                            control_plane_metadata,
+                            isolate_id,
+                            request_source_isolate_id_option,
+                        )
+                        .await;
+                    if let Err(e) = file_share_result {
+                        log::info!("FileShare failed: {:?}", e);
+                        self.metrics.record_error(attributes, "file_share_failed");
+                        let ez_err = if let Some(fileshare_err) =
+                            e.downcast_ref::<FileshareManagerError>()
+                        {
+                            fileshare_err.to_ez_error()
+                        } else {
+                            IsolateStatusCode::FileShareFailed.to_ez_error()
+                        };
+                        let _ = junction_to_client_tx.send(Err(ez_err)).await;
                     }
                 }
                 if let Err(e) = self
@@ -648,16 +719,23 @@ impl IsolateJunction {
         }
         Ok(())
     }
-}
 
-async fn retryable_connect(address: String) -> anyhow::Result<Channel, tonic::transport::Error> {
-    let endpoint = Endpoint::from_shared(address)?;
-    endpoint
-        .connect_with_connector(service_fn(|uri: Uri| async move {
-            let path = uri.path();
-            Ok::<_, std::io::Error>(TokioIo::new(UnixStream::connect(path).await?))
-        }))
-        .await
+    async fn handle_fileshare(
+        &self,
+        control_plane_metadata: &ControlPlaneMetadata,
+        source_isolate_id: IsolateId,
+        destination_isolate_id_option: Option<IsolateId>,
+    ) -> anyhow::Result<()> {
+        let Some(destination_isolate_id) = destination_isolate_id_option else {
+            return Err(anyhow::anyhow!("missing destination_isolate_id for file share"));
+        };
+        for fileshare_handle in &control_plane_metadata.fileshare_handles {
+            self.fileshare_manager
+                .share_file(fileshare_handle, source_isolate_id, destination_isolate_id)
+                .await?;
+        }
+        Ok(())
+    }
 }
 
 fn mask_streaming_msg_id(

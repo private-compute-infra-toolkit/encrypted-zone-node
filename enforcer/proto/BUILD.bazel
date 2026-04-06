@@ -14,8 +14,8 @@
 
 genrule(
     name = "test_manifest_descriptor_set",
-    srcs = ["//enforcer:manifest_descriptor_set"],
-    outs = ["manifest_descriptor_set.pb"],
+    srcs = ["//enforcer/v1:manifest_descriptor_set"],
+    outs = ["v1/manifest_descriptor_set.pb"],
     cmd = "cp $< $@",
     visibility = [
         "//enforcer/benches:__pkg__",

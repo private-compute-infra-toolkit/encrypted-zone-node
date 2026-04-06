@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use opentelemetry::propagation::{Extractor, Injector, TextMapPropagator};
+use opentelemetry::trace::TraceContextExt;
+use opentelemetry::Context;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use std::collections::HashMap;
 use tonic::Request;
@@ -44,6 +46,19 @@ impl<'a> Extractor for TonicHeaderExtractor<'a> {
     }
 }
 
+/// A custom OpenTelemetry extractor to read trace context from a HashMap.
+pub struct HashMapExtractor<'a>(pub &'a HashMap<String, String>);
+
+impl<'a> Extractor for HashMapExtractor<'a> {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key).map(|v| v.as_str())
+    }
+
+    fn keys(&self) -> Vec<&str> {
+        self.0.keys().map(|k| k.as_str()).collect()
+    }
+}
+
 struct HashMapInjector<'a>(&'a mut HashMap<String, String>);
 
 impl<'a> Injector for HashMapInjector<'a> {
@@ -52,17 +67,22 @@ impl<'a> Injector for HashMapInjector<'a> {
     }
 }
 
-/// Extracts trace context headers (traceparent, tracestate) from a tonic request.
-pub fn get_trace_context<T>(req: &Request<T>) -> HashMap<String, String> {
+/// Injects the current span's context for propagation.
+pub fn get_trace_context<T>(_req: &Request<T>) -> HashMap<String, String> {
     let mut headers = HashMap::new();
     let propagator = TraceContextPropagator::new();
-    let context = propagator.extract(&TonicHeaderExtractor::new(req));
-    propagator.inject_context(&context, &mut HashMapInjector(&mut headers));
 
-    if !headers.is_empty() {
-        log::info!("Extracted trace context: {:?}", headers);
+    // Inject the current context. This assumes that a tracing middleware has already
+    // been used to establish the parent-child relationship between the incoming request
+    // and the current span.
+    let context = Context::current();
+    if context.span().span_context().is_valid() {
+        // This will create the `traceparent` and `tracestate` headers
+        // with the correct values for the downstream service.
+        propagator.inject_context(&context, &mut HashMapInjector(&mut headers));
+        log::info!("Injected trace context for propagation: {:?}", headers);
     } else {
-        log::debug!("No trace context headers found");
+        log::debug!("No valid trace context to propagate.");
     }
 
     headers

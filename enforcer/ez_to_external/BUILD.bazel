@@ -17,12 +17,6 @@ load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 package(default_visibility = ["//enforcer:__subpackages__"])
 
 rust_library(
-    name = "external_proxy_connector_constants",
-    srcs = ["src/constants.rs"],
-    visibility = ["//visibility:public"],
-)
-
-rust_library(
     name = "external_proxy_connector",
     srcs = [
         "src/external_proxy_connector.rs",
@@ -31,13 +25,16 @@ rust_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
-        ":external_proxy_connector_constants",
         "//enforcer/data_scope",
         "//enforcer/grpc_connector",
         "//enforcer/isolate:isolate_info",
+        "//enforcer/metrics",
+        "//enforcer/trace_context",
         "//enforcer/v1:enforcer_rust",
+        "//enforcer/v1:external_proxy_rust",
         "//enforcer/v1:payload_rust",
         "@crates//:log",
+        "@crates//:prost",
         "@crates//:thiserror",
         "@crates//:tokio",
         "@crates//:tokio-stream",
@@ -60,7 +57,37 @@ rust_test(
         "//enforcer/isolate:isolate_info",
         "//enforcer/v1:data_scope_rust",
         "//enforcer/v1:enforcer_rust",
+        "//enforcer/v1:external_proxy_rust",
         "//enforcer/v1:payload_rust",
+        "@crates//:rand",
+        "@crates//:tempfile",
+        "@crates//:tokio",
+        "@crates//:tokio-stream",
+        "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "external_proxy_connector_metrics_test",
+    size = "small",
+    srcs = [
+        "test/external_proxy_connector_metrics_test.rs",
+        "test/external_proxy_connector_test.rs",
+    ],
+    args = ["--test-threads=1"],
+    tags = ["test"],
+    deps = [
+        ":external_proxy_connector",
+        "//enforcer/data_scope",
+        "//enforcer/grpc_connector",
+        "//enforcer/isolate:isolate_info",
+        "//enforcer/metrics",
+        "//enforcer/metrics:metrics_test_utils",
+        "//enforcer/v1:data_scope_rust",
+        "//enforcer/v1:enforcer_rust",
+        "//enforcer/v1:external_proxy_rust",
+        "//enforcer/v1:payload_rust",
+        "@crates//:fake-opentelemetry-collector",
         "@crates//:rand",
         "@crates//:tempfile",
         "@crates//:tokio",

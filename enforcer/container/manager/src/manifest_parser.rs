@@ -14,12 +14,12 @@
 
 use anyhow::{Context, Result};
 use data_scope_proto::enforcer::v1::DataScopeType;
-use manifest_proto::enforcer::{EzManifest, EzMethodSpec, IsolateRuntimeConfigs};
+use manifest_proto::enforcer::v1::{EzManifest, EzMethodSpec, IsolateRuntimeConfigs};
 use prost_reflect::{DescriptorPool, DynamicMessage};
 use serde_json::de::Deserializer;
 
-const PROTO_DESCRIPTOR_PATH: &str = "enforcer/proto/manifest_descriptor_set.pb";
-const PROTO_DESCRIPTOR_FILE_NAME: &str = "enforcer.EzManifest";
+const PROTO_DESCRIPTOR_BYTES: &[u8] = include_bytes!(env!("TEST_MANIFEST_DESCRIPTOR_SET_PATH"));
+const PROTO_DESCRIPTOR_MESSAGE: &str = "enforcer.v1.EzManifest";
 
 /// Parses a JSON manifest file into an `EzManifest` proto.
 ///
@@ -37,16 +37,12 @@ const PROTO_DESCRIPTOR_FILE_NAME: &str = "enforcer.EzManifest";
 /// - `Ok(EzManifest)` containing the parsed manifest.
 /// - `Err(anyhow::Error)` if file reading, descriptor loading, or parsing fails.
 pub fn parse_manifest(manifest_path: String) -> Result<EzManifest> {
-    // Get proto descriptor set file
-    let file_desc_bytes =
-        std::fs::read(PROTO_DESCRIPTOR_PATH).context(format!("opening {PROTO_DESCRIPTOR_PATH}"))?;
-
-    let pool = DescriptorPool::decode(file_desc_bytes.as_slice())
-        .context(format!("decoding {PROTO_DESCRIPTOR_PATH}"))?;
+    let pool = DescriptorPool::decode(PROTO_DESCRIPTOR_BYTES)
+        .context("decoding manifest descriptor set")?;
 
     let message_descriptor = pool
-        .get_message_by_name(PROTO_DESCRIPTOR_FILE_NAME)
-        .context(format!("Couldn't find message descriptor {PROTO_DESCRIPTOR_FILE_NAME}"))?;
+        .get_message_by_name(PROTO_DESCRIPTOR_MESSAGE)
+        .context(format!("Couldn't find message descriptor for {PROTO_DESCRIPTOR_MESSAGE}"))?;
 
     // Parse provided manifest json file into EzManifest
     let manifest_json_string = std::fs::read_to_string(&manifest_path)
@@ -79,13 +75,12 @@ pub fn parse_isolate_runtime_configs(configs_json: String) -> Result<IsolateRunt
     if configs_json.is_empty() {
         return Ok(IsolateRuntimeConfigs::default());
     }
-    let file_desc_bytes =
-        std::fs::read(PROTO_DESCRIPTOR_PATH).context(format!("opening {PROTO_DESCRIPTOR_PATH}"))?;
-    let pool = DescriptorPool::decode(file_desc_bytes.as_slice())
-        .context(format!("decoding {PROTO_DESCRIPTOR_PATH}"))?;
-    let message_descriptor = pool
-        .get_message_by_name("enforcer.IsolateRuntimeConfigs")
-        .context("Couldn't find message descriptor enforcer.IsolateRuntimeConfigs".to_string())?;
+    let pool = DescriptorPool::decode(PROTO_DESCRIPTOR_BYTES)
+        .context("decoding manifest descriptor set")?;
+    let message_descriptor =
+        pool.get_message_by_name("enforcer.v1.IsolateRuntimeConfigs").context(
+            "Couldn't find message descriptor enforcer.v1.IsolateRuntimeConfigs".to_string(),
+        )?;
     let mut deserializer = Deserializer::from_str(&configs_json);
     let dynamic_message = DynamicMessage::deserialize(message_descriptor, &mut deserializer)
         .context("couldn't parse isolate config configs".to_string())?;

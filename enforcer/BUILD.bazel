@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,62 +13,43 @@
 # limitations under the License.
 
 load("@oak//bazel:defs.bzl", "oci_runtime_bundle")
-load("@rules_buf//buf:defs.bzl", "buf_lint_test")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load")
 load("@rules_pkg//pkg:mappings.bzl", "pkg_attributes", "pkg_files", "pkg_mkdirs")
 load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
-load("@rules_proto//proto:defs.bzl", "proto_descriptor_set", "proto_library")
 load("@rules_rust//rust:defs.bzl", "rust_binary")
-load("@rules_rust_prost//:defs.bzl", "rust_prost_library")
 load("//:build_flavors.bzl", "flavors")
 load("//:container_deps.bzl", "get_user")
-
-proto_library(
-    name = "manifest_proto",
-    srcs = ["ez_manifest.proto"],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//enforcer/v1:data_scope_proto",
-    ],
-)
-
-buf_lint_test(
-    name = "manifest_lint",
-    size = "small",
-    config = ":buf.yaml",
-    targets = [":manifest_proto"],
-)
-
-proto_descriptor_set(
-    name = "manifest_descriptor_set",
-    visibility = ["//visibility:public"],
-    deps = [":manifest_proto"],
-)
-
-rust_prost_library(
-    name = "manifest_rust",
-    proto = ":manifest_proto",
-    visibility = ["//visibility:public"],
-)
 
 [
     rust_binary(
         name = "enforcer{}".format(flavor.suffix),
         srcs = ["main.rs"],
         crate_features = flavor.features,
+        rustc_flags = [
+            # TODO: consider building two binaries (with diagnostics service
+            # without optimalisations and without diagnostics service but with optimalisations)
+            "-C",
+            "debuginfo=2",
+            "-C",
+            "opt-level=0",
+        ],
         visibility = ["//visibility:public"],
         deps = [
             "//enforcer/container:container_custom",
             "//enforcer/container/manager:container_manager{}".format(flavor.suffix),
+            "//enforcer/console_helper",
             "//enforcer/container/manager:container_manager_request",
             "//enforcer/container/manager:container_manager_requester",
             "//enforcer/container/manager:manifest_parser",
             "//enforcer/data_scope",
+            "//enforcer/diagnostics",
+            "//enforcer/diagnostics/v1:diagnostics_rust",
             "//enforcer/ez_to_external:external_proxy_connector",
             "//enforcer/ez_to_ez:inbound_ez_to_ez_handler",
             "//enforcer/ez_to_ez:outbound_ez_to_ez_client",
             "//enforcer/ez_to_ez:outbound_ez_to_ez_handler",
             "//enforcer/interceptor",
+            "//enforcer/isolate:fileshare_manager",
             "//enforcer/isolate:isolate_ez_service_manager",
             "//enforcer/isolate:isolate_info",
             "//enforcer/isolate:isolate_service_mapper",
@@ -76,6 +57,7 @@ rust_prost_library(
             "//enforcer/junction",
             "//enforcer/v1:ez_to_ez_service_rust",
             "//enforcer/logging:logging{}".format(flavor.suffix),
+            "//enforcer/ez_to_ez:mtls",
             "//enforcer/health:health_manager{}".format(flavor.suffix),
             "//enforcer/metrics",
             "//enforcer/public_api:public_api{}".format(flavor.suffix),
@@ -87,17 +69,21 @@ rust_prost_library(
             "@crates//:anyhow",
             "@crates//:async-stream",
             "@crates//:clap",
+            "@crates//:console-subscriber",
             "@crates//:http",
             "@crates//:libc",
             "@crates//:log",
             "@crates//:log4rs",
             "@crates//:opentelemetry",
+            "@crates//:opentelemetry-http",
             "@crates//:opentelemetry_sdk",
+            "@crates//:pprof",
             "@crates//:prost",
             "@crates//:tokio",
             "@crates//:tokio-stream",
             "@crates//:tonic",
             "@crates//:tracing",
+            "@crates//:tracing-opentelemetry",
             "@crates//:users",
         ],
     )
@@ -117,13 +103,6 @@ rust_prost_library(
     for flavor in flavors
 ]
 
-pkg_files(
-    name = "enforcer_proto",
-    srcs = [":manifest_descriptor_set"],
-    attributes = pkg_attributes(mode = "0400"),
-    prefix = "/enforcer/proto",
-)
-
 user = get_user(user = "nonroot")
 
 pkg_mkdirs(
@@ -138,7 +117,7 @@ pkg_mkdirs(
         srcs = [
             ":devshm",
             ":enforcer_bin{}".format(flavor.suffix),
-            ":enforcer_proto",
+            "//enforcer/v1:enforcer_proto_pkg",
         ],
         owner = "{}.{}".format(
             user.uid,
@@ -194,24 +173,33 @@ enforcer_repo_tag_tmpl = "encrypted-zone/enforcer{flavor}:0.1-{user}"
 genrule(
     name = "copy_to_dist",
     srcs = [
+        ":enforcer_debug",
         ":enforcer.tar",
         ":enforcer_debug.tar",
         ":enforcer_rootfs.tar",
         ":enforcer_rootfs_debug.tar",
+        ":enforcer_rootfs_test.tar",
         "//enforcer/v1:enforcer_descriptor_set",
         "//enforcer/v1:ez_service_descriptor_set",
+        "//enforcer/v1:manifest_descriptor_set",
     ],
     outs = ["copy_to_dist.bin"],
     cmd_bash = """cat <<EOF >'$@'
+set -o errexit
 mkdir -p {dir}/proto
 cp -f $(execpath :enforcer.tar) {dir}/enforcer_oci.tar
+cp -f $(execpath :enforcer_debug) {dir}/enforcer_debug
 cp -f $(execpath :enforcer_debug.tar) {dir}/enforcer_oci_debug.tar
 cp -f $(execpath :enforcer_rootfs.tar) {dir}/enforcer_rootfs.tar
 cp -f $(execpath :enforcer_rootfs_debug.tar) {dir}/enforcer_rootfs_debug.tar
 # TODO: b/478233839 - Update what is copied for the perf and test variants.
 cp -f $(execpath :enforcer_rootfs.tar) {dir}/enforcer_rootfs_perf.tar
-cp -f $(execpath :enforcer_rootfs_debug.tar) {dir}/enforcer_rootfs_test.tar
-cp -f $(execpath //enforcer/v1:ez_service_descriptor_set) $(execpath //enforcer/v1:enforcer_descriptor_set) {dir}/proto
+cp -f $(execpath :enforcer_rootfs_test.tar) {dir}/enforcer_rootfs_test.tar
+cp -f $(execpath //enforcer/v1:ez_service_descriptor_set) \
+      $(execpath //enforcer/v1:enforcer_descriptor_set) \
+      $(execpath //enforcer/v1:manifest_descriptor_set) {dir}/proto
+cp -f $(execpath :enforcer_debug) {dir}/enforcer_bin
+echo "Successfully copied all artifacts to {dir}"
 EOF""".format(dir = "dist/enforcer"),
     executable = True,
     local = True,

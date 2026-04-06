@@ -14,7 +14,7 @@
 
 use isolate_info::{IsolateServiceInfo, Route};
 use isolate_service_mapper::IsolateServiceMapper;
-use manifest_proto::enforcer::ez_backend_dependency::RouteType;
+use manifest_proto::enforcer::v1::ez_backend_dependency::RouteType;
 
 const TEST_OPERATOR_DOMAIN: &str = "test_operator_domain";
 const TEST_SERVICE_NAME: &str = "test_service_name";

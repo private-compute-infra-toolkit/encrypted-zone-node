@@ -1,4 +1,4 @@
-// Copyright 2025 Google LLC
+// Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -424,7 +424,8 @@ impl Container for ContainerCustom {
     fn mount(&mut self, source: &str, destination: &str) -> anyhow::Result<()> {
         match self.status {
             Status::Started => {
-                utils::create_mount_destinaton(self.root.clone(), destination)?;
+                let is_directory = Path::new(source).is_dir();
+                utils::create_mount_destinaton(self.root.clone(), destination, is_directory)?;
                 utils::move_mount_to_namespace(
                     source,
                     destination,
@@ -442,7 +443,8 @@ impl Container for ContainerCustom {
     fn mount_readonly(&mut self, source: &str, destination: &str) -> anyhow::Result<()> {
         match self.status {
             Status::Started => {
-                utils::create_mount_destinaton(self.root.clone(), destination)?;
+                let is_directory = Path::new(source).is_dir();
+                utils::create_mount_destinaton(self.root.clone(), destination, is_directory)?;
                 utils::move_mount_to_namespace(
                     source,
                     destination,

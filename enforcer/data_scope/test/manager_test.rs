@@ -183,17 +183,14 @@ async fn test_add_isolate_error_too_strict_scope() -> Result<(), Box<dyn std::er
 async fn test_validate_isolate_scope_unknown_scope() -> Result<(), Box<dyn std::error::Error>> {
     let data_scope_requester = DataScopeRequester::new(u64::MAX);
 
-    for is_ratified in [true, false] {
-        let add_isolate_request = create_add_isolate_request(is_ratified);
-        let isolate_id = add_isolate_request.isolate_id;
-        assert!(data_scope_requester.add_isolate(add_isolate_request).await.is_ok());
+    let add_isolate_request = create_add_isolate_request(false);
+    let isolate_id = add_isolate_request.isolate_id;
+    assert!(data_scope_requester.add_isolate(add_isolate_request).await.is_ok());
 
-        let validate_request =
-            create_validate_isolate_request(isolate_id, DataScopeType::Unspecified);
-        let result = data_scope_requester.validate_isolate_scope(validate_request).await;
-        assert!(result.is_err());
-        assert!(matches!(result, Err(DataScopeError::InvalidDataScopeType)));
-    }
+    let validate_request = create_validate_isolate_request(isolate_id, DataScopeType::Unspecified);
+    let result = data_scope_requester.validate_isolate_scope(validate_request).await;
+    assert!(result.is_err());
+    assert!(matches!(result, Err(DataScopeError::InvalidDataScopeType)));
     Ok(())
 }
 
@@ -202,41 +199,14 @@ async fn test_validate_isolate_scope_unknown_scope() -> Result<(), Box<dyn std::
 async fn test_validate_isolate_scope_too_strict() -> Result<(), Box<dyn std::error::Error>> {
     let data_scope_requester = DataScopeRequester::new(u64::MAX);
 
-    for is_ratified in [true, false] {
-        let mut add_isolate_request = create_add_isolate_request(is_ratified);
-        add_isolate_request.allowed_data_scope_type = DataScopeType::DomainOwned;
-        let isolate_id = add_isolate_request.isolate_id;
-        assert!(data_scope_requester.add_isolate(add_isolate_request).await.is_ok());
+    let mut add_isolate_request = create_add_isolate_request(false);
+    add_isolate_request.allowed_data_scope_type = DataScopeType::DomainOwned;
+    let isolate_id = add_isolate_request.isolate_id;
+    assert!(data_scope_requester.add_isolate(add_isolate_request).await.is_ok());
 
-        let validate_request =
-            create_validate_isolate_request(isolate_id, DataScopeType::UserPrivate);
-        let validation_result = data_scope_requester.validate_isolate_scope(validate_request).await;
-        assert!(matches!(validation_result, Err(DataScopeError::DisallowedByManifest)));
-    }
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_validate_isolate_scope_unknown_isolate() -> Result<(), Box<dyn std::error::Error>> {
-    let data_scope_requester = DataScopeRequester::new(u64::MAX);
-
-    for is_ratified in [true, false] {
-        let add_isolate_request = create_add_isolate_request(is_ratified);
-        assert!(data_scope_requester.add_isolate(add_isolate_request).await.is_ok());
-
-        let binary_services_index = if is_ratified {
-            *TEST_RATIFIED_BINARY_SERVICES_INDEX
-        } else {
-            *TEST_BINARY_SERVICES_INDEX
-        };
-
-        let validate_request = create_validate_isolate_request(
-            IsolateId::new(binary_services_index),
-            DataScopeType::DomainOwned,
-        );
-        let validation_result = data_scope_requester.validate_isolate_scope(validate_request).await;
-        assert!(matches!(validation_result, Err(DataScopeError::UnknownIsolateId)));
-    }
+    let validate_request = create_validate_isolate_request(isolate_id, DataScopeType::UserPrivate);
+    let validation_result = data_scope_requester.validate_isolate_scope(validate_request).await;
+    assert!(matches!(validation_result, Err(DataScopeError::DisallowedByManifest)));
     Ok(())
 }
 
@@ -740,4 +710,23 @@ fn create_validate_isolate_request(
     requested_scope: DataScopeType,
 ) -> ValidateIsolateRequest {
     ValidateIsolateRequest { isolate_id, requested_scope }
+}
+
+#[tokio::test]
+async fn test_add_isolate_mismatched_scope_ratified() -> Result<(), Box<dyn std::error::Error>> {
+    let data_scope_requester = DataScopeRequester::new(u64::MAX);
+
+    let mut add_isolate_request_1 = create_add_isolate_request(true);
+    add_isolate_request_1.allowed_data_scope_type = DataScopeType::UserPrivate;
+    data_scope_requester.add_isolate(add_isolate_request_1).await?;
+
+    let mut add_isolate_request_2 = create_add_isolate_request(true);
+    add_isolate_request_2.allowed_data_scope_type = DataScopeType::Public;
+
+    let result = data_scope_requester.add_isolate(add_isolate_request_2).await;
+
+    assert!(result.is_err());
+    assert!(matches!(result, Err(DataScopeError::InternalError(_))));
+
+    Ok(())
 }

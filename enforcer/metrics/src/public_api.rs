@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::common::ServiceMetrics;
+use crate::common::{self, ServiceMetrics};
 use crate::global;
 use opentelemetry::metrics::{Counter, Histogram, Meter, UpDownCounter};
 
@@ -53,6 +53,7 @@ impl PublicApiMetrics {
 
         let duration_sec = safe_meter
             .f64_histogram("enforcer.public_api.request.duration")
+            .with_boundaries(common::default_latency_boundaries())
             .with_description("Duration of unary and streaming requests to the public API.")
             .with_unit("s")
             .build();
@@ -65,6 +66,7 @@ impl PublicApiMetrics {
 
         let message_processing_duration = safe_meter
             .f64_histogram("enforcer.public_api.message.processing_duration")
+            .with_boundaries(common::default_latency_boundaries())
             .with_description("Time spent processing stream message.")
             .with_unit("s")
             .build();

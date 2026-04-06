@@ -19,9 +19,6 @@ package enforcer.v1;
 import "enforcer/v1/ez_data_scope.proto";
 import "enforcer/v1/isolate_health.proto";
 
-// Specifies import path for the generated Go code used to auto-generate SDK code from proto annotations.
-option go_package = "github.com/private-compute-infra-toolkit/ez/sdk/v1";
-
 // Used by external clients to make RPC calls to services running inside
 // Encrypted Zone.
 service EzPublicApi {
@@ -82,6 +79,8 @@ message CallParameters {
   // Encrypted fields (for any non-PUBLIC data scopes) can be set here.
   // Typically, each entry in the list corresponds to a distinct data scope.
   repeated EncryptedField encrypted_input = 2;
+  // Opaque metadata entries forwarded alongside the payload.
+  map<string, bytes> request_metadata = 3;
 }
 
 message CallRequest {
@@ -111,4 +110,7 @@ message CallResponse {
   // Encrypted outputs that are still within protected (non-PUBLIC) data scopes.
   // Typically, each entry in the list corresponds to a distinct data scope.
   repeated EncryptedField encrypted_output = 3;
+  // Opaque metadata entries forwarded alongside the payload.
+  // Enables transport of context-specific properties between client and server.
+  map<string, bytes> response_metadata = 4;
 }

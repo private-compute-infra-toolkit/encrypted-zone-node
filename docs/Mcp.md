@@ -1,22 +1,23 @@
 # MCP Tools
 
-The tools/mcp/ directory contains the MCP (Model Context Protocol) tools for the ez repo.
+The `tools/mcp/` directory contains the MCP (Model Context Protocol) tools for the EZ node repo.
 
 ## Setup
 
-To build the MCP tool, run the `pkg-mcp` build rule. This script will build the server and place it
-in `tools/mcp/ez-mcp`.
+To build and install the MCP tool, run the following `install` build target. This script will build
+the server and place it in `tools/mcp/ez-mcp`.
 
-```bash
-bazel run //tools/mcp/server:pkg-mcp
+```sh
+devkit/build bazel run //tools/mcp/server:install
 ```
 
-Then add the below section to your gemini settings, usually `~/.gemini/settings.json`
+Then add this section to your Gemini settings JSON file, `settings.json` in the repo's `.gemini`
+directory:
 
 ```json
   "mcpServers": {
     "ez-mcp": {
-      "command": "<ez repo root>/tools/mcp/ez-mcp/server",
+      "command": "<ez repo root>/tools/mcp/ez-mcp/ez-mcp",
       "cwd": "<ez repo root>",
       "timeout": 30000
     }
@@ -25,13 +26,9 @@ Then add the below section to your gemini settings, usually `~/.gemini/settings.
 
 ## Usage
 
-Launch `gemini` in a terminal and you should now see an additional mcp tool called `ez-mcp` with a
-`ez_build_fix` command.
+Launch `gemini` in a terminal and you should now see an additional mcp tool called `ez-mcp` with the
+command `ez_build_fix`.
 
-```bash
-gemini
+```sh
+devkit/gemini
 ```
-
-## License
-
-Apache 2.0 - See [LICENSE](LICENSE) for more information. t

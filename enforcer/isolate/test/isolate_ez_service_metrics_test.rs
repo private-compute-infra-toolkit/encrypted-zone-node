@@ -26,13 +26,14 @@ use enforcer_proto::enforcer::v1::{
     InvokeEzRequest, IsolateDataScope,
 };
 use fake_opentelemetry_collector::FakeCollectorServer;
+use fileshare_manager::FileshareManager;
 use interceptor::Interceptor;
 use isolate_ez_service::{IsolateEzBridgeDependencies, IsolateEzBridgeService};
 use isolate_info::{BinaryServicesIndex, IsolateId, IsolateServiceInfo};
 use isolate_service_mapper::IsolateServiceMapper;
 use isolate_test_utils::{DefaultEchoIsolate, ScopeDragInstruction};
 use junction_test_utils::FakeJunction;
-use manifest_proto::enforcer::ez_backend_dependency::RouteType;
+use manifest_proto::enforcer::v1::ez_backend_dependency::RouteType;
 use metrics::setup_otel_metrics;
 use metrics_test_utils::MetricsVerifier;
 use payload_proto::enforcer::v1::EzPayloadData;
@@ -79,13 +80,15 @@ impl TestHarness {
             data_scope_requester.clone(),
             container_manager_requester.clone(),
         );
-        let shared_memory_manager = SharedMemManager::new(container_manager_requester);
+        let shared_memory_manager = SharedMemManager::new(container_manager_requester.clone());
+        let fileshare_manager = FileshareManager::new(container_manager_requester);
 
         let deps = IsolateEzBridgeDependencies {
             isolate_id,
             isolate_junction: Box::new(mock_junction.clone()),
             isolate_state_manager: isolate_state_manager.clone(),
             shared_memory_manager,
+            fileshare_manager,
             external_proxy_connector: None,
             isolate_service_mapper: service_mapper.clone(),
             data_scope_requester: data_scope_requester.clone(),

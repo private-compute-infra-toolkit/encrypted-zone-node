@@ -16,30 +16,48 @@ use data_scope_proto::enforcer::v1::{DataScopeType, EzStaticScopeInfo};
 use enforcer_proto::enforcer::v1::{
     EzPayloadIsolateScope, InvokeIsolateRequest, InvokeIsolateResponse, IsolateDataScope,
 };
-use ez_to_ez_service_proto::enforcer::v1::ez_to_ez_api_server::EzToEzApiServer;
+use ez_error::EzError;
 use ez_to_ez_service_proto::enforcer::v1::{
-    ez_to_ez_api_server::EzToEzApi, EzCallRequest, EzCallResponse, EzStatus,
+    ez_to_ez_api_server::{EzToEzApi, EzToEzApiServer},
+    EzCallRequest, EzCallResponse,
 };
 use grpc_connector::try_parse_grpc_timeout;
 use junction_trait::{Junction, JunctionChannels};
+use metrics::{
+    common::{MetricAttributes, ServiceMetrics},
+    ez_to_ez_inbound::EzToEzInboundMetrics,
+    observed_stream,
+};
+use opentelemetry::global;
 use payload_proto::enforcer::v1::EzPayloadScope;
-use simple_tonic_stream::SimpleStreamingWrapper;
-use tokio::net::UnixListener;
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
+use prost::Message;
+use tokio::{net::UnixListener, sync::mpsc};
+use tokio_stream::{
+    wrappers::{ReceiverStream, UnixListenerStream},
+    StreamExt,
+};
 use tonic::{transport::Server, Request, Response, Status, Streaming};
+use tracing::Instrument;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 const EZ_TO_EZ_RESPONSE_CHANNEL_SIZE: usize = 256;
 
+type EzToEzResponseStream = observed_stream::ObservedResponseStream<
+    ReceiverStream<Result<EzCallResponse, Status>>,
+    EzToEzInboundMetrics,
+>;
+
 /// Handles inbound requests from remote enforcers.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct InboundEzToEzHandler {
     isolate_junction: Box<dyn Junction>,
+    metrics: EzToEzInboundMetrics,
 }
 
 impl InboundEzToEzHandler {
     pub fn new(isolate_junction: Box<dyn Junction>) -> Self {
-        Self { isolate_junction }
+        let metrics = EzToEzInboundMetrics::new();
+        Self { isolate_junction, metrics }
     }
 }
 
@@ -50,26 +68,56 @@ impl EzToEzApi for InboundEzToEzHandler {
         request: Request<EzCallRequest>,
     ) -> Result<Response<EzCallResponse>, Status> {
         let timeout = try_parse_grpc_timeout(request.metadata()).unwrap_or(None);
-        let invoke_isolate_request =
-            ez_call_request_to_invoke_isolate_request(request.into_inner());
-        let invoke_isolate_response = self
-            .isolate_junction
-            .invoke_isolate(None, invoke_isolate_request, false, timeout)
-            .await
-            .map_err(|e| e.to_tonic_status())?;
+        let ez_call_request = request.into_inner();
+        let metric_attr = MetricAttributes::from(&ez_call_request);
+        let _call_tracker = self.metrics.track_call(metric_attr.base());
 
-        let ez_call_response = invoke_isolate_response_to_ez_call_response(invoke_isolate_response);
-        Ok(Response::new(ez_call_response))
+        let span = tracing::info_span!("Enforcer.EzToEzApi.Inbound.ez_call");
+
+        if let Some(ref metadata) = ez_call_request.control_plane_metadata {
+            log::info!("EzCall Inbound Request headers: {:#?}", metadata.metadata_headers);
+            let parent_context = global::get_text_map_propagator(|propagator| {
+                propagator.extract(&trace_context::HashMapExtractor(&metadata.metadata_headers))
+            });
+
+            let _ = span.set_parent(parent_context);
+        }
+
+        async move {
+            self.metrics.record_message_size_bytes(
+                metric_attr.request(),
+                ez_call_request.encoded_len() as u64,
+            );
+            let invoke_isolate_request = ez_call_request_to_invoke_isolate_request(ez_call_request);
+
+            let invoke_isolate_response = self
+                .isolate_junction
+                .invoke_isolate(None, invoke_isolate_request, false, timeout)
+                .await
+                .map_err(|e| {
+                    self.metrics.record_error(&metric_attr.base(), "junction_invocation_failed");
+                    e.to_tonic_status()
+                })?;
+
+            let ez_call_response =
+                invoke_isolate_response_to_ez_call_response(invoke_isolate_response);
+            self.metrics.record_message_size_bytes(
+                metric_attr.response(),
+                ez_call_response.encoded_len() as u64,
+            );
+            Ok(Response::new(ez_call_response))
+        }
+        .instrument(span)
+        .await
     }
 
-    type EzStreamingCallStream = ReceiverStream<Result<EzCallResponse, Status>>;
+    type EzStreamingCallStream = EzToEzResponseStream;
 
     async fn ez_streaming_call(
         &self,
         request: Request<Streaming<EzCallRequest>>,
     ) -> Result<Response<Self::EzStreamingCallStream>, Status> {
-        let mut ez_call_request_stream: SimpleStreamingWrapper<EzCallRequest> =
-            request.into_inner().into();
+        let ez_call_request_stream = request.into_inner();
 
         // Create the response stream to send back to the remote enforcer.
         let (to_remote_response_tx, to_remote_response_rx) =
@@ -79,10 +127,24 @@ impl EzToEzApi for InboundEzToEzHandler {
         let JunctionChannels { client_to_junction: client_to_junction_tx, mut junction_to_client } =
             isolate_junction.stream_invoke_isolate(None, false).await;
 
-        // Task 1: Proxy requests from the remote enforcer to the local Isolate.
+        let (mut ez_call_request_stream, to_remote_response_rx) = observed_stream::pair(
+            ez_call_request_stream,
+            ReceiverStream::new(to_remote_response_rx),
+            self.metrics.clone(),
+        );
+
+        let metrics_clone_for_req = self.metrics.clone();
+
+        // Task 1: Proxy requests from the remote enforcer to the local isolate.
         tokio::spawn(async move {
-            while let Some(ez_call_request) = ez_call_request_stream.message().await {
-                proxy_to_local_request(ez_call_request, &client_to_junction_tx).await;
+            while let Some(ez_call_request) = ez_call_request_stream.next().await {
+                proxy_to_local_request(
+                    ez_call_request,
+                    ez_call_request_stream.attributes(),
+                    &client_to_junction_tx,
+                    &metrics_clone_for_req,
+                )
+                .await;
             }
         });
 
@@ -93,21 +155,23 @@ impl EzToEzApi for InboundEzToEzHandler {
             }
         });
 
-        Ok(Response::new(ReceiverStream::new(to_remote_response_rx)))
+        Ok(Response::new(to_remote_response_rx))
     }
 }
 
 /// Proxies requests from a remote enforcer to a local Isolate.
 async fn proxy_to_local_request(
     ez_call_request: EzCallRequest,
+    attrs: &MetricAttributes,
     client_to_junction_tx: &mpsc::Sender<InvokeIsolateRequest>,
+    metrics: &EzToEzInboundMetrics,
 ) {
+    let _timer = metrics.track_message_processing(attrs.request());
     let invoke_request = ez_call_request_to_invoke_isolate_request(ez_call_request);
     if let Err(e) = client_to_junction_tx.send(invoke_request).await {
-        // Convert this to an DestinationChannelClosed error.
+        metrics.record_error(attrs.base().as_ref(), "junction_invocation_failed");
         log::error!(
-            "EzToEz Inbound: Failed to proxy request to local isolate. Junction channel closed: {}",
-            e
+            "EzToEz Inbound: Failed to proxy request to local isolate. Junction channel closed: {e:?}"
         );
     }
 }
@@ -150,7 +214,7 @@ fn ez_payload_scope_to_ez_payload_isolate_scope(scope: EzPayloadScope) -> EzPayl
 
 /// Proxies responses from a local Isolate (via the junction) back to the remote enforcer.
 async fn proxy_to_remote_response(
-    invoke_response_result: Result<InvokeIsolateResponse, ez_error::EzError>,
+    invoke_response_result: Result<InvokeIsolateResponse, EzError>,
     to_remote_response_tx: &mpsc::Sender<Result<EzCallResponse, Status>>,
 ) {
     let response_to_send = match invoke_response_result {
@@ -162,12 +226,16 @@ async fn proxy_to_remote_response(
     };
     if let Err(e) = to_remote_response_tx.send(response_to_send).await {
         log::warn!(
-            "EzToEz Inbound: Failed to proxy response to remote enforcer. Client channel closed: {}", e
+            "EzToEz Inbound: Failed to proxy response to remote enforcer. Client channel closed: {e:?}"
         );
     }
 }
 
 /// Converts an InvokeIsolateResponse to an EzCallResponse.
+#[tracing::instrument(
+    name = "Enforcer.EzToEzApi.Inbound.invoke_isolate_response_to_ez_call_response",
+    skip(response)
+)]
 fn invoke_isolate_response_to_ez_call_response(response: InvokeIsolateResponse) -> EzCallResponse {
     let payload_scope = response.isolate_output_iscope.map(|payload_iscope| {
         EzPayloadScope {
@@ -189,11 +257,7 @@ fn invoke_isolate_response_to_ez_call_response(response: InvokeIsolateResponse) 
         }
     });
 
-    EzCallResponse {
-        payload_scope,
-        payload_data: response.isolate_output,
-        status: response.status.map(|s| EzStatus { code: s.code, message: s.message }),
-    }
+    EzCallResponse { payload_scope, payload_data: response.isolate_output }
 }
 
 /// Launches the gRPC server for the inbound EZ-to-EZ API.
@@ -216,7 +280,7 @@ pub async fn launch_server(
         }
         let uds_result = UnixListener::bind(path);
         let Ok(uds) = uds_result else {
-            log::error!("Failed to bind to UDS at {path:?}: {}", uds_result.unwrap_err());
+            log::error!("Failed to bind to UDS at {path:?}: {:?}", uds_result.unwrap_err());
             return;
         };
         let uds_stream = UnixListenerStream::new(uds);

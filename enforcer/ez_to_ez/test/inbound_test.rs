@@ -16,35 +16,18 @@ use data_scope_proto::enforcer::v1::{EzDataScope, EzStaticScopeInfo};
 use enforcer_proto::enforcer::v1::ControlPlaneMetadata;
 use ez_to_ez_service_proto::enforcer::v1::ez_to_ez_api_client::EzToEzApiClient;
 use ez_to_ez_service_proto::enforcer::v1::EzCallRequest;
-use hyper_util::rt::TokioIo;
+use grpc_connector::{
+    GrpcChannelPool, DEFAULT_CONNECT_RETRY_COUNT, DEFAULT_CONNECT_RETRY_DELAY_MS,
+    DEFAULT_CONNECT_RETRY_SCALING, DEFAULT_POOL_SIZE,
+};
 use inbound_ez_to_ez_handler::InboundEzToEzHandler;
 use junction_test_utils::FakeJunction;
 use payload_proto::enforcer::v1::{EzPayloadData, EzPayloadScope};
-use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
-use tonic::transport::{Channel, Endpoint, Uri};
 use tonic::Request;
-
-/// Helper function to connect to the UDS server for tests.
-async fn connect_to_server(uds_address: &str) -> Channel {
-    let path = uds_address
-        .strip_prefix("unix://")
-        .or_else(|| uds_address.strip_prefix("unix:"))
-        .unwrap()
-        .to_string();
-    // The URI is a dummy, the path is what's used by the connector.
-    Endpoint::try_from("http://[::]:50051")
-        .unwrap()
-        .connect_with_connector(tower::service_fn(move |_: Uri| {
-            let path = path.clone();
-            async move { Ok::<_, std::io::Error>(TokioIo::new(UnixStream::connect(path).await?)) }
-        }))
-        .await
-        .unwrap()
-}
 
 fn create_test_request(input_payload: &str) -> EzCallRequest {
     EzCallRequest {
@@ -85,14 +68,22 @@ async fn test_inbound_unary_flow() {
     let request = create_test_request(expected_payload);
 
     sleep(Duration::from_millis(50)).await;
-    let channel = connect_to_server(&uds_address).await;
+    let channel_pool = GrpcChannelPool::new(
+        uds_address,
+        DEFAULT_POOL_SIZE,
+        DEFAULT_CONNECT_RETRY_COUNT,
+        DEFAULT_CONNECT_RETRY_DELAY_MS,
+        DEFAULT_CONNECT_RETRY_SCALING,
+    )
+    .await
+    .unwrap();
+    let channel = channel_pool.next_channel();
 
     let mut client = EzToEzApiClient::new(channel);
 
     let response = client.ez_call(Request::new(request.clone())).await.unwrap().into_inner();
 
     // Assert
-    assert_eq!(response.status.unwrap().code, 0);
     let output_payload = response.payload_data.unwrap().datagrams[0].clone();
     assert_eq!(output_payload, expected_payload.as_bytes());
 
@@ -118,14 +109,22 @@ async fn test_inbound_unary_error_flow() {
     let request = EzCallRequest::default();
 
     sleep(Duration::from_millis(50)).await;
-    let channel = connect_to_server(&uds_address).await;
+    let channel_pool = GrpcChannelPool::new(
+        uds_address,
+        DEFAULT_POOL_SIZE,
+        DEFAULT_CONNECT_RETRY_COUNT,
+        DEFAULT_CONNECT_RETRY_DELAY_MS,
+        DEFAULT_CONNECT_RETRY_SCALING,
+    )
+    .await
+    .unwrap();
+    let channel = channel_pool.next_channel();
 
     let mut client = EzToEzApiClient::new(channel);
 
     let response = client.ez_call(Request::new(request.clone())).await.unwrap().into_inner();
 
     // Assert
-    assert_eq!(response.status.unwrap().code, 0);
     assert!(response.payload_data.is_none());
     assert!(response.payload_scope.is_none());
 
@@ -161,7 +160,16 @@ async fn test_inbound_streaming_flow() {
     }
 
     sleep(Duration::from_millis(50)).await;
-    let channel = connect_to_server(&uds_address).await;
+    let channel_pool = GrpcChannelPool::new(
+        uds_address,
+        DEFAULT_POOL_SIZE,
+        DEFAULT_CONNECT_RETRY_COUNT,
+        DEFAULT_CONNECT_RETRY_DELAY_MS,
+        DEFAULT_CONNECT_RETRY_SCALING,
+    )
+    .await
+    .unwrap();
+    let channel = channel_pool.next_channel();
 
     let mut client = EzToEzApiClient::new(channel);
     let mut response_stream =
@@ -171,7 +179,6 @@ async fn test_inbound_streaming_flow() {
     to_handler_tx.send(first_request.clone()).await.unwrap();
     let first_response = response_stream.next().await.unwrap().unwrap();
 
-    assert_eq!(first_response.status.unwrap().code, 0);
     let first_output_payload = first_response.payload_data.unwrap().datagrams[0].clone();
     assert_eq!(first_output_payload, first_payload.as_bytes());
 
@@ -180,7 +187,6 @@ async fn test_inbound_streaming_flow() {
 
     let second_response = response_stream.next().await.unwrap().unwrap();
 
-    assert_eq!(second_response.status.unwrap().code, 0);
     let second_output_payload = second_response.payload_data.unwrap().datagrams[0].clone();
     assert_eq!(second_output_payload, second_payload.as_bytes());
 

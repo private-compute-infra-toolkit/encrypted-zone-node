@@ -13,6 +13,10 @@
 // limitations under the License.
 
 use anyhow::Result;
+use grpc_connector::{
+    GrpcChannelPool, DEFAULT_CONNECT_RETRY_COUNT, DEFAULT_CONNECT_RETRY_DELAY_MS,
+    DEFAULT_CONNECT_RETRY_SCALING, DEFAULT_POOL_SIZE,
+};
 use opentelemetry::global;
 use opentelemetry::trace::TracerProvider;
 use opentelemetry::KeyValue;
@@ -25,13 +29,16 @@ async fn init_tracer(endpoint: &str) -> Result<trace::SdkTracerProvider, trace::
     let mut exporter_builder = SpanExporter::builder().with_tonic();
 
     if endpoint.starts_with("unix:") {
-        let channel = grpc_connector::connect(
+        let channel_pool = GrpcChannelPool::new(
             endpoint.to_string(),
-            grpc_connector::DEFAULT_CONNECT_RETRY_COUNT,
-            grpc_connector::DEFAULT_CONNECT_RETRY_DELAY_MS,
+            DEFAULT_POOL_SIZE,
+            DEFAULT_CONNECT_RETRY_COUNT,
+            DEFAULT_CONNECT_RETRY_DELAY_MS,
+            DEFAULT_CONNECT_RETRY_SCALING,
         )
         .await
         .map_err(|e| trace::TraceError::Other(e.into()))?;
+        let channel = channel_pool.next_channel();
 
         exporter_builder = exporter_builder.with_channel(channel);
     } else {
@@ -56,20 +63,42 @@ async fn init_tracer(endpoint: &str) -> Result<trace::SdkTracerProvider, trace::
 
 pub async fn setup_telemetry(
     endpoint: &Option<String>,
+    console_subscriber_port: &Option<u16>,
 ) -> anyhow::Result<trace::SdkTracerProvider> {
-    if let Some(endpoint) = endpoint {
+    // 1. Initialize OpenTelemetry tracing IF an endpoint is provided.
+    let (telemetry_layer, tracer_provider) = if let Some(endpoint) = endpoint {
         let tracer_provider = init_tracer(endpoint).await?;
         let tracer = tracer_provider.tracer("enforcer");
-
         let filter = EnvFilter::new("debug,h2=info");
-        let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
-        let subscriber = Registry::default().with(telemetry.with_filter(filter));
-
-        tracing::subscriber::set_global_default(subscriber)
-            .expect("setting default subscriber failed");
-
-        Ok(tracer_provider)
+        let layer = tracing_opentelemetry::layer().with_tracer(tracer).with_filter(filter);
+        (Some(layer), tracer_provider)
     } else {
-        Ok(trace::SdkTracerProvider::builder().build())
-    }
+        (None, trace::SdkTracerProvider::builder().build())
+    };
+
+    // 2. Initialize console_subscriber IF a port is provided, independent of OpenTelemetry.
+    // This starts the gRPC server listening on localhost for tokio-console connections.
+    let console_layer = console_subscriber_port.as_ref().map(|port| {
+        let (layer, server) = console_subscriber::ConsoleLayer::builder()
+            .server_addr((std::net::Ipv6Addr::LOCALHOST, *port))
+            .build();
+        let port = *port;
+        tokio::spawn(async move {
+            if let Err(e) = server.serve().await {
+                tracing::error!("Console subscriber failed to start on port {}: {}", port, e);
+            }
+        });
+        layer
+    });
+
+    // 3. Register whatever layers were successfully configured.
+    // Registry::default() builds the base subscriber. We optionally add our layers to it.
+    let subscriber = Registry::default().with(telemetry_layer).with(console_layer);
+
+    // 4. Set the global tracing subscriber.
+    // We ignore errors here because `set_global_default` will fail if it's called
+    // multiple times in the same process, which happens frequently during unit tests.
+    let _ = tracing::subscriber::set_global_default(subscriber);
+
+    Ok(tracer_provider)
 }

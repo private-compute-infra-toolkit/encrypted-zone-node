@@ -16,10 +16,6 @@ syntax = "proto3";
 
 package enforcer.v1;
 
-// Specifies import path for the generated Go code used to auto-generate SDK
-// code from proto annotations.
-option go_package = "github.com/private-compute-infra-toolkit/ez/sdk/v1";
-
 // All data scope types understood by EZ are listed here.
 // Changes should be carefully reviewed for consequences and potential
 // deployment issues, since this enum is shared by all EZ related code.

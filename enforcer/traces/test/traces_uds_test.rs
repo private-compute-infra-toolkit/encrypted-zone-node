@@ -66,7 +66,7 @@ async fn test_trace_export_uds() {
 
     // 3. Setup Telemetry with UDS endpoint
     let endpoint = Some(format!("unix:{}", uds_path_str));
-    let provider = setup_telemetry(&endpoint).await.expect("Failed to setup telemetry");
+    let provider = setup_telemetry(&endpoint, &None).await.expect("Failed to setup telemetry");
 
     // 4. Generate Traces
     {

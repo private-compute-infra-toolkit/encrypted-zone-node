@@ -24,9 +24,12 @@ exclude: (?x)^(
   CHANGELOG\.md|
   google_internal/attestation/.*\.py|
   CONTRIBUTING\.md|
-  LICENSE
+  LICENSE|
+  third_party/.*|
   )$
 fail_fast: false
+default_language_version:
+  python: python3.12
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
@@ -72,9 +75,13 @@ repos:
       - id: python-tests-with-coverage
         name: Python tests with coverage.
         language: python
-        entry: pytest --cov=.
+        entry: pytest --ignore=third_party --cov=.
         types: [python]
         pass_filenames: false
+        additional_dependencies:
+          - pytest
+          - pytest-cov
+          - jinja2==3.1.6
 
       - id: addlicense
         name: addlicense
@@ -112,30 +119,32 @@ repos:
         args: [-lint=fix, -mode=fix, -warnings=all]
 
   - repo: https://github.com/psf/black
-    rev: 25.9.0
+    rev: 26.3.1
     hooks:
       - id: black
         name: black python formatter
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.13.2
+    rev: v0.15.7
     hooks:
     - id: ruff-check
       args: [--fix]
 
   - repo: https://github.com/codespell-project/codespell
-    rev: v2.4.1
+    rev: v2.4.2
     hooks:
       - id: codespell
 
   - repo: https://github.com/pylint-dev/pylint
-    rev: v3.3.8
+    rev: v4.0.5
     hooks:
       - id: pylint
         types: [python]
         args: [-rn, -sn, --rcfile=.pylintrc, --fail-on=I]
+        additional_dependencies:
+          - jinja2==3.1.6
 
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.18.2
+    rev: v1.19.1
     hooks:
       - id: mypy

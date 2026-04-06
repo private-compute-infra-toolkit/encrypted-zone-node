@@ -17,7 +17,7 @@ use ez_service_proto::enforcer::v1::CallRequest;
 use interceptor::{Interceptor, RequestType};
 use isolate_info::IsolateServiceInfo;
 use isolate_service_mapper::IsolateServiceMapper;
-use manifest_proto::enforcer::InterceptingServices;
+use manifest_proto::enforcer::v1::InterceptingServices;
 
 const OPAQUE_DOMAIN: &str = "opaque.domain";
 const OPAQUE_SERVICE: &str = "OpaqueService";
@@ -77,25 +77,6 @@ async fn test_add_interceptor_success() {
 
     let result = interceptor.add_interceptor(intercepting_services).await;
     assert!(result.is_ok());
-}
-
-#[tokio::test]
-async fn test_add_interceptor_unrecognized_opaque_service() {
-    let interceptor =
-        setup_interceptor_with_populated_mapper().await.expect("Failed to setup Interceptor");
-    let intercepting_services = InterceptingServices {
-        intercepting_operator_domain: "unrecognized.domain".to_string(),
-        intercepting_service_name: "UnrecognizedService".to_string(),
-        interceptor_operator_domain: RATIFIED_INTERCEPTOR_DOMAIN.to_string(),
-        interceptor_service_name: RATIFIED_INTERCEPTOR_SERVICE.to_string(),
-        ..Default::default()
-    };
-
-    let result = interceptor
-        .add_interceptor(intercepting_services)
-        .await
-        .expect_err("Expected error while adding unrecognized Opaque service");
-    assert_eq!(result.to_string(), "Unrecognized Opaque Service provided in InterceptingServices");
 }
 
 #[tokio::test]
@@ -260,4 +241,34 @@ async fn test_add_interceptor_already_configured() {
         .await
         .expect_err("Expecting error as an Interceptor was already configured");
     assert_eq!(result.to_string(), "Interceptor already configured for this Opaque Service");
+}
+
+#[tokio::test]
+async fn test_add_interceptor_external_service_success() {
+    let interceptor =
+        setup_interceptor_with_populated_mapper().await.expect("Failed to setup Interceptor");
+    let intercepting_services = InterceptingServices {
+        intercepting_operator_domain: "external.domain".to_string(),
+        intercepting_service_name: "ExternalService".to_string(),
+        interceptor_operator_domain: RATIFIED_INTERCEPTOR_DOMAIN.to_string(),
+        interceptor_service_name: RATIFIED_INTERCEPTOR_SERVICE.to_string(),
+        interceptor_method_for_unary: UNARY.to_string(),
+        interceptor_method_for_streaming: STREAMING.to_string(),
+        ..Default::default()
+    };
+
+    let result = interceptor.add_interceptor(intercepting_services).await;
+    assert!(result.is_ok());
+
+    let mut call_request = CallRequest {
+        operator_domain: "external.domain".to_string(),
+        service_name: "ExternalService".to_string(),
+        method_name: "OriginalMethod".to_string(),
+        ..Default::default()
+    };
+
+    interceptor.replace_with_interceptor(&mut call_request, RequestType::Unary).await;
+    assert_eq!(call_request.operator_domain, RATIFIED_INTERCEPTOR_DOMAIN);
+    assert_eq!(call_request.service_name, RATIFIED_INTERCEPTOR_SERVICE);
+    assert_eq!(call_request.method_name, UNARY);
 }

@@ -23,10 +23,6 @@ package enforcer.v1;
 import "enforcer/v1/ez_data_scope.proto";
 import "google/protobuf/descriptor.proto";
 
-// Specifies import path for the generated Go code used to auto-generate SDK
-// code from proto annotations.
-option go_package = "github.com/private-compute-infra-toolkit/ez/sdk/v1";
-
 extend google.protobuf.ServiceOptions {
   EzServiceAnnotation ez_svc_annotation = 39000;
 }
@@ -44,10 +40,10 @@ extend google.protobuf.MessageOptions {
 }
 
 enum EzServiceTransport {
+  reserved 3;
   EZ_SERVICE_TRANSPORT_UNSPECIFIED = 0;
   EZ_SERVICE_TRANSPORT_GRPC = 1;
   EZ_SERVICE_TRANSPORT_STUBBY = 2;
-  // EZ_SERVICE_TRANSPORT_ENFORCER_PROXY = 3;
 }
 
 // Annotation for defining service-level metadata

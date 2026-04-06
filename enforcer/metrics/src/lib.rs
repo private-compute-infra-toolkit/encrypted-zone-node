@@ -13,15 +13,26 @@
 // limitations under the License.
 
 use anyhow::Result;
+use grpc_connector::{
+    GrpcChannelPool, DEFAULT_CONNECT_RETRY_COUNT, DEFAULT_CONNECT_RETRY_DELAY_MS,
+    DEFAULT_CONNECT_RETRY_SCALING, DEFAULT_POOL_SIZE,
+};
+use opentelemetry::metrics::MeterProvider;
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::{WithExportConfig, WithTonicConfig};
 use opentelemetry_sdk::{metrics::SdkMeterProvider, Resource};
 
 pub mod common;
+pub mod data_scope;
+pub mod external_proxy_connector;
+pub mod ez_to_ez_inbound;
 pub mod global;
+pub mod health_manager;
 pub mod isolate_ez_service;
 pub mod junction;
+pub mod observed_proxy_channel;
 pub mod observed_stream;
+pub mod outbound;
 pub mod public_api;
 
 /// Holds the providers so they can be kept alive or shut down gracefully.
@@ -42,12 +53,15 @@ pub async fn setup_otel_metrics(
         let exporter = if let Some(path) = endpoint.strip_prefix("unix:") {
             log::info!("Waiting for OTel collector socket at {}...", path);
 
-            let channel = grpc_connector::connect(
-                endpoint,
-                grpc_connector::DEFAULT_CONNECT_RETRY_COUNT,
-                grpc_connector::DEFAULT_CONNECT_RETRY_DELAY_MS,
+            let channel_pool = GrpcChannelPool::new(
+                endpoint.to_string(),
+                DEFAULT_POOL_SIZE,
+                DEFAULT_CONNECT_RETRY_COUNT,
+                DEFAULT_CONNECT_RETRY_DELAY_MS,
+                DEFAULT_CONNECT_RETRY_SCALING,
             )
             .await?;
+            let channel = channel_pool.next_channel();
             exporter_builder.with_channel(channel)
         } else {
             exporter_builder.with_endpoint(endpoint)
@@ -74,6 +88,13 @@ pub async fn setup_otel_metrics(
         global::set_safe_meter_provider(provider.clone());
 
         log::info!("Safe OTel metrics pipeline initialized with endpoint: {}", endpoint);
+
+        // Record initialization metric to track enforcer starts.
+        // This metric should be visible only if we're not in tests.
+        if std::env::var("TEST_WORKSPACE").is_err() {
+            record_initialization_metric(&provider);
+        }
+
         Some(provider)
     } else {
         log::info!("No Safe OTel endpoint provided. Safe metrics will be No-Op.");
@@ -94,4 +115,18 @@ pub async fn setup_otel_metrics(
     };
 
     Ok(OtelProviders { safe: safe_provider, unsafe_metrics: unsafe_provider })
+}
+
+/// Records an initialization metric to the safe OTel collector.
+pub fn record_initialization_metric(provider: &SdkMeterProvider) {
+    let meter = provider.meter("enforcer.initialization");
+    let counter = meter.u64_counter("enforcer_init_metric").build();
+    counter.add(1, &[]);
+
+    // Force flush to ensure the metric is sent immediately
+    if let Err(e) = provider.force_flush() {
+        log::warn!("Failed to flush initial metric: {:?}", e);
+    } else {
+        log::info!("Initialization metric 'enforcer_init_metric' sent to safe OTel collector.");
+    }
 }

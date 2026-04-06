@@ -1,4 +1,4 @@
-// Copyright 2025 Google LLC
+// Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -86,11 +86,15 @@ impl EzPublicApiService {
 #[tonic::async_trait]
 impl EzPublicApi for EzPublicApiService {
     type StreamCallStream = ReceiverStream<Result<CallResponse, Status>>;
-    #[tracing::instrument]
+
+    #[tracing::instrument(name = "Enforcer.EzPublicApi.call")]
     async fn call(&self, request: Request<CallRequest>) -> CallResponseResult {
         let timeout = try_parse_grpc_timeout(request.metadata()).unwrap_or(None);
+        tracing::debug!("after parsing timeout");
         let trace_context = get_trace_context(&request);
+        tracing::debug!("after fetching trace context");
         let mut call_request = request.into_inner();
+        tracing::debug!("after getting call_request");
 
         let metric_attr = MetricAttributes::from(&call_request);
         let _call_tracker = self.metrics.track_call(metric_attr.base());
@@ -106,6 +110,7 @@ impl EzPublicApi for EzPublicApiService {
             );
         }
 
+        tracing::debug!("before replacing with interceptor");
         self.interceptor.replace_with_interceptor(&mut call_request, RequestType::Unary).await;
 
         let session_metadata = std::mem::take(&mut call_request.session_metadata).unwrap();
@@ -144,6 +149,7 @@ impl EzPublicApi for EzPublicApiService {
         }
     }
 
+    #[tracing::instrument(name = "Enforcer.EzPublicApi.stream_call")]
     async fn stream_call(
         &self,
         request: Request<Streaming<CallRequest>>,
@@ -189,6 +195,7 @@ impl EzPublicApi for EzPublicApiService {
         Ok(Response::new(ReceiverStream::new(api_to_client_response_rx)))
     }
 
+    #[tracing::instrument(name = "Enforcer.EzPublicApi.get_health_report")]
     async fn get_health_report(
         &self,
         _request: Request<GetHealthReportRequest>,
@@ -279,6 +286,7 @@ async fn process_invoke_isolate_response_stream(
     mut invoke_isolate_response_stream: PublicApiResponseStream,
     metrics: PublicApiMetrics,
 ) {
+    tracing::trace!("Enforcer.EzPublicApi.process_invoke_isolate_response_stream");
     while let Some(invoke_isolate_reponse_result) = invoke_isolate_response_stream.next().await {
         let metric_attr = invoke_isolate_response_stream.attributes();
         let _timer = metrics.track_message_processing(metric_attr.response());
@@ -318,12 +326,13 @@ async fn send_to_junction(
     ctx: MetricContext<'_>,
     metadata_headers: HashMap<String, String>,
 ) -> Status {
+    tracing::trace!("Enforcer.EzPublicApi.send_to_junction");
     if call_request.input_params.is_none() {
         return IsolateStatusCode::MissingField("input_params".to_string()).to_tonic_status();
     }
     let invoke_isolate_request =
         create_invoke_isolate_request(call_request, session_id, metadata_headers);
-    log::info!("Sending invoke isolate request: {:?}", invoke_isolate_request);
+    log::debug!("Sending invoke isolate request: {:?}", invoke_isolate_request);
 
     let isolate_bridge_send_result = isolate_junction_channel.send(invoke_isolate_request).await;
     if let Err(isolate_bridge_send_error) = isolate_bridge_send_result {
@@ -333,13 +342,21 @@ async fn send_to_junction(
     Status::ok("call request sent")
 }
 
+#[tracing::instrument(name = "Enforcer.EzPublicApi.create_invoke_isolate_request")]
 fn create_invoke_isolate_request(
-    call_request: CallRequest,
+    mut call_request: CallRequest,
     session_id: u64,
     metadata_headers: HashMap<String, String>,
 ) -> InvokeIsolateRequest {
+    let request_metadata = if let Some(ref mut input_params) = call_request.input_params {
+        std::mem::take(&mut input_params.request_metadata)
+    } else {
+        HashMap::new()
+    };
+
     let (isolate_input_iscope, isolate_input) =
         convert_isolate_input_to_iscope_and_payload(call_request.input_params);
+    tracing::trace!("converted isolate input");
 
     InvokeIsolateRequest {
         control_plane_metadata: Some(ControlPlaneMetadata {
@@ -362,7 +379,9 @@ fn create_invoke_isolate_request(
             destination_ez_instance_id: String::new(),
             // No shared memory handles from remote callers.
             shared_memory_handles: Vec::new(),
+            fileshare_handles: Vec::new(),
             metadata_headers,
+            request_metadata,
         }),
         isolate_input_iscope,
         isolate_input,
@@ -378,7 +397,12 @@ fn create_call_response(
         invoke_isolate_response.isolate_output,
     );
 
-    CallResponse { session_metadata, public_output, encrypted_output }
+    CallResponse {
+        session_metadata,
+        public_output,
+        encrypted_output,
+        response_metadata: HashMap::new(),
+    }
 }
 
 fn convert_isolate_output_to_public_and_encrypted(

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::common::ServiceMetrics;
+use crate::common::{self, ServiceMetrics};
 use crate::global;
 
 use opentelemetry::metrics::{Counter, Histogram, Meter, UpDownCounter};
@@ -42,11 +42,13 @@ impl JunctionMetrics {
             .build();
         let duration_sec = unsafe_meter
             .f64_histogram("enforcer.junction.request.duration")
+            .with_boundaries(common::default_latency_boundaries())
             .with_description("Latency of invoke_isolate and streaming_invoke_isolate calls.")
             .with_unit("s")
             .build();
         let isolate_rpc_duration_sec = unsafe_meter
             .f64_histogram("enforcer.junction.isolate_rpc.duration")
+            .with_boundaries(common::default_latency_boundaries())
             .with_description("Latency of underlying unary rpc call to isolate.")
             .with_unit("s")
             .build();
@@ -60,6 +62,7 @@ impl JunctionMetrics {
             .build();
         let message_processing_duration = unsafe_meter
             .f64_histogram("enforcer.junction.message.processing_duration")
+            .with_boundaries(common::default_latency_boundaries())
             .with_description("Time spent processing stream message.")
             .with_unit("s")
             .build();

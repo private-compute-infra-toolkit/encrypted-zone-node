@@ -1,4 +1,4 @@
-// Copyright 2025 Google LLC
+// Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,15 +21,21 @@ use data_scope::request::{
     ValidateIsolateRequest,
 };
 use data_scope::requester::DataScopeRequester;
-use enforcer_proto::data_scope_proto::enforcer::v1::DataScopeType;
+use data_scope_proto::enforcer::v1::DataScopeType;
+use enforcer_proto::enforcer::v1 as enforcer_v1;
 use enforcer_proto::enforcer::v1::isolate_ez_bridge_server::IsolateEzBridge;
-use enforcer_proto::enforcer::v1::{
+use enforcer_v1::{
+    publish_event_for_request::Payload, CreateFileshareRequest, CreateFileshareResponse,
     CreateMemshareRequest, CreateMemshareResponse, InvokeEzRequest, InvokeEzResponse,
-    InvokeIsolateRequest, InvokeIsolateResponse, IsolateState, IsolateStatus,
-    NotifyIsolateStateRequest, NotifyIsolateStateResponse, PollIsolateStateRequest,
-    PollIsolateStateResponse,
+    InvokeIsolateRequest, InvokeIsolateResponse, IsolateState, NotifyIsolateStateRequest,
+    NotifyIsolateStateResponse, PollIsolateStateRequest, PollIsolateStateResponse,
+    PublishEventForRequest, PublishEventForResponse, StreamSubscribeToRequest,
+    StreamSubscribeToResponse,
 };
 use external_proxy_connector::ExternalProxyChannel;
+use external_proxy_connector::ExternalProxyConnectorError;
+use ez_error_trait::ToEzError;
+use fileshare_manager::FileshareManager;
 use futures::stream::{Stream, StreamExt};
 use grpc_connector::try_parse_grpc_timeout;
 use interceptor::{Interceptor, RequestType};
@@ -57,6 +63,7 @@ pub struct IsolateEzBridgeDependencies {
     pub isolate_junction: Box<dyn Junction>,
     pub isolate_state_manager: IsolateStateManager,
     pub shared_memory_manager: SharedMemManager,
+    pub fileshare_manager: FileshareManager,
     pub external_proxy_connector: Option<Box<dyn ExternalProxyChannel>>,
     pub isolate_service_mapper: IsolateServiceMapper,
     pub manifest_validator: ManifestValidator,
@@ -71,6 +78,7 @@ pub struct IsolateEzBridgeService {
     isolate_junction: Box<dyn Junction>,
     isolate_state_manager: IsolateStateManager,
     shared_memory_manager: SharedMemManager,
+    fileshare_manager: FileshareManager,
     external_proxy_connector: Option<Box<dyn ExternalProxyChannel>>,
     isolate_service_mapper: IsolateServiceMapper,
     manifest_validator: ManifestValidator,
@@ -88,6 +96,7 @@ impl IsolateEzBridgeService {
             isolate_junction: deps.isolate_junction,
             isolate_state_manager: deps.isolate_state_manager,
             shared_memory_manager: deps.shared_memory_manager,
+            fileshare_manager: deps.fileshare_manager,
             external_proxy_connector: deps.external_proxy_connector,
             isolate_service_mapper: deps.isolate_service_mapper,
             manifest_validator: deps.manifest_validator,
@@ -129,7 +138,9 @@ impl IsolateEzBridge for IsolateEzBridgeService {
         let timeout = try_parse_grpc_timeout(request.metadata()).unwrap_or(None);
         let mut req = request.into_inner();
 
-        self.interceptor.replace_with_interceptor(&mut req, RequestType::Unary).await;
+        if !self.isolate_id.is_ratified_isolate() {
+            self.interceptor.replace_with_interceptor(&mut req, RequestType::Unary).await;
+        }
 
         let restrictions_enforcer = RestrictionsEnforcer {
             isolate_id: self.isolate_id,
@@ -206,18 +217,12 @@ impl IsolateEzBridge for IsolateEzBridgeService {
                     .await;
 
                 let mem_share_response = if let Err(e) = freeze_result {
-                    CreateMemshareResponse {
-                        shared_memory_handle: "".to_string(),
-                        status: Some(IsolateStatus {
-                            code: 7, //grpc code for PERMISSION_DENIED
-                            message: e.to_string(),
-                        }),
-                    }
+                    Err(Status::permission_denied(e.to_string()))
                 } else {
                     mem_share_manager_clone.create_shared_mem_file(isolate_id, mem_share_req).await
                 };
 
-                let send_result = mem_share_response_tx.send(Ok(mem_share_response)).await;
+                let send_result = mem_share_response_tx.send(mem_share_response).await;
                 if send_result.is_err() {
                     log::error!("Error while sending MemShareResponse to Isolate");
                 }
@@ -270,6 +275,60 @@ impl IsolateEzBridge for IsolateEzBridgeService {
             .unwrap_or(IsolateState::Unspecified);
         Ok(Response::new(PollIsolateStateResponse { isolate_state: state.into() }))
     }
+
+    async fn create_fileshare(
+        &self,
+        _request: Request<CreateFileshareRequest>,
+    ) -> Result<Response<CreateFileshareResponse>, Status> {
+        let _ = self
+            .isolate_state_manager
+            .freeze_scope(FreezeIsolateScopeRequest { isolate_id: self.isolate_id })
+            .await
+            .map_err(|e| Status::internal(format!("Failed to freeze sender scope: {:?}", e)))?;
+        let fileshare_handle = self
+            .fileshare_manager
+            .create_fileshare(self.isolate_id)
+            .await
+            .map_err(|e| e.to_tonic_status())?;
+        Ok(Response::new(CreateFileshareResponse { fileshare_handle }))
+    }
+
+    async fn publish_event_for(
+        &self,
+        request: Request<PublishEventForRequest>,
+    ) -> Result<Response<PublishEventForResponse>, Status> {
+        let req = request.into_inner();
+        // For now, we only support fileshare even though the API is generic.
+        if req.topic != enforcer_v1::EventTopic::Fileshare as i32 {
+            return Err(Status::invalid_argument("Unsupported event topic"));
+        }
+        let fileshare_event = match req.payload {
+            Some(Payload::FileshareEvent(e)) => e,
+            None => return Err(Status::invalid_argument("Missing event payload")),
+        };
+        let event_type =
+            enforcer_v1::fileshare_event::FileshareEventType::try_from(fileshare_event.event_type)
+                .map_err(|_| Status::invalid_argument("Invalid event type"))?;
+        self.fileshare_manager
+            .notify_event(&req.handle, event_type, self.isolate_id)
+            .await
+            .map_err(|e| e.to_tonic_status())?;
+        Ok(Response::new(PublishEventForResponse {}))
+    }
+
+    type StreamSubscribeToStream = ReceiverStream<Result<StreamSubscribeToResponse, Status>>;
+    async fn stream_subscribe_to(
+        &self,
+        request: Request<StreamSubscribeToRequest>,
+    ) -> Result<Response<Self::StreamSubscribeToStream>, Status> {
+        let req = request.into_inner();
+        if req.topic != enforcer_v1::EventTopic::Fileshare as i32 {
+            return Err(Status::invalid_argument("Unsupported event topic"));
+        }
+        let (tx, rx) = channel(CHANNEL_SIZE);
+        self.fileshare_manager.register_event_stream(self.isolate_id, tx);
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
 }
 
 impl IsolateEzBridgeService {
@@ -297,9 +356,12 @@ impl IsolateEzBridgeService {
         match connector.proxy_external(self.isolate_id, req, timeout).await {
             Ok(response) => Ok(Response::new(response)),
             Err(e) => {
-                log::error!("External unary call failed: {}", e);
+                log::error!("External unary call failed: {e:?}");
                 self.metrics.record_error(&metric_attr.base(), "proxy_external_failed");
-                Err(Status::internal(format!("Error from proxy: {}", e)))
+                Err(match e {
+                    ExternalProxyConnectorError::UnaryCallFailed(status) => status,
+                    _ => Status::internal(format!("Error from proxy: {e:?}")),
+                })
             }
         }
     }
@@ -321,9 +383,11 @@ impl IsolateEzBridgeService {
             Ok(invoke_isolate_response) => {
                 Ok(Response::new(convert_to_invoke_ez_response(invoke_isolate_response)))
             }
-            Err(_) => {
+            Err(e) => {
                 self.metrics.record_error(&metric_attr.base(), "junction_invoke_failed");
-                Err(Status::internal("Failed to reach Junction"))
+                let status = e.to_tonic_status();
+                log::error!("Failed to reach Junction: {status:?}");
+                Err(status)
             }
         }
     }
@@ -345,7 +409,11 @@ impl IsolateEzBridgeService {
 
         handler.remote_invoke(req, timeout).await.map(Response::new).map_err(|e| {
             self.metrics.record_error(&metric_attr.base(), "remote_invoke_failed");
-            Status::internal(format!("Error from remote enforcer: {}", e))
+            let status = match e.downcast_ref::<Status>() {
+                Some(status) => status,
+                _ => &Status::internal(format!("Error from remote enforcer: {e:?}")),
+            };
+            status.clone()
         })
     }
 }
@@ -402,7 +470,9 @@ impl StreamHandler {
             return;
         };
 
-        self.interceptor.replace_with_interceptor(&mut first_req, RequestType::Streaming).await;
+        if !self.isolate_id.is_ratified_isolate() {
+            self.interceptor.replace_with_interceptor(&mut first_req, RequestType::Streaming).await;
+        }
 
         let route_result =
             self.restrictions_enforcer.stream_validate_invoke_ez_req(&mut first_req).await;
@@ -494,10 +564,17 @@ impl StreamHandler {
             }
         });
 
-        let Ok(mut from_outbound_rx) = handler.remote_streaming_connect(from_local_rx).await else {
-            // TODO: We should send back the actual error to the caller.
-            let _ =
-                self.response_tx.send(Err(Status::internal("Remote RPC connection failed."))).await;
+        let connect_result = handler.remote_streaming_connect(from_local_rx).await;
+
+        let Ok(mut from_outbound_rx) = connect_result else {
+            let connect_error = connect_result.unwrap_err();
+            let connect_status = match connect_error.downcast_ref::<Status>() {
+                Some(status) => status.clone(),
+                _ => {
+                    Status::internal(format!("Error setting up remote stream: {connect_error:#?}"))
+                }
+            };
+            let _ = self.response_tx.send(Err(connect_status)).await;
             return;
         };
 
@@ -508,9 +585,12 @@ impl StreamHandler {
             while let Some(response_result) = from_outbound_rx.recv().await {
                 let _timer = metrics.track_message_processing(metric_attr.response());
                 if restrictions_enforcer
-                    .stream_validate_invoke_ez_resp(
-                        response_result.map_err(|e| Status::internal(e.to_string())),
-                    )
+                    .stream_validate_invoke_ez_resp(response_result.map_err(|e| {
+                        match e.downcast_ref::<Status>() {
+                            Some(status) => status.clone(),
+                            _ => Status::internal(format!("Error from remote stream: {e:#?}")),
+                        }
+                    }))
                     .await
                     .is_err()
                 {
@@ -591,7 +671,10 @@ impl StreamHandler {
                 Err(e) => {
                     let _ = self
                         .response_tx
-                        .send(Err(Status::internal(format!("Proxy RPC failed: {}", e))))
+                        .send(Err(match e {
+                            ExternalProxyConnectorError::StreamFailed(status) => *status,
+                            _ => Status::internal(format!("Proxy RPC failed: {e:?}")),
+                        }))
                         .await;
                     return;
                 }
@@ -604,8 +687,7 @@ impl StreamHandler {
             while let Some(response) = from_connector_stream.recv().await {
                 let _timer = metrics.track_message_processing(metric_attr.response());
                 // The connector now sends InvokeEzResponse directly, with errors inside the status field.
-                if restrictions_enforcer.stream_validate_invoke_ez_resp(Ok(response)).await.is_err()
-                {
+                if restrictions_enforcer.stream_validate_invoke_ez_resp(response).await.is_err() {
                     log::info!("Client response channel closed.");
                     break;
                 }
@@ -666,7 +748,7 @@ impl StreamHandler {
                 let _timer = metrics.track_message_processing(metric_attr.response());
                 let response = invoke_isolate_response
                     .map(convert_to_invoke_ez_response)
-                    .map_err(|e| Status::internal(e.to_string()));
+                    .map_err(|e| e.to_tonic_status());
                 if restrictions_enforcer.stream_validate_invoke_ez_resp(response).await.is_err() {
                     log::warn!("Error while sending InvokeEzResponse to Isolate");
                     break;
@@ -806,8 +888,7 @@ impl RestrictionsEnforcer {
             .await
             .map_err(|e| {
                 Status::permission_denied(format!(
-                    "Failed to validate isolate scope for InvokeEZ Response {}",
-                    e
+                    "Failed to validate isolate scope for InvokeEZ Response {e:?}"
                 ))
             })?;
 
@@ -848,7 +929,6 @@ fn convert_to_invoke_ez_response(
         control_plane_metadata: invoke_isolate_response.control_plane_metadata,
         ez_response_iscope: invoke_isolate_response.isolate_output_iscope,
         ez_response_payload: invoke_isolate_response.isolate_output,
-        status: invoke_isolate_response.status,
     }
 }
 

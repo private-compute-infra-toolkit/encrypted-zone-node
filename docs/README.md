@@ -15,3 +15,8 @@ information see DevKit's Public
 
 [Microbenchmarks.md](Microbenchmarks.md) - Provides information about the microbenchmarking
 infrastructure used by EZ
+
+[TokioConsole.md](TokioConsole.md) - Provides instructions for using tokio-console with the Enforcer
+
+[Profiling.md](Profiling.md) - Provides instructions for collecting and analyzing performance
+profiles from a running Enforcer

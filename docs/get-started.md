@@ -52,8 +52,8 @@ the testing directory created in the previous step.
 bazel build //enforcer:enforcer_debug && \
 cp bazel-bin/enforcer/enforcer_debug manual_testing/enforcer_bin
 
-bazel build enforcer:manifest_descriptor_set && \
-cp bazel-bin/enforcer/manifest_descriptor_set.pb \
+bazel build //enforcer/v1:manifest_descriptor_set && \
+cp bazel-bin/enforcer/v1/manifest_descriptor_set.pb \
 manual_testing/enforcer/proto
 ```
 

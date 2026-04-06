@@ -1,4 +1,4 @@
-// Copyright 2025 Google LLC
+// Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,21 +21,6 @@ syntax = "proto3";
 package enforcer.v1;
 
 import "enforcer/v1/isolate_data_scope.proto";
-
-// Specifies import path for the generated Go code used to auto-generate SDK
-// code from proto annotations.
-option go_package = "github.com/private-compute-infra-toolkit/ez/sdk/v1";
-
-// Wire-format matches that of grpc's standard google.rpc.Status message,
-// but doesn't have external dependencies and doesn't allow extra details.
-//
-// WARNING: Do NOT directly copy this protobuf to other Status messages, even
-// those with a seemingly compatible format. Unknown fields can be set by
-// untrusted code, and would be silently passed along with the copy.
-message IsolateStatus {
-  int32 code = 1;
-  string message = 2;
-}
 
 // All fields here are optional, and are intended to be shared between the EZ
 // enforcer and untrusted Isolates.
@@ -96,13 +81,26 @@ message ControlPlaneMetadata {
   // If validation succeeds, the enforcer will mount the shared memory into the
   // receiving Isolate's container view, so that the recipient can immediately
   // map the memory without further calls to the enforcer. If validation of any
-  // handle fails, the entire request will fail.
+  // handle fails, the entire request will fail. Shared memory is useful for
+  // sending large amounts of data to an Isolate.
   repeated string shared_memory_handles = 8;
 
   // Propagate metadata headers for requests going in and out of Isolates.
   // WARNING: This field should only be used for non-sensitive data or fields.
   // TODO: b/482844871 - Sanitize metadata_headers in non-debug modes.
   map<string, string> metadata_headers = 12;
+
+  // Propagated to the isolate from `CallParameters.request_metadata`.
+  map<string, bytes> request_metadata = 13;
+
+  // Allows the message sender to pass one or more fileshare handles. The
+  // Enforcer must validate that the handles are currently accessible to the
+  // message owner. If validation succeeds, the Enforcer will mount the
+  // fileshare directory into the receiving Isolate's container view
+  // (read-only), so that the recipient can read the file. Fileshares are useful
+  // for sending small to medium sized data (such as config files) which can be
+  // accessed through normal OS file APIs in the Isolate.
+  repeated string fileshare_handles = 14;
 }
 
 // Analogous to EzPayloadScope, but with IsolateDataScope instead of

@@ -25,11 +25,14 @@ bazel_dep(name = "rules_buf", version = "0.5.1")
 bazel_dep(name = "rules_oci", version = "2.0.1")
 bazel_dep(name = "rules_pkg", version = "1.1.0")
 bazel_dep(name = "rules_proto", version = "7.1.0")
+bazel_dep(name = "rules_proto_grpc", version = "5.6.0")
+bazel_dep(name = "rules_proto_grpc_cpp", version = "5.6.0")
 bazel_dep(name = "rules_python", version = "1.5.3")
 bazel_dep(name = "rules_rust", version = "0.67.0")
 bazel_dep(name = "rules_rust_prost", version = "0.67.0")
 bazel_dep(name = "toolchains_protoc", version = "0.5.0")
 bazel_dep(name = "googleapis", version = "0.0.0-20260130-c0fcb356")
+bazel_dep(name = "boringssl", version = "0.20250415.0")
 
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
@@ -145,6 +148,7 @@ crate.annotation(
     deps = ["@crates//:tracing"],
 )
 crate.spec(
+    features = ["net"],
     package = "tokio-stream",
     version = "0.1.15",
 )
@@ -179,8 +183,16 @@ crate.spec(
     version = "0.5.0",
 )
 crate.spec(
+    package = "flate2",
+    version = "1.0.35",
+)
+crate.spec(
     package = "anyhow",
     version = "1.0.89",
+)
+crate.spec(
+    package = "arc-swap",
+    version = "1.7.1",
 )
 crate.spec(
     package = "thiserror",
@@ -201,6 +213,10 @@ crate.spec(
 crate.spec(
     package = "tar",
     version = "0.4.42",
+)
+crate.spec(
+    package = "procfs",
+    version = "0.16.0",
 )
 crate.spec(
     package = "which",
@@ -358,6 +374,7 @@ crate.spec(
         "fmt",
         "tracing-log",
         "env-filter",
+        "registry",
     ],
     package = "tracing-subscriber",
     version = "0.3.22",
@@ -365,6 +382,10 @@ crate.spec(
 crate.spec(
     package = "tracing-opentelemetry",
     version = "0.32.1",
+)
+crate.spec(
+    package = "opentelemetry-http",
+    version = "0.31.0",
 )
 crate.spec(
     package = "fake-opentelemetry-collector",
@@ -381,6 +402,46 @@ crate.spec(
 crate.spec(
     package = "googleapis-tonic-google-rpc",
     version = "0.23.0",
+)
+crate.spec(
+    package = "console-api",
+    version = "0.9.0",
+)
+crate.spec(
+    features = ["prost-codec"],
+    package = "pprof",
+    version = "0.15.0",
+)
+
+# Apply a patch to boring-sys to avoid bindgen and use checked in bindings.
+crate.annotation(
+    crate = "boring-sys",
+    patch_args = ["-p1"],
+    patches = ["@//third_party/rust/patches:boring-sys-cmake.patch"],
+    version = "5.0.2",
+    deps = [
+        "@@//:boringssl_ssl",
+    ],
+)
+crate.spec(
+    package = "boring",
+    version = "5.0.2",
+)
+crate.spec(
+    package = "tokio-boring",
+    version = "5.0.0",
+)
+crate.spec(
+    package = "x509-parser",
+    version = "0.18.1",
+)
+crate.spec(
+    package = "time",
+    version = "0.3.36",
+)
+crate.spec(
+    package = "time-macros",
+    version = "=0.2.18",
 )
 crate.from_specs()
 use_repo(crate, "crates")

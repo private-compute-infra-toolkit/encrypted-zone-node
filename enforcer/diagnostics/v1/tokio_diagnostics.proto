@@ -1,0 +1,56 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package enforcer.diagnostics.v1;
+
+import "google/protobuf/duration.proto";
+
+// Specification for a Tokio async runtime profile.
+message TokioProfileSpec {
+  // Optional duration for the Tokio async runtime profile collection.
+  // If not provided, a default duration will be used by the server.
+  google.protobuf.Duration duration = 1;
+
+  // Maximum number of tasks to return in each category.
+  uint32 top_n = 2;
+
+  // Optional substring filter for task location.
+  string location_filter = 3;
+}
+
+// Result containing a Tokio async runtime profile.
+message TokioProfileResult {
+  // Human-readable summary from the Tokio console.
+  string text_summary = 1;
+
+  // Top tasks sorted by busy time.
+  repeated TaskStat top_busy = 2;
+
+  // Top tasks sorted by scheduling delay.
+  repeated TaskStat top_delay = 3;
+}
+
+// Statistics for a single task.
+message TaskStat {
+  // Unique identifier for the task.
+  uint64 task_id = 1;
+
+  // Total duration (busy or delay) for the task.
+  google.protobuf.Duration duration = 2;
+
+  // Source code location of the task.
+  string location = 3;
+}

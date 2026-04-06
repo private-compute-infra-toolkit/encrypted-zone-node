@@ -21,16 +21,18 @@ pub mod logger {
         let console_appender = log4rs::append::console::ConsoleAppender::builder()
             .encoder(Box::new(log4rs::encode::pattern::PatternEncoder::new(DEFAULT_LOG_FMT)))
             .build();
+
+        let log_level = std::env::var("RUST_LOG")
+            .unwrap_or_else(|_| "info".to_string())
+            .parse::<log::LevelFilter>()
+            .unwrap_or(log::LevelFilter::Info);
+
         let config = log4rs::Config::builder()
             .appender(
                 log4rs::config::Appender::builder()
                     .build("console_logs", Box::new(console_appender)),
             )
-            .build(
-                log4rs::config::Root::builder()
-                    .appender("console_logs")
-                    .build(log::LevelFilter::Info),
-            )
+            .build(log4rs::config::Root::builder().appender("console_logs").build(log_level))
             .unwrap();
         log4rs::init_config(config).unwrap();
         Ok(())

@@ -24,10 +24,6 @@ import "enforcer/v1/ez_payload.proto";
 import "enforcer/v1/isolate_bridge.proto";
 import "enforcer/v1/isolate_state.proto";
 
-// Specifies import path for the generated Go code used to auto-generate SDK
-// code from proto annotations.
-option go_package = "github.com/private-compute-infra-toolkit/ez/sdk/v1";
-
 // The EnforcerIsolateBridge service contains the API that the EZ enforcer uses
 // to locally communicate with Isolates. This will ultimately be replaced with
 // an IPC subsystem, but we will temporarily use streaming gRPC services over
@@ -64,7 +60,6 @@ message InvokeIsolateResponse {
   ControlPlaneMetadata control_plane_metadata = 1;
   EzPayloadIsolateScope isolate_output_iscope = 2;
   EzPayloadData isolate_output = 3;
-  IsolateStatus status = 4;
 }
 
 message UpdateIsolateStateRequest {

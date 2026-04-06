@@ -32,6 +32,7 @@ impl HealthOp {
         isolate_id: IsolateId,
         health: &mut EzIsolateHealth,
         requester: &ContainerManagerRequester,
+        metrics: &metrics::health_manager::HealthManagerMetrics,
     ) {
         match self {
             HealthOp::CheckContainerRunStatus => {
@@ -59,6 +60,18 @@ impl HealthOp {
                     );
                     let _ = requester.reset_container(ResetIsolateRequest { isolate_id }).await;
                     health.container_reset_requested = true;
+
+                    if health.services.is_empty() {
+                        metrics::common::record_reset(&metrics.reset, "", "", "healthmanager");
+                    }
+                    for service in &health.services {
+                        metrics::common::record_reset(
+                            &metrics.reset,
+                            service.operator_domain.clone(),
+                            service.service_name.clone(),
+                            "healthmanager",
+                        );
+                    }
                 }
             }
         }

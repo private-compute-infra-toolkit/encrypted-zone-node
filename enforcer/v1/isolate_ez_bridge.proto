@@ -1,4 +1,4 @@
-// Copyright 2025 Google LLC
+// Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -24,10 +24,6 @@ import "enforcer/v1/ez_payload.proto";
 import "enforcer/v1/isolate_bridge.proto";
 import "enforcer/v1/isolate_state.proto";
 
-// Specifies import path for the generated Go code used to auto-generate SDK
-// code from proto annotations.
-option go_package = "github.com/private-compute-infra-toolkit/ez/sdk/v1";
-
 // This is a mirror image of the EzIsolateBridge service (see comments there).
 service IsolateEzBridge {
   // Used by an Isolate to call other services running inside EZ (i.e., the EZ
@@ -44,7 +40,8 @@ service IsolateEzBridge {
   // Used by an Isolate to ask the enforcer to create a shared memory region
   // (writable only by the caller) that can be passed to other Isolates (for
   // read-only access).
-  // TODO: Convert CreateMemshare to a unary RPC in the proto definition.
+  // TODO: Convert CreateMemshare to a unary RPC in the proto
+  // definition.
   rpc CreateMemshare(stream CreateMemshareRequest) returns (stream CreateMemshareResponse);
 
   // Communicates the Isolate's new state to the enforcer after a self-driven
@@ -54,6 +51,17 @@ service IsolateEzBridge {
 
   // Used by an Isolate to poll for its current IsolateState.
   rpc PollIsolateState(PollIsolateStateRequest) returns (PollIsolateStateResponse);
+
+  // Used by a sender Isolate to ask the Enforcer to create a fileshare
+  // (read-write directory for the sender Isolate) that can be passed to a
+  // receiver Isolate (read-only).
+  rpc CreateFileshare(CreateFileshareRequest) returns (CreateFileshareResponse);
+
+  // Used by a sender Isolate to publish an event.
+  rpc PublishEventFor(PublishEventForRequest) returns (PublishEventForResponse);
+
+  // Used by a receiver Isolate to stream events from the Enforcer.
+  rpc StreamSubscribeTo(StreamSubscribeToRequest) returns (stream StreamSubscribeToResponse);
 
   // TODO: Consider adding a special method here for egress via calls to
   //       external systems. Otherwise, egress only happens in responses.
@@ -70,7 +78,6 @@ message InvokeEzResponse {
   ControlPlaneMetadata control_plane_metadata = 1;
   EzPayloadIsolateScope ez_response_iscope = 2;
   EzPayloadData ez_response_payload = 3;
-  IsolateStatus status = 4;
 }
 
 message CreateMemshareRequest {
@@ -81,7 +88,6 @@ message CreateMemshareResponse {
   // Client software should treat this as opaque, and rely on our SDK to
   // translate it to a memory reference.
   string shared_memory_handle = 1;
-  IsolateStatus status = 2;
 }
 
 message NotifyIsolateStateRequest {
@@ -100,4 +106,55 @@ message PollIsolateStateRequest {}
 message PollIsolateStateResponse {
   // The Isolate's current state.
   IsolateState isolate_state = 1;
+}
+
+// Request to create a new fileshare.
+message CreateFileshareRequest {}
+
+// Response containing the handle to the newly created fileshare.
+message CreateFileshareResponse {
+  string fileshare_handle = 1;
+}
+
+// Request to publish an event.
+message PublishEventForRequest {
+  EventTopic topic = 1;
+  string handle = 2;
+  oneof payload {
+    FileshareEvent fileshare_event = 3;
+  }
+}
+
+// Response for a publish event request.
+message PublishEventForResponse {}
+
+// Request to subscribe to a stream of events.
+message StreamSubscribeToRequest {
+  EventTopic topic = 1;
+}
+
+// Event streamed to the subscriber.
+message StreamSubscribeToResponse {
+  EventTopic topic = 1;
+  string handle = 2;
+  oneof payload {
+    FileshareEvent fileshare_event = 3;
+  }
+}
+
+// Fileshare event details.
+message FileshareEvent {
+  // Fileshare event types.
+  enum FileshareEventType {
+    FILESHARE_EVENT_TYPE_UNSPECIFIED = 0;
+    // Indicates that the file content has been updated and is ready to be read.
+    FILESHARE_EVENT_TYPE_FILE_UPDATED = 1;
+  }
+  FileshareEventType event_type = 1;
+}
+
+// Event topics.
+enum EventTopic {
+  EVENT_TOPIC_UNSPECIFIED = 0;
+  EVENT_TOPIC_FILESHARE = 1;
 }

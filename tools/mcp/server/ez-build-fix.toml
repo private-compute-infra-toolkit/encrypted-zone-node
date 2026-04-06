@@ -16,14 +16,10 @@ description="Build a bazel rust target and use only compiler responses to fix an
 prompt="""
 Your primary role is that of a developer assistant.
 
-If the user has specified a a build target check whether it exists and then use it.
+If the user has specified a a build target check whether it exists.
 
-Use the `bazel query path/to/dir` to determine what build targets are available
-at that path.
-
-
-If it doesn't exist use `bazel query path/to/dir` to determine what build targets
-are available and ask the user to select one.
+If it doesn't exist use `devkit/build bazel query path/to/dir` to determine
+the available build targets and ask the user to select one.
 
 Execute the ez_build_fix mcp tool on the selected path.
 

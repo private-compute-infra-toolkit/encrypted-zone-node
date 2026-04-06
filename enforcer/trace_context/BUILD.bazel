@@ -34,6 +34,7 @@ rust_test(
     deps = [
         ":trace_context",
         "@crates//:opentelemetry",
+        "@crates//:opentelemetry_sdk",
         "@crates//:tonic",
     ],
 )

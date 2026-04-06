@@ -1,3 +1,0 @@
-# Some package names start with bazel-*,
-# so we undo the ignore from parent directory
-!**/bazel-*

@@ -23,7 +23,9 @@ rust_library(
         "//enforcer/grpc_connector",
         "//enforcer/logging",
         "//enforcer/v1:enforcer_rust",
+        "//enforcer/v1:external_proxy_rust",
         "//enforcer/v1:ez_service_rust",
+        "//enforcer/v1:ez_to_ez_service_rust",
         "@crates//:anyhow",
         "@crates//:futures",
         "@crates//:hyper-util",
@@ -45,6 +47,7 @@ rust_library(
     deps = [
         ":metrics",
         "@crates//:fake-opentelemetry-collector",
+        "@crates//:opentelemetry",
         "@crates//:serde_json",
     ],
 )
@@ -55,7 +58,9 @@ rust_test(
     srcs = ["test/metrics_test.rs"],
     deps = [
         ":metrics",
+        ":metrics_test_utils",
         "//enforcer/v1:ez_service_rust",
+        "//enforcer/v1:ez_to_ez_service_rust",
         "@crates//:fake-opentelemetry-collector",
         "@crates//:futures",
         "@crates//:opentelemetry",

@@ -23,9 +23,11 @@ rust_library(
     deps = [
         "//enforcer/grpc_connector",
         "@crates//:anyhow",
+        "@crates//:console-subscriber",
         "@crates//:opentelemetry",
         "@crates//:opentelemetry-otlp",
         "@crates//:opentelemetry_sdk",
+        "@crates//:tokio",
         "@crates//:tracing",
         "@crates//:tracing-opentelemetry",
         "@crates//:tracing-subscriber",
@@ -54,5 +56,28 @@ rust_test(
         "@crates//:tempfile",
         "@crates//:tokio",
         "@crates//:tracing",
+    ],
+)
+
+rust_test(
+    name = "console_subscriber_test",
+    size = "small",
+    srcs = ["test/console_subscriber_test.rs"],
+    deps = [
+        ":traces",
+        "@crates//:console-api",
+        "@crates//:tokio",
+        "@crates//:tonic",
+        "@crates//:tracing",
+    ],
+)
+
+rust_test(
+    name = "console_subscriber_conflict_test",
+    size = "small",
+    srcs = ["test/console_subscriber_conflict_test.rs"],
+    deps = [
+        ":traces",
+        "@crates//:tokio",
     ],
 )

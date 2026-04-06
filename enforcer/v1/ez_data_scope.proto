@@ -18,10 +18,6 @@ package enforcer.v1;
 
 import "enforcer/v1/data_scope_type.proto";
 
-// Specifies import path for the generated Go code used to auto-generate SDK
-// code from proto annotations.
-option go_package = "github.com/private-compute-infra-toolkit/ez/sdk/v1";
-
 // Describes the entity that owns an instantiated EZ data scope.
 message EzScopeOwner {
   // Optional

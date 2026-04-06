@@ -16,12 +16,10 @@ syntax = "proto3";
 
 package enforcer.v1;
 
-// Specifies import path for the generated Go code used to auto-generate SDK code from proto annotations.
-option go_package = "github.com/private-compute-infra-toolkit/ez/sdk/v1";
-
 // TODO: Document how these state transitions are intended to work, and
 // link the doc here.
 enum IsolateState {
+  reserved 2, 4, 6, 8, 10;
   ISOLATE_STATE_UNSPECIFIED = 0;
   // Enforcer has started the Isolate.
   ISOLATE_STATE_STARTING = 1;

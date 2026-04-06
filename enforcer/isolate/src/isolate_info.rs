@@ -14,7 +14,6 @@
 
 use anyhow::{ensure, Ok, Result};
 use derivative::Derivative;
-use external_proxy_connector_constants::EXTERNAL_PREFIX;
 use once_cell::sync::Lazy;
 use std::{fmt, hash::Hash};
 
@@ -108,15 +107,11 @@ impl IsolateServiceIndex {
     /// Returns error if there is a binary services index when is_external_service is True
     pub fn new(
         binary_services_index_option: Option<BinaryServicesIndex>,
-        operator_domain: &str,
+        _operator_domain: &str,
         is_external_service: bool,
     ) -> Result<Self> {
         let binary_services_index = match binary_services_index_option {
             Some(binary_service_index) => {
-                ensure!(
-                    !operator_domain.starts_with(EXTERNAL_PREFIX),
-                    "Binary Services Index should be none for external service domain"
-                );
                 ensure!(
                     !is_external_service,
                     "A service with a provided BinaryServicesIndex cannot be forced external"
@@ -124,8 +119,7 @@ impl IsolateServiceIndex {
                 binary_service_index
             }
             None => {
-                // TODO - Remove duplicated logic for external routing in the enforcer.
-                if is_external_service || operator_domain.starts_with(EXTERNAL_PREFIX) {
+                if is_external_service {
                     *EXTERNAL_BINARY_SERVICES_INDEX
                 } else {
                     *REMOTE_BINARY_SERVICES_INDEX

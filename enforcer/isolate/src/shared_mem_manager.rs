@@ -16,10 +16,11 @@ use anyhow::{Context, Result};
 use container_manager_request::{MountReadOnlyFile, MountWritableFile};
 use container_manager_requester::ContainerManagerRequester;
 use dashmap::DashMap;
-use enforcer_proto::enforcer::v1::{CreateMemshareRequest, CreateMemshareResponse, IsolateStatus};
+use enforcer_proto::enforcer::v1::{CreateMemshareRequest, CreateMemshareResponse};
 use isolate_info::IsolateId;
 use std::{collections::HashMap, sync::Arc};
 use thiserror::Error;
+use tonic::Status;
 
 // We internally represent all FileHandles as u64. But we send them as Strings to Isolates.
 type FileHandle = u64;
@@ -59,7 +60,7 @@ impl SharedMemManager {
         &self,
         isolate_id: IsolateId,
         create_shared_mem_request: CreateMemshareRequest,
-    ) -> CreateMemshareResponse {
+    ) -> Result<CreateMemshareResponse, Status> {
         let enforcer_file_handle: FileHandle = rand::random();
         let container_file_handle: FileHandle = rand::random();
         let mount_write_result = self
@@ -79,18 +80,11 @@ impl SharedMemManager {
                     .insert(container_file_handle, enforcer_file_handle);
                 self.file_owner_index.insert(container_file_handle, isolate_id);
 
-                CreateMemshareResponse {
+                Ok(CreateMemshareResponse {
                     shared_memory_handle: container_file_handle.to_string(),
-                    status: None,
-                }
+                })
             }
-            Err(e) => CreateMemshareResponse {
-                shared_memory_handle: "".to_string(),
-                status: Some(IsolateStatus {
-                    code: tonic::Code::Internal.into(),
-                    message: e.to_string(),
-                }),
-            },
+            Err(e) => Err(Status::internal(e.to_string())),
         }
     }
 

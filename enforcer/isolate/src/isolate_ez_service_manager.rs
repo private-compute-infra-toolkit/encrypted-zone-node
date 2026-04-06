@@ -1,4 +1,4 @@
-// Copyright 2025 Google LLC
+// Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ use data_scope::manifest_validator::ManifestValidator;
 use data_scope::requester::DataScopeRequester;
 use enforcer_proto::enforcer::v1::isolate_ez_bridge_server::IsolateEzBridgeServer;
 use external_proxy_connector::ExternalProxyChannel;
+use fileshare_manager::FileshareManager;
 use isolate_ez_service::{IsolateEzBridgeDependencies, IsolateEzBridgeService};
 use isolate_info::IsolateId;
 use isolate_service_mapper::IsolateServiceMapper;
@@ -36,6 +37,7 @@ pub struct IsolateEzServiceManagerDependencies {
     pub isolate_junction: Box<dyn Junction>,
     pub isolate_state_manager: IsolateStateManager,
     pub shared_memory_manager: SharedMemManager,
+    pub fileshare_manager: FileshareManager,
     pub external_proxy_connector: Option<Box<dyn ExternalProxyChannel>>,
     pub isolate_service_mapper: IsolateServiceMapper,
     pub ez_to_ez_outbound_handler: Option<Box<dyn OutboundEzToEzClient>>,
@@ -108,6 +110,7 @@ impl IsolateEzServiceManager {
             isolate_junction: self.deps.isolate_junction.clone(),
             isolate_state_manager: self.deps.isolate_state_manager.clone(),
             shared_memory_manager: self.deps.shared_memory_manager.clone(),
+            fileshare_manager: self.deps.fileshare_manager.clone(),
             external_proxy_connector: self.deps.external_proxy_connector.clone(),
             isolate_service_mapper: self.deps.isolate_service_mapper.clone(),
             manifest_validator: self.deps.manifest_validator.clone(),

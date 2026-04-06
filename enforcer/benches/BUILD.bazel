@@ -23,21 +23,25 @@ filegroup(
 
 rust_binary(
     name = "enforcer_bench",
-    srcs = glob(["benchmarks/*.rs"]) + ["main.rs"],
+    srcs = ["main.rs"] + glob(["benchmarks/*.rs"]),
     data = [
         ":manifests",
         "//enforcer/proto:test_manifest_descriptor_set",
     ],
     visibility = ["//visibility:public"],
     deps = [
-        "//enforcer:manifest_rust",
         "//enforcer/container/manager:manifest_parser",
         "//enforcer/data_scope",
         "//enforcer/isolate:isolate_info",
+        "//enforcer/trace_context",
         "//enforcer/v1:data_scope_rust",
+        "//enforcer/v1:manifest_rust",
         "@crates//:anyhow",
         "@crates//:criterion",
+        "@crates//:opentelemetry",
+        "@crates//:opentelemetry_sdk",
         "@crates//:rand",
         "@crates//:tokio",
+        "@crates//:tonic",
     ],
 )

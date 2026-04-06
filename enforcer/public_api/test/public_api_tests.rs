@@ -29,10 +29,11 @@ use isolate_info::IsolateServiceInfo;
 use isolate_service_mapper::IsolateServiceMapper;
 use junction_test_utils::FakeJunction;
 use junction_test_utils::UNKNOWN_ISOLATE_DOMAIN;
-use manifest_proto::enforcer::InterceptingServices;
+use manifest_proto::enforcer::v1::InterceptingServices;
 use prost::Message;
 use public_api::EzPublicApiService;
 use state_manager::IsolateStateManager;
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -269,11 +270,11 @@ async fn test_stream_call_succeeds() {
     .await
     .unwrap();
 
-    let _ = shutdown_tx.send(());
-
     let response_result = response_stream.message().await.unwrap();
 
     assert_eq!(response_result.unwrap(), second_expected_response);
+
+    let _ = shutdown_tx.send(());
 }
 
 #[tokio::test]
@@ -287,7 +288,11 @@ async fn test_call_succeeds_with_empty_call_parameters() {
         service_name: "test_service".to_string(),
         method_name: "test_method".to_string(),
         session_metadata: Some(session_metadata.clone()),
-        input_params: Some(CallParameters { public_input: vec![], encrypted_input: vec![] }),
+        input_params: Some(CallParameters {
+            public_input: vec![],
+            encrypted_input: vec![],
+            request_metadata: HashMap::new(),
+        }),
         ..Default::default()
     };
 
@@ -304,6 +309,7 @@ async fn test_call_succeeds_with_empty_call_parameters() {
         session_metadata: Some(session_metadata),
         public_output: vec![],
         encrypted_output: vec![],
+        response_metadata: HashMap::new(),
     };
 
     let _ = shutdown_tx.send(());
@@ -493,4 +499,45 @@ async fn setup_interceptor() -> Interceptor {
     };
     interceptor.add_interceptor(intercepting_services).await.unwrap();
     interceptor
+}
+
+#[tokio::test]
+async fn test_request_metadata_propagated() {
+    let (port, shutdown_tx, fake_junction) = start_api_server().await;
+
+    let session_metadata = SessionMetadata { session_id: port as u64, ..Default::default() };
+
+    let mut request_metadata = HashMap::new();
+    let key_for_string = "string-key";
+    let valid_utf8 = "typical value";
+    let key_for_bytes = "byte-key";
+    let invalid_utf8 = vec![0, 159, 146, 150];
+    request_metadata.insert(key_for_string.to_string(), valid_utf8.as_bytes().to_vec());
+    request_metadata.insert(key_for_bytes.to_string(), invalid_utf8.clone());
+
+    let valid_request = CallRequest {
+        operator_domain: "test_domain".to_string(),
+        service_name: "test_service".to_string(),
+        method_name: "test_method".to_string(),
+        session_metadata: Some(session_metadata.clone()),
+        input_params: Some(CallParameters { request_metadata, ..Default::default() }),
+        ..Default::default()
+    };
+
+    let _response_result = tokio::spawn(async move {
+        let mut client = EzPublicApiClient::connect(format!("http://localhost:{}", port))
+            .await
+            .expect("failed to connect to EzPublicApi");
+        client.call(valid_request).await
+    })
+    .await
+    .unwrap();
+
+    let _ = shutdown_tx.send(());
+
+    let invoke_isolate_req = fake_junction.invoked_isolate_requests.lock().unwrap()[0].clone();
+    let cpm = invoke_isolate_req.control_plane_metadata.unwrap();
+
+    assert_eq!(cpm.request_metadata.get(key_for_string).unwrap(), valid_utf8.as_bytes());
+    assert_eq!(cpm.request_metadata.get(key_for_bytes).unwrap(), &invalid_utf8);
 }

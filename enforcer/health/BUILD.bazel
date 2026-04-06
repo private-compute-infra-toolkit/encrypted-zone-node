@@ -24,20 +24,33 @@ load("//:build_flavors.bzl", "flavors")
         visibility = ["//visibility:public"],
         deps = [
             ":health_ops",
+            ":system_metrics",
             "//enforcer/container/manager:container_manager_requester",
             "//enforcer/data_scope",
             "//enforcer/isolate:isolate_info",
             "//enforcer/isolate:isolate_service_mapper",
             "//enforcer/logging:logging{}".format(flavor.suffix),
+            "//enforcer/metrics",
             "//enforcer/state:state_manager",
             "//enforcer/v1:enforcer_rust",
             "@crates//:anyhow",
             "@crates//:log",
+            "@crates//:opentelemetry",
+            "@crates//:procfs",
             "@crates//:tokio",
         ],
     )
     for flavor in flavors
 ]
+
+rust_library(
+    name = "system_metrics",
+    srcs = ["src/system_metrics.rs"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@crates//:procfs",
+    ],
+)
 
 rust_library(
     name = "health_ops",
@@ -49,9 +62,11 @@ rust_library(
         "//enforcer/container/manager:container_manager_requester",
         "//enforcer/isolate:isolate_info",
         "//enforcer/logging:logging_debug",
+        "//enforcer/metrics",
         "//enforcer/v1:enforcer_rust",
         "@crates//:anyhow",
         "@crates//:log",
+        "@crates//:opentelemetry",
         "@crates//:tokio",
     ],
 )
@@ -70,9 +85,34 @@ rust_test(
         "//enforcer/isolate:isolate_info",
         "//enforcer/isolate:isolate_service_mapper",
         "//enforcer/logging:logging_debug",
+        "//enforcer/metrics",
         "//enforcer/state:state_manager",
         "//enforcer/v1:data_scope_rust",
         "//enforcer/v1:enforcer_rust",
+        "@crates//:tokio",
+    ],
+)
+
+rust_test(
+    name = "health_manager_metrics_test",
+    size = "small",
+    srcs = ["test/health_manager_metrics_test.rs"],
+    deps = [
+        ":health_manager",
+        ":health_ops",
+        "//enforcer/container",
+        "//enforcer/container/manager:container_manager_request",
+        "//enforcer/container/manager:container_manager_requester",
+        "//enforcer/data_scope",
+        "//enforcer/isolate:isolate_info",
+        "//enforcer/isolate:isolate_service_mapper",
+        "//enforcer/metrics",
+        "//enforcer/metrics:metrics_test_utils",
+        "//enforcer/state:state_manager",
+        "//enforcer/v1:data_scope_rust",
+        "//enforcer/v1:enforcer_rust",
+        "@crates//:fake-opentelemetry-collector",
+        "@crates//:serde_json",
         "@crates//:tokio",
     ],
 )

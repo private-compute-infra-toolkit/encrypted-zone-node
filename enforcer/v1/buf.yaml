@@ -19,7 +19,7 @@ lint:
   use:
     - STANDARD
     - PACKAGE_NO_IMPORT_CYCLE
-  #- COMMENTS
+    - COMMENTS
   ignore_only:
     SERVICE_SUFFIX:
       - enforcer/v1/ez_service.proto
@@ -47,6 +47,25 @@ lint:
       - enforcer/v1/ez_to_ez_service.proto
       - enforcer/v1/isolate_ez_bridge.proto
       - enforcer/v1/ez_external_proxy_service.proto
+    ONEOF_LOWER_SNAKE_CASE:
+      - enforcer/v1/ez_manifest.proto
+    COMMENTS:
+      - enforcer/v1/data_scope_type.proto
+      - enforcer/v1/error_detail.proto
+      - enforcer/v1/ez_data_scope.proto
+      - enforcer/v1/ez_external_proxy_service.proto
+      - enforcer/v1/ez_isolate_bridge.proto
+      - enforcer/v1/ez_manifest.proto
+      - enforcer/v1/ez_mtls.proto
+      - enforcer/v1/ez_payload.proto
+      - enforcer/v1/ez_service.proto
+      - enforcer/v1/ez_to_ez_service.proto
+      - enforcer/v1/isolate_bridge.proto
+      - enforcer/v1/isolate_data_scope.proto
+      - enforcer/v1/isolate_ez_bridge.proto
+      - enforcer/v1/isolate_health.proto
+      - enforcer/v1/isolate_state.proto
+      - enforcer/v1/options.proto
 
   enum_zero_value_suffix: _UNSPECIFIED
   rpc_allow_same_request_response: false

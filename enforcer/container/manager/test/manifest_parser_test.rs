@@ -15,7 +15,7 @@
 use anyhow::{Context, Result};
 use data_scope_proto::enforcer::v1::DataScopeType;
 use manifest_parser::{get_strictest_scope, parse_isolate_runtime_configs, parse_manifest};
-use manifest_proto::enforcer::{
+use manifest_proto::enforcer::v1::{
     ez_manifest::ManifestType, BinaryManifest, BundleManifest, EzManifest, EzMethodSpec,
 };
 use prost_reflect::{DescriptorPool, DynamicMessage};
@@ -23,19 +23,16 @@ use prost_reflect::{DescriptorPool, DynamicMessage};
 const JSON_MANIFEST_PATH: &str = "enforcer/container/manager/test/testdata/test_manifest.json";
 const JSON_MANIFEST_EMPTY_PATH: &str =
     "enforcer/container/manager/test/testdata/test_manifest_empty.json";
-const PROTO_DESCRIPTOR_PATH: &str = "enforcer/proto/manifest_descriptor_set.pb";
-const PROTO_DESCRIPTOR_FILE_NAME: &str = "enforcer.EzManifest";
 const TEXT_PROTO_MANIFEST_PATH: &str =
     "enforcer/container/manager/test/testdata/test_manifest.txtpb";
+const PROTO_DESCRIPTOR_BYTES: &[u8] = include_bytes!(env!("TEST_MANIFEST_DESCRIPTOR_SET_PATH"));
+const PROTO_DESCRIPTOR_FILE_NAME: &str = "enforcer.v1.EzManifest";
+
 use std::collections::HashMap;
 
 fn get_manifest_from_text_proto() -> Result<EzManifest> {
-    // Get proto descriptor set file
-    let file_desc_bytes =
-        std::fs::read(PROTO_DESCRIPTOR_PATH).context(format!("opening {PROTO_DESCRIPTOR_PATH}"))?;
-
-    let pool = DescriptorPool::decode(file_desc_bytes.as_slice())
-        .context(format!("decoding {PROTO_DESCRIPTOR_PATH}"))?;
+    let pool = DescriptorPool::decode(PROTO_DESCRIPTOR_BYTES)
+        .context("decoding manifest descriptor set")?;
 
     let message_descriptor = pool
         .get_message_by_name(PROTO_DESCRIPTOR_FILE_NAME)

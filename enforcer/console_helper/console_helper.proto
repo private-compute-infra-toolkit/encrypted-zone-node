@@ -1,0 +1,140 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package enforcer.console_helper;
+
+import "google/protobuf/timestamp.proto";
+
+/// ConsoleHelper service provides specialized monitoring and profiling data
+/// derived from console-subscriber updates.
+service ConsoleHelper {
+  /// Streams task latency statistics, showing busy and scheduled times for tasks.
+  rpc WatchTaskLatency(WatchTaskLatencyRequest) returns (stream WatchTaskLatencyResponse) {}
+
+  /// Streams resource contention events, such as Mutex or Semaphore acquisitions.
+  rpc WatchResourceContention(WatchResourceContentionRequest) returns (stream WatchResourceContentionResponse) {}
+
+  /// Streams task throughput statistics, including poll counts and wake events.
+  rpc WatchThroughput(WatchThroughputRequest) returns (stream WatchThroughputResponse) {}
+
+  /// Streams task memory usage information (task size).
+  rpc WatchTaskSize(WatchTaskSizeRequest) returns (stream WatchTaskSizeResponse) {}
+
+  /// Streams channel saturation metrics for task communication.
+  rpc WatchChannelSaturation(WatchChannelSaturationRequest) returns (stream WatchChannelSaturationResponse) {}
+
+  /// Streams task churn events, tracking when tasks are created or dropped.
+  rpc WatchTaskChurn(WatchTaskChurnRequest) returns (stream WatchTaskChurnResponse) {}
+}
+
+/// Request for WatchTaskLatency.
+message WatchTaskLatencyRequest {
+  /// Optional substring filter for task location.
+  string task_location_filter = 1;
+}
+
+/// Response for WatchTaskLatency.
+message WatchTaskLatencyResponse {
+  /// Unique identifier for the task.
+  uint64 task_id = 1;
+
+  /// Total time the task spent polling (busy).
+  string busy_time = 2;
+
+  /// Total time the task spent waiting to be scheduled.
+  string scheduled_time = 3;
+
+  /// Source code location where the task was spawned.
+  string location = 4;
+}
+
+/// Request for WatchResourceContention.
+message WatchResourceContentionRequest {
+  /// Optional substring filter for the resource source.
+  string source_filter = 1;
+}
+
+/// Response for WatchResourceContention.
+message WatchResourceContentionResponse {
+  /// Unique identifier for the resource.
+  uint64 resource_id = 1;
+
+  /// Source of the contention event (e.g. lock line).
+  string source = 2;
+}
+
+/// Request for WatchThroughput.
+message WatchThroughputRequest {}
+
+/// Response for WatchThroughput.
+message WatchThroughputResponse {
+  /// Unique identifier for the task.
+  uint64 task_id = 1;
+
+  /// Number of times the task was woken.
+  uint64 wakes = 2;
+
+  /// Number of times the task was polled.
+  uint64 polls = 3;
+
+  /// Timestamp of the last time the task was woken.
+  google.protobuf.Timestamp last_wake = 4;
+
+  /// Source code location of the task.
+  string location = 5;
+}
+
+/// Request for WatchTaskSize.
+message WatchTaskSizeRequest {}
+
+/// Response for WatchTaskSize.
+message WatchTaskSizeResponse {
+  /// Unique identifier for the task.
+  uint64 task_id = 1;
+
+  /// Size of the task in bytes.
+  uint64 size_bytes = 2;
+}
+
+/// Request for WatchChannelSaturation.
+message WatchChannelSaturationRequest {}
+
+/// Response for WatchChannelSaturation.
+message WatchChannelSaturationResponse {
+  /// Unique identifier for the resource.
+  uint64 resource_id = 1;
+
+  /// Concrete type of the channel (e.g. mpsc).
+  string type = 2;
+
+  /// Kind of channel resource.
+  string kind = 3;
+}
+
+/// Request for WatchTaskChurn.
+message WatchTaskChurnRequest {}
+
+/// Response for WatchTaskChurn.
+message WatchTaskChurnResponse {
+  /// Identifier of the dropped task.
+  uint64 dropped_task_id = 1;
+
+  /// Timestamp when the task was created.
+  google.protobuf.Timestamp created_at = 2;
+
+  /// Timestamp when the task was dropped.
+  google.protobuf.Timestamp dropped_at = 3;
+}

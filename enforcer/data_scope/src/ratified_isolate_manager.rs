@@ -19,31 +19,10 @@ use crate::request::{
 };
 use dashmap::{mapref::one::Ref, DashMap};
 use data_scope_proto::enforcer::v1::DataScopeType;
-use derivative::Derivative;
 use indexmap::set::IndexSet;
 use isolate_info::{BinaryServicesIndex, IsolateId};
 use rand::Rng;
-use std::{borrow::Borrow, sync::Arc};
-
-/// Contains scope information for a Ratified Isolate.
-#[derive(Derivative, Clone, Debug)]
-#[derivative(PartialEq, Eq, Hash)]
-struct IsolateScopeinfo {
-    isolate_id: IsolateId,
-    /// Maximum permissible scope of the Ratified Isolate.
-    /// This field is not part of the hash or equality checks because the `isolate_id`
-    /// uniquely identifies the Isolate.
-    #[derivative(PartialEq = "ignore")]
-    #[derivative(Hash = "ignore")]
-    max_data_scope: DataScopeType,
-}
-
-impl Borrow<IsolateId> for IsolateScopeinfo {
-    /// Borrows the `IsolateId` for lookups in collections.
-    fn borrow(&self) -> &IsolateId {
-        &self.isolate_id
-    }
-}
+use std::sync::Arc;
 
 /// The [RatifiedIsolateManager] handles tracking of Ratified Isolates. Ratified Isolates
 /// have a fixed maximum data scope and are not subject to the same dynamic scope management
@@ -55,8 +34,10 @@ impl Borrow<IsolateId> for IsolateScopeinfo {
 #[derive(Debug, Default, Clone)]
 pub struct RatifiedIsolateManager {
     // Using DashMap for concurrent access to the Isolate index. The key is the
-    // BinaryServicesIndex, and the value is a set of IsolateScopeinfo structs.
-    isolates_map: Arc<DashMap<BinaryServicesIndex, IndexSet<IsolateScopeinfo>>>,
+    // BinaryServicesIndex, and the value is a set of IsolateIds.
+    isolates_map: Arc<DashMap<BinaryServicesIndex, IndexSet<IsolateId>>>,
+    // Stores the maximum data scope for each BinaryServicesIndex.
+    max_data_scope_map: Arc<DashMap<BinaryServicesIndex, DataScopeType>>,
 }
 
 impl RatifiedIsolateManager {
@@ -84,6 +65,16 @@ impl RatifiedIsolateManager {
         }
 
         let binary_services_index = isolate_id.get_binary_services_index();
+
+        if let Some(existing_scope) = self.max_data_scope_map.get(&binary_services_index) {
+            if *existing_scope != allowed_data_scope_type {
+                return Err(DataScopeError::InternalError(format!(
+                    "Mismatching max data scope for binary services index {:?}: existing {:?}, requested {:?}",
+                    binary_services_index, *existing_scope, allowed_data_scope_type
+                )));
+            }
+        }
+
         let mut isolate_set = self.isolates_map.entry(binary_services_index).or_default();
 
         if isolate_set.contains(&isolate_id) {
@@ -93,8 +84,9 @@ impl RatifiedIsolateManager {
             )));
         }
 
-        isolate_set
-            .insert(IsolateScopeinfo { isolate_id, max_data_scope: allowed_data_scope_type });
+        isolate_set.insert(isolate_id);
+        self.max_data_scope_map.insert(binary_services_index, allowed_data_scope_type);
+
         Ok(AddIsolateResponse {})
     }
 
@@ -135,15 +127,25 @@ impl RatifiedIsolateManager {
             }
             DataScopeType::Public | DataScopeType::DomainOwned | DataScopeType::UserPrivate => {
                 let isolate_set = self.get_isolate_set(&binary_services_index)?;
+
+                let Some(max_data_scope) = self.max_data_scope_map.get(&binary_services_index)
+                else {
+                    // Ideally, should never happen
+                    return Err(DataScopeError::InternalError(
+                        "Missing max data scope for binary index".to_string(),
+                    ));
+                };
+
+                if data_scope_type > *max_data_scope {
+                    return Err(DataScopeError::NoMatchingIsolates);
+                }
+
                 let random_isolate_index = rand::rng().random_range(0..isolate_set.len());
-                let Some(isolate_info) = isolate_set.get_index(random_isolate_index) else {
+                let Some(isolate_id) = isolate_set.get_index(random_isolate_index) else {
                     return Err(DataScopeError::NoMatchingIsolates);
                 };
 
-                if data_scope_type > isolate_info.max_data_scope {
-                    return Err(DataScopeError::NoMatchingIsolates);
-                }
-                Ok(GetIsolateResponse { isolate_id: isolate_info.isolate_id, new_state: None })
+                Ok(GetIsolateResponse { isolate_id: *isolate_id, new_state: None })
             }
             _ => {
                 // TODO Support other DataScopeTypes
@@ -153,28 +155,11 @@ impl RatifiedIsolateManager {
         }
     }
 
-    /// Validates that a given Ratified Isolate can handle the requested data scope.
-    ///
-    /// This method checks if the `requested_scope` is within the `max_data_scope`
-    /// of the specified Isolate. It does not modify the state of the Isolate.
+    /// No-op for Ratified Isolates.
     pub async fn validate_isolate_scope(
         &self,
-        validate_isolate_request: ValidateIsolateRequest,
+        _validate_isolate_request: ValidateIsolateRequest,
     ) -> Result<ValidateIsolateResponse, DataScopeError> {
-        let ValidateIsolateRequest { isolate_id, requested_scope } = validate_isolate_request;
-
-        if requested_scope == DataScopeType::Unspecified {
-            log::warn!("Unknown data scope type: {:?}", requested_scope);
-            return Err(DataScopeError::InvalidDataScopeType);
-        }
-        let binary_services_index = isolate_id.get_binary_services_index();
-        let isolate_set = self.get_isolate_set(&binary_services_index)?;
-        let Some(isolate_info) = isolate_set.get(&isolate_id) else {
-            return Err(DataScopeError::UnknownIsolateId);
-        };
-        if requested_scope > isolate_info.max_data_scope {
-            return Err(DataScopeError::DisallowedByManifest);
-        }
         Ok(ValidateIsolateResponse {})
     }
 
@@ -195,7 +180,7 @@ impl RatifiedIsolateManager {
     fn get_isolate_set<'a>(
         &'a self,
         binary_services_index: &BinaryServicesIndex,
-    ) -> Result<Ref<'a, BinaryServicesIndex, IndexSet<IsolateScopeinfo>>, DataScopeError> {
+    ) -> Result<Ref<'a, BinaryServicesIndex, IndexSet<IsolateId>>, DataScopeError> {
         let Some(isolate_set) = self.isolates_map.get(binary_services_index) else {
             return Err(DataScopeError::InvalidIsolateServiceIndex);
         };

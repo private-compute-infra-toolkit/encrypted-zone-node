@@ -14,6 +14,8 @@
 
 use anyhow::{Context, Result};
 use hyper_util::rt::tokio::TokioIo;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UnixStream;
 use tokio_retry::strategy::ExponentialBackoff;
@@ -22,16 +24,62 @@ use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
 
 pub const DEFAULT_CONNECT_RETRY_DELAY_MS: u64 = 1000;
+pub const DEFAULT_CONNECT_RETRY_SCALING: u64 = 2;
 pub const DEFAULT_CONNECT_RETRY_COUNT: usize = 30;
+pub const DEFAULT_POOL_SIZE: usize = 8;
+
+/// Holds a pool of tonic::Channels to a gRPC server.
+/// Provides an interface for round-robin selection of channels.
+#[derive(Clone, Debug)]
+pub struct GrpcChannelPool {
+    channels: Vec<Channel>,
+    next_idx: Arc<AtomicUsize>,
+}
+
+impl GrpcChannelPool {
+    /// Creates a new GrpcChannelPool, establishing a connection to the given address.
+    ///
+    /// This function supports both TCP and Unix Domain Socket (UDS) connections.
+    /// It includes a configurable retry mechanism with exponential backoff.
+    pub async fn new(
+        address: String,
+        pool_size: usize,
+        retry_count: usize,
+        retry_delay_ms: u64,
+        retry_scaling: u64,
+    ) -> Result<Self> {
+        let mut channels = Vec::new();
+        for _ in 0..pool_size {
+            channels
+                .push(connect(address.clone(), retry_count, retry_delay_ms, retry_scaling).await?);
+        }
+        Ok(Self { channels, next_idx: Arc::new(AtomicUsize::new(0)) })
+    }
+
+    /// Method to get the next channel in line.
+    ///
+    /// Utilizes round-robin for load balancing by default.
+    pub fn next_channel(&self) -> Channel {
+        let idx = self.next_idx.fetch_add(1, Ordering::Relaxed) % self.channels.len();
+        self.channels[idx].clone()
+    }
+}
 
 /// Establishes a connection to a gRPC service and returns the channel.
 ///
 /// This function supports both TCP and Unix Domain Socket (UDS) connections.
 /// It includes a configurable retry mechanism with exponential backoff.
-pub async fn connect(address: String, retry_count: usize, retry_delay_ms: u64) -> Result<Channel> {
+async fn connect(
+    address: String,
+    retry_count: usize,
+    retry_delay_ms: u64,
+    retry_scaling: u64,
+) -> Result<Channel> {
     log::info!("Attempting to connect to gRPC service at {}...", address);
 
-    let retry_strategy = ExponentialBackoff::from_millis(retry_delay_ms).take(retry_count);
+    // TokioRetry's ExponentialBackoff arguments swap the from and factor usage.
+    let retry_strategy =
+        ExponentialBackoff::from_millis(retry_scaling).factor(retry_delay_ms).take(retry_count);
 
     let channel = if let Some(path) = address.strip_prefix("unix:") {
         connect_uds(path, retry_strategy).await?

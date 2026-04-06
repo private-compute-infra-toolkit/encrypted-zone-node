@@ -16,8 +16,6 @@ syntax = "proto3";
 
 package enforcer.v1;
 
-option go_package = "github.com/private-compute-infra-toolkit/ez/sdk/v1";
-
 // Details about EZ Errors. This will be propagated in grpc.rpc.Status.details
 // along with grpc.rpc.Status.
 message EzErrorDetail {

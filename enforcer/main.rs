@@ -1,4 +1,4 @@
-// Copyright 2025 Google LLC
+// Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,9 +19,12 @@ use container_manager::{ContainerManager, ContainerManagerArgs};
 use container_manager_requester::ContainerManagerRequester;
 use data_scope::manifest_validator::ManifestValidator;
 use data_scope::requester::DataScopeRequester;
+use diagnostics::{EnforcerDiagnosticService, EnforcerPprofService, TokioDiagnosticService};
+use diagnostics_proto::enforcer::diagnostics::v1::diagnostic_service_server::DiagnosticServiceServer;
 use external_proxy_connector::ExternalProxyChannel;
 use external_proxy_connector::ExternalProxyConnector;
 use ez_service_proto::enforcer::v1::ez_public_api_server::EzPublicApiServer;
+use fileshare_manager::FileshareManager;
 use health_manager::HealthManager;
 use inbound_ez_to_ez_handler::InboundEzToEzHandler;
 use interceptor::Interceptor;
@@ -29,8 +32,10 @@ use isolate_ez_service_manager::{IsolateEzServiceManager, IsolateEzServiceManage
 use isolate_service_mapper::IsolateServiceMapper;
 use junction::IsolateJunction;
 use logging::logger;
-use manifest_parser::parse_isolate_runtime_configs;
+use manifest_parser::{parse_isolate_runtime_configs, parse_manifest};
 use metrics::setup_otel_metrics;
+use opentelemetry::global;
+use opentelemetry_http::HeaderExtractor;
 use outbound_ez_to_ez_client::OutboundEzToEzClient;
 use outbound_ez_to_ez_handler::OutboundEzToEzHandler;
 use public_api::EzPublicApiService;
@@ -42,9 +47,11 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::net::UnixListener;
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 const PUBLIC_API_PORT_ENV_VAR: &str = "EZ_PUBLIC_API_PORT";
 const ISOLATE_MNGR_REQUEST_CHANNEL_SIZE: usize = 1024;
@@ -70,6 +77,9 @@ struct EnforcerInputs {
     /// OTel traces endpoint
     #[arg(long)]
     otel_traces_endpoint: Option<String>,
+    /// Port for tokio-console to listen on.
+    #[arg(long, default_value_t = 14255)]
+    console_subscriber_port: u16,
     /// Bind mount for all Isolates
     #[arg(
         short = 'b',
@@ -129,6 +139,27 @@ struct EnforcerInputs {
         help = "Interval in seconds for the HealthManager to check isolates. A value of 0 means the health manager is disabled."
     )]
     health_manager_interval_secs: u64,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Enables mTLS for EZ-to-EZ communication. If true, the enforcer will attempt to establish a connection to the EzMtlsService. mTLS is required for EZ-to-EZ communication. This flag will be eventually deprecated as mTLS would be the default EZ-to-EZ communication method."
+    )]
+    enable_mtls: bool,
+
+    #[arg(long, help = "Proxy UDS from where Enforcer can get its certs.")]
+    mtls_control_plane_uds_path: Option<String>,
+
+    #[arg(
+        long,
+        help = "To be removed after CA integration is finished: Path to the mTLS leaf private key."
+    )]
+    mtls_key_path: Option<String>,
+
+    #[arg(
+        long,
+        help = "To be removed after CA integration is finished: Path to the mTLS leaf CSR."
+    )]
+    mtls_leaf_csr_path: Option<String>,
 }
 
 enum Endpoint {
@@ -149,7 +180,11 @@ fn main() -> anyhow::Result<()> {
         )
         .await?;
 
-        let _otel_traces = traces::setup_telemetry(&enforcer_inputs.otel_traces_endpoint).await?;
+        let _otel_traces = traces::setup_telemetry(
+            &enforcer_inputs.otel_traces_endpoint,
+            &Some(enforcer_inputs.console_subscriber_port),
+        )
+        .await?;
 
         let data_scope_requester =
             DataScopeRequester::new(enforcer_inputs.sensitive_session_threshold);
@@ -167,6 +202,7 @@ fn main() -> anyhow::Result<()> {
             container_manager_requester.clone(),
         );
         let shared_memory_manager = SharedMemManager::new(container_manager_requester.clone());
+        let fileshare_manager = FileshareManager::new(container_manager_requester.clone());
         let health_manager = HealthManager::new(
             isolate_state_manager.clone(),
             container_manager_requester.clone(),
@@ -183,6 +219,7 @@ fn main() -> anyhow::Result<()> {
             data_scope_requester.clone(),
             isolate_service_mapper.clone(),
             shared_memory_manager.clone(),
+            fileshare_manager.clone(),
             isolate_state_manager.clone(),
             manifest_validator.clone(),
         );
@@ -195,6 +232,19 @@ fn main() -> anyhow::Result<()> {
             health_manager.clone(),
         )
         .await;
+
+
+        let console_helper_endpoint = format!(
+            "http://[{}]:{}",
+            std::net::Ipv6Addr::LOCALHOST,
+            enforcer_inputs.console_subscriber_port
+        );
+        let console_helper =
+            Arc::new(console_helper::ConsoleHelperService::new(console_helper_endpoint));
+        let diagnostics_service = EnforcerDiagnosticService::new(
+            EnforcerPprofService::new(),
+            TokioDiagnosticService::new(console_helper),
+        );
         let socket_addr_str = enforcer_inputs.external_to_ez_address.unwrap_or_else(|| {
             let host = enforcer_inputs.host;
             let port =
@@ -203,9 +253,45 @@ fn main() -> anyhow::Result<()> {
         });
 
         let public_api_handle = tokio::spawn(async move {
-            launch_ez_public_api_server(ez_public_api, &socket_addr_str, max_decoding_message_size)
-                .await;
+            launch_ez_public_api_server(
+                ez_public_api,
+                diagnostics_service,
+                &socket_addr_str,
+                max_decoding_message_size,
+            )
+            .await;
         });
+
+        if enforcer_inputs.enable_mtls {
+            let proxy_address = enforcer_inputs.mtls_control_plane_uds_path.as_ref().context(
+                "mTLS enabled but mtls_control_plane_uds_path is missing. mTLS must be properly fetched.",
+            )?;
+            let key_path = enforcer_inputs.mtls_key_path.as_ref().context(
+                "mTLS enabled but mtls_key_path is missing.",
+            )?;
+            let csr_path = enforcer_inputs.mtls_leaf_csr_path.as_ref().context(
+                "mTLS enabled but mtls_leaf_csr_path is missing.",
+            )?;
+            // TODO: Remove duplicated manifest parsing happened in container manager.
+            let ez_manifest = parse_manifest(enforcer_inputs.manifest_path.clone())
+                .context("couldn't parse EzManifest for mTLS SNI")?;
+            let policy = std::sync::Arc::new(mtls::mtls::EzToEzPolicy {
+                allowed_trust_domains: std::collections::HashSet::new(),
+                allowed_operator_domains: std::collections::HashSet::new(),
+                allowed_publisher_ids: std::collections::HashSet::new(),
+                allowed_workload_names: std::collections::HashSet::new(),
+            });
+            let _mtls_manager = mtls::mtls::EzMtlsManager::create(
+                key_path.clone(),
+                csr_path.clone(),
+                proxy_address.clone(),
+                &ez_manifest,
+                policy,
+            )
+            .await
+            .context("Failed to create and bootstrap EzMtlsManager. mTLS connection must be successful.")?;
+            log::info!("Successfully bootstrapped EzMtlsManager.");
+        }
 
         // Start the inbound EZ-to-EZ gRPC server in the background.
         let inbound_ez_to_ez_handler =
@@ -232,7 +318,13 @@ fn main() -> anyhow::Result<()> {
 
         let ez_to_ez_outbound_handler: Option<Box<dyn OutboundEzToEzClient>> =
             if let Some(ez_to_ez_outbound_address) = enforcer_inputs.ez_to_ez_outbound_address {
-                Some(Box::new(OutboundEzToEzHandler::new(ez_to_ez_outbound_address).await?))
+                Some(Box::new(
+                    OutboundEzToEzHandler::new(
+                        ez_to_ez_outbound_address,
+                        metrics::outbound::OutboundMetrics::default(),
+                    )
+                    .await?,
+                ))
             } else {
                 None
             };
@@ -241,6 +333,7 @@ fn main() -> anyhow::Result<()> {
             isolate_junction: Box::new(isolate_junction.clone()),
             isolate_state_manager: isolate_state_manager.clone(),
             shared_memory_manager: shared_memory_manager.clone(),
+            fileshare_manager: fileshare_manager.clone(),
             external_proxy_connector,
             isolate_service_mapper: isolate_service_mapper.clone(),
             manifest_validator: manifest_validator.clone(),
@@ -260,6 +353,7 @@ fn main() -> anyhow::Result<()> {
             isolate_ez_service_mngr,
             manifest_validator,
             shared_mem_manager: shared_memory_manager,
+            fileshare_manager,
             manifest_path: enforcer_inputs.manifest_path,
             common_bind_mounts: enforcer_inputs.common_bind_mount.clone(),
             max_decoding_message_size,
@@ -295,6 +389,7 @@ fn main() -> anyhow::Result<()> {
 
 async fn launch_ez_public_api_server(
     ez_public_api: EzPublicApiService,
+    diagnostics_service: EnforcerDiagnosticService,
     socket_addr_str: &str,
     max_decoding_message_size: usize,
 ) {
@@ -308,11 +403,19 @@ async fn launch_ez_public_api_server(
     });
 
     let server_builder = Server::builder()
-        .trace_fn(|req| tracing::info_span!("EzPublicApi", method = %req.uri().path()))
+        .trace_fn(|req| {
+            let parent_context = global::get_text_map_propagator(|propagator| {
+                propagator.extract(&HeaderExtractor(req.headers()))
+            });
+            let span = tracing::info_span!("Enforcer.EzPublicApi", method = %req.uri().path());
+            let _ = span.set_parent(parent_context);
+            span
+        })
         .add_service(
             EzPublicApiServer::new(ez_public_api)
                 .max_decoding_message_size(max_decoding_message_size),
-        );
+        )
+        .add_service(DiagnosticServiceServer::new(diagnostics_service));
 
     let result = match endpoint {
         Endpoint::Tcp(addr) => {

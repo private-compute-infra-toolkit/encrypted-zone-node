@@ -1,4 +1,4 @@
-// Copyright 2025 Google LLC
+// Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@ use container_manager_requester::ContainerManagerRequester;
 use data_scope::error::DataScopeError;
 use data_scope::manifest_validator::ManifestValidator;
 use data_scope::request::AddManifestScopeRequest;
-use data_scope::{request::AddIsolateRequest, requester::DataScopeRequester};
+use data_scope::requester::DataScopeRequester;
 use data_scope_proto::enforcer::v1::DataScopeType;
 use enforcer_proto::enforcer::v1::ez_isolate_bridge_server::{
     EzIsolateBridge, EzIsolateBridgeServer,
@@ -25,30 +25,31 @@ use enforcer_proto::enforcer::v1::{
     ControlPlaneMetadata, EzPayloadIsolateScope, InvokeIsolateRequest, InvokeIsolateResponse,
     IsolateDataScope, IsolateState,
 };
+use fileshare_manager::FileshareManager;
 use isolate_info::{IsolateId, IsolateServiceInfo};
 use isolate_service_mapper::IsolateServiceMapper;
 use isolate_test_utils::{
-    create_echo_invoke_isolate_response, create_error_invoke_isolate_response,
-    start_fake_isolate_server, ScopeDragInstruction, DEFAULT_ISOLATE_UNIX_SOCKET,
+    create_echo_invoke_isolate_response, ScopeDragInstruction, DEFAULT_ISOLATE_UNIX_SOCKET,
     ECHO_ISOLATE_METHOD_NAME, ECHO_ISOLATE_OPERATOR_DOMAIN, ECHO_ISOLATE_SERVICE_NAME,
-    ERROR_ISOLATE_SERVICE_NAME,
+    ERROR_ISOLATE_SERVICE_NAME, TEST_ERROR_CODE, TEST_ERROR_MESSAGE,
 };
 use junction::IsolateJunction;
-use junction_test_utils::JUNCTION_TEST_CHANNEL_SIZE;
+use junction_test_utils::{
+    create_add_isolate_request, TestHarness, CLONE_ECHO_ISOLATE_SERVICE_NAME,
+    JUNCTION_TEST_CHANNEL_SIZE,
+};
 use junction_trait::Junction;
 use payload_proto::enforcer::v1::EzPayloadData;
 use shared_memory_manager::SharedMemManager;
 use state_manager::IsolateStateManager;
 use std::collections::{HashMap, HashSet};
 use tokio::net::UnixListener;
-use tokio::sync::mpsc::Receiver;
+
 use tokio::sync::oneshot;
 use tokio::time::{timeout, Duration};
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status, Streaming};
-
-const CLONE_ECHO_ISOLATE_SERVICE_NAME: &str = "clone_echo_isolate_service";
 
 #[derive(Clone)]
 struct MetadataCheckingIsolate {
@@ -116,123 +117,6 @@ async fn start_metadata_checking_isolate_server(
     shutdown_tx
 }
 
-struct TestHarness {
-    isolate_junction: IsolateJunction,
-    isolate_service_info_map: HashMap<String, IsolateServiceInfo>,
-    isolate_server_shutdown_tx: oneshot::Sender<()>,
-    container_manager_request_rx: Option<Receiver<ContainerManagerRequest>>,
-}
-
-impl TestHarness {
-    // Create a real IsolateJunction connected to a single fake Isolate (DefaultEchoIsolate)
-    async fn new_with_arguments(
-        retirement_threshold: u64,
-        scope_drag_instruction: ScopeDragInstruction,
-        is_ratified: bool,
-        manifest_input_scope: DataScopeType,
-        delay: Option<Duration>,
-    ) -> Self {
-        // Using real implementations of all IsolateJunction deps (except Isolate)
-        let isolate_service_mapper = IsolateServiceMapper::default();
-        let (container_manager_request_tx, container_manager_request_rx) =
-            tokio::sync::mpsc::channel(JUNCTION_TEST_CHANNEL_SIZE);
-        let container_manager_requester =
-            ContainerManagerRequester::new(container_manager_request_tx);
-        let shared_memory_manager = SharedMemManager::new(container_manager_requester.clone());
-        let data_scope_requester = DataScopeRequester::new(retirement_threshold);
-        let manifest_validator = ManifestValidator::default();
-        let isolate_state_manager = IsolateStateManager::new(
-            data_scope_requester.clone(),
-            container_manager_requester.clone(),
-        );
-        let isolate_junction = IsolateJunction::new(
-            data_scope_requester.clone(),
-            isolate_service_mapper.clone(),
-            shared_memory_manager.clone(),
-            isolate_state_manager.clone(),
-            manifest_validator.clone(),
-        );
-
-        // Start fake Isolate server
-        let isolate_service_info = IsolateServiceInfo {
-            operator_domain: ECHO_ISOLATE_OPERATOR_DOMAIN.to_string(),
-            service_name: ECHO_ISOLATE_SERVICE_NAME.to_string(),
-        };
-        let clone_isolate_service_info = IsolateServiceInfo {
-            operator_domain: ECHO_ISOLATE_OPERATOR_DOMAIN.to_string(),
-            service_name: CLONE_ECHO_ISOLATE_SERVICE_NAME.to_string(),
-        };
-        let error_isolate_service_info = IsolateServiceInfo {
-            operator_domain: ECHO_ISOLATE_OPERATOR_DOMAIN.to_string(),
-            service_name: ERROR_ISOLATE_SERVICE_NAME.to_string(),
-        };
-
-        // Add fake Isolate to IsolateServiceMapper and save the mapped IsolateServiceIndex
-        // This is usually done by ContainerManager when we parse ez manifest
-        let isolate_services_vec = vec![
-            isolate_service_info.clone(),
-            clone_isolate_service_info.clone(),
-            error_isolate_service_info.clone(),
-        ];
-        let binary_services_index = isolate_service_mapper
-            .new_binary_index(isolate_services_vec, is_ratified)
-            .await
-            .expect("Should be a valid binary services index");
-
-        manifest_validator
-            .add_scope_info(AddManifestScopeRequest {
-                binary_services_index,
-                max_input_scope: manifest_input_scope,
-                max_output_scope: DataScopeType::UserPrivate,
-            })
-            .await
-            .expect("Should succeed to add input output scopes in manifest validator");
-
-        let isolate_id = IsolateId::new(binary_services_index);
-        let isolate_server_shutdown_tx =
-            start_fake_isolate_server(isolate_id, scope_drag_instruction, delay).await;
-
-        // Add fake Isolate to DataScopeRequester
-        // This is usually done by ContainerManager calling IsolateStateManager
-        let add_isolate_request = create_add_isolate_request(isolate_id);
-        isolate_state_manager.add_isolate(add_isolate_request).await;
-        // The Isolate must be ready before it can be used.
-        isolate_state_manager.update_state(isolate_id, IsolateState::Ready).await.unwrap();
-
-        // Connect fake Isolate to IsolateJunction
-        assert!(isolate_junction
-            .connect_isolate(isolate_id, format!("{}{}", DEFAULT_ISOLATE_UNIX_SOCKET, isolate_id),)
-            .await
-            .is_ok());
-
-        let mut isolate_service_info_map = HashMap::new();
-        isolate_service_info_map
-            .insert(ECHO_ISOLATE_SERVICE_NAME.to_string(), isolate_service_info);
-        isolate_service_info_map
-            .insert(CLONE_ECHO_ISOLATE_SERVICE_NAME.to_string(), clone_isolate_service_info);
-        isolate_service_info_map
-            .insert(ERROR_ISOLATE_SERVICE_NAME.to_string(), error_isolate_service_info);
-
-        Self {
-            isolate_junction,
-            isolate_service_info_map,
-            isolate_server_shutdown_tx,
-            container_manager_request_rx: Some(container_manager_request_rx),
-        }
-    }
-
-    async fn new() -> Self {
-        TestHarness::new_with_arguments(
-            u64::MAX,
-            ScopeDragInstruction::KeepUnspecified,
-            false,
-            DataScopeType::UserPrivate,
-            None,
-        )
-        .await
-    }
-}
-
 #[tokio::test]
 async fn test_metadata_propagation_to_isolate() {
     let isolate_service_mapper = IsolateServiceMapper::default();
@@ -240,6 +124,7 @@ async fn test_metadata_propagation_to_isolate() {
         tokio::sync::mpsc::channel(JUNCTION_TEST_CHANNEL_SIZE);
     let container_manager_requester = ContainerManagerRequester::new(container_manager_request_tx);
     let shared_memory_manager = SharedMemManager::new(container_manager_requester.clone());
+    let fileshare_manager = FileshareManager::new(container_manager_requester.clone());
     let data_scope_requester = DataScopeRequester::new(u64::MAX);
     let manifest_validator = ManifestValidator::default();
     let isolate_state_manager =
@@ -248,6 +133,7 @@ async fn test_metadata_propagation_to_isolate() {
         data_scope_requester.clone(),
         isolate_service_mapper.clone(),
         shared_memory_manager.clone(),
+        fileshare_manager.clone(),
         isolate_state_manager.clone(),
         manifest_validator.clone(),
     );
@@ -342,19 +228,20 @@ async fn test_junction_application_error_unary_flow() {
     let invoke_isolate_request = create_random_request(
         test_harness.isolate_service_info_map.get(ERROR_ISOLATE_SERVICE_NAME).unwrap(),
     );
-    let invoke_isolate_response = test_harness
+    let status = test_harness
         .isolate_junction
         .invoke_isolate(None, invoke_isolate_request.clone(), false, None)
         .await
-        .unwrap();
+        .expect_err("Request should fail")
+        .to_tonic_status();
 
-    let expected_invoke_isolate_response =
-        create_error_invoke_isolate_response(invoke_isolate_request);
+    let expected_status = Status::new(TEST_ERROR_CODE.into(), TEST_ERROR_MESSAGE);
 
     // Shutdown fake Isolate server
     let _ = test_harness.isolate_server_shutdown_tx.send(());
 
-    assert_eq!(invoke_isolate_response, expected_invoke_isolate_response)
+    assert_eq!(status.code(), expected_status.code());
+    assert_eq!(status.message(), expected_status.message());
 }
 
 #[tokio::test]
@@ -641,7 +528,7 @@ async fn test_junction_streaming_flow() {
 }
 
 #[tokio::test]
-async fn test_junction_application_error_streaming_flow() {
+async fn test_junction_streaming_application_error_first_request() {
     // Create IsolateJunction w/ fake echo Isolate
     let test_harness = TestHarness::new().await;
 
@@ -653,17 +540,71 @@ async fn test_junction_application_error_streaming_flow() {
     let invoke_isolate_request = create_random_request(
         test_harness.isolate_service_info_map.get(ERROR_ISOLATE_SERVICE_NAME).unwrap(),
     );
-    let expected_invoke_isolate_response =
-        create_error_invoke_isolate_response(invoke_isolate_request.clone());
 
     // Send InvokeIsolateRequest to IsolateJunction
     assert!(client_junction_channels.client_to_junction.send(invoke_isolate_request).await.is_ok());
 
     // Receive first expected InvokeIsolateResponse
-    let invoke_isolate_response_result =
-        client_junction_channels.junction_to_client.recv().await.unwrap();
+    let expected_status = Status::new(TEST_ERROR_CODE.into(), TEST_ERROR_MESSAGE);
+    let status = client_junction_channels
+        .junction_to_client
+        .recv()
+        .await
+        .unwrap()
+        .expect_err("First request should fail")
+        .to_tonic_status();
+    assert_eq!(status.code(), expected_status.code());
+    assert_eq!(status.message(), expected_status.message());
 
-    assert_eq!(invoke_isolate_response_result.unwrap(), expected_invoke_isolate_response);
+    // Shutdown fake Isolate server
+    let _ = test_harness.isolate_server_shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn test_junction_streaming_application_error_subsequent_request() {
+    // Create IsolateJunction w/ fake echo Isolate
+    let test_harness = TestHarness::new().await;
+
+    // Create streaming junction client channels
+    let mut client_junction_channels =
+        test_harness.isolate_junction.stream_invoke_isolate(None, false).await;
+
+    // Create InvokeIsolateRequest and expected response
+    let invoke_isolate_request = create_random_request(
+        test_harness.isolate_service_info_map.get(ECHO_ISOLATE_SERVICE_NAME).unwrap(),
+    );
+    let expected_invoke_isolate_response =
+        create_echo_invoke_isolate_response(invoke_isolate_request.clone());
+    // Create second error InvokeIsolateRequest
+    let error_invoke_isolate_request = create_random_request(
+        test_harness.isolate_service_info_map.get(ERROR_ISOLATE_SERVICE_NAME).unwrap(),
+    );
+
+    // Send first InvokeIsolateRequest to IsolateJunction
+    assert!(client_junction_channels.client_to_junction.send(invoke_isolate_request).await.is_ok());
+
+    // First request should succeed
+    let response = client_junction_channels.junction_to_client.recv().await.unwrap();
+    assert_eq!(response.unwrap(), expected_invoke_isolate_response);
+
+    // Send second InvokeIsolateRequest to IsolateJunction
+    assert!(client_junction_channels
+        .client_to_junction
+        .send(error_invoke_isolate_request)
+        .await
+        .is_ok());
+
+    // Second request should fail
+    let expected_status = Status::new(TEST_ERROR_CODE.into(), TEST_ERROR_MESSAGE);
+    let status = client_junction_channels
+        .junction_to_client
+        .recv()
+        .await
+        .unwrap()
+        .expect_err("Second request should fail")
+        .to_tonic_status();
+    assert_eq!(status.code(), expected_status.code());
+    assert_eq!(status.message(), expected_status.message());
 
     // Shutdown fake Isolate server
     let _ = test_harness.isolate_server_shutdown_tx.send(());
@@ -1153,6 +1094,7 @@ fn create_random_request(isolate_service_info: &IsolateServiceInfo) -> InvokeIso
             destination_service_name: isolate_service_info.service_name.clone(),
             destination_method_name: ECHO_ISOLATE_METHOD_NAME.to_string(),
             shared_memory_handles: Vec::new(),
+            fileshare_handles: Vec::new(),
             destination_ez_instance_id: "".to_string(),
             ..Default::default()
         }),
@@ -1239,14 +1181,6 @@ async fn test_junction_unary_timeout_internal_route() {
         err,
         ez_error::EzError::Status(status) if status.code() == tonic::Code::Cancelled
     ));
-}
-
-fn create_add_isolate_request(isolate_id: IsolateId) -> AddIsolateRequest {
-    AddIsolateRequest {
-        current_data_scope_type: DataScopeType::Public,
-        allowed_data_scope_type: DataScopeType::UserPrivate,
-        isolate_id,
-    }
 }
 
 // TODO: Add metric tests

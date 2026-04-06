@@ -14,7 +14,7 @@
 
 use anyhow::{Context, Ok, Result};
 use isolate_info::{BinaryServicesIndex, IsolateServiceIndex, IsolateServiceInfo};
-use manifest_proto::enforcer::ez_backend_dependency::RouteType;
+use manifest_proto::enforcer::v1::ez_backend_dependency::RouteType;
 use std::collections::{hash_map::Entry, HashMap};
 use std::sync::Arc;
 use tokio::sync::RwLock;

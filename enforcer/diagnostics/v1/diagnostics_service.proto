@@ -1,0 +1,86 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package enforcer.diagnostics.v1;
+
+import "enforcer/diagnostics/v1/tokio_diagnostics.proto";
+
+// Request to retrieve diagnostic information from the enforcer.
+message GetDiagnosticRequest {
+  // The specific profile specification to collect.
+  oneof profile_spec {
+    // Request a CPU profile.
+    CpuProfileSpec cpu = 1;
+    // Request a heap profile snapshot.
+    HeapProfileSpec heap = 2;
+    // Request a Tokio async runtime profile.
+    TokioProfileSpec tokio = 3;
+  }
+}
+
+// Specification for a CPU profile.
+message CpuProfileSpec {
+  // Duration for the CPU profile collection in seconds. Must be at least 1.
+  // TODO: b/491741154 - Find a better way of expressing Duration.
+  int64 duration_seconds = 1;
+}
+
+// Specification for a heap profile.
+message HeapProfileSpec {
+  // No parameters are needed for a heap profile snapshot.
+}
+
+// Response containing the requested diagnostic information.
+message GetDiagnosticResponse {
+  // The result of the diagnostic profile request.
+  oneof result {
+    // Result of a CPU profile request.
+    CpuProfileResult cpu = 1;
+    // Result of a heap profile snapshot.
+    HeapProfileResult heap = 2;
+    // Result of a Tokio async runtime profile request.
+    TokioProfileResult tokio = 3;
+    // Error result if the request failed.
+    ErrorResponse error = 4;
+  }
+}
+
+// Result containing an error.
+message ErrorResponse {
+  // Human-readable error message.
+  string message = 1;
+}
+
+// Result containing a CPU profile.
+message CpuProfileResult {
+  // CPU profile data in gzipped pprof format.
+  bytes pprof_data = 1;
+  // The actual duration the profile was collected for.
+  int64 captured_duration_seconds = 2;
+}
+
+// Result containing a heap profile snapshot.
+message HeapProfileResult {
+  // Heap profile data in gzipped pprof format.
+  bytes pprof_data = 1;
+}
+
+// Service to retrieve diagnostic information from the enforcer.
+service DiagnosticService {
+  // Returns diagnostic information (e.g., CPU, heap, or Tokio profiles) from the
+  // enforcer.
+  rpc GetDiagnostic(GetDiagnosticRequest) returns (GetDiagnosticResponse);
+}

@@ -16,10 +16,6 @@ syntax = "proto3";
 
 package enforcer.v1;
 
-// Specifies import path for the generated Go code used to auto-generate SDK
-// code from proto annotations.
-option go_package = "github.com/private-compute-infra-toolkit/ez/sdk/v1";
-
 // Service that proxies gRPC calls to targets outside of the originating
 // encrypted zone. For now, this only includes non-EZ backends. Do not use this
 // for intra or inter EZ communications. This call is considered untrusted by
@@ -41,21 +37,26 @@ message EzExternalProxyRequest {
   // The serialized request message proto payload for the backend service.
   // The proxy service may treat this as opaque bytes.
   bytes external_request_payload = 2 [ctype = CORD];
+
+  // Opaque metadata entries forwarded alongside the payload.
+  map<string, bytes> request_metadata = 3;
 }
 
 message EzExternalProxyResponse {
   // The serialized response message payload from the backend service.
   // The proxy service may treat this as opaque bytes.
   bytes external_response_payload = 1 [ctype = CORD];
+  // Opaque metadata entries forwarded alongside the payload.
+  // Enables transport of context-specific properties between client and server.
+  map<string, bytes> response_metadata = 2;
 }
 
 message EzExternalResource {
   // The external_target is the 'id' of the target to call. The target is what
   // runs the service defined in service_name. The target will be specified by
   // the Isolate that is attempting to call an external service. The target must
-  // be known to the External Proxy. An example external_target is
-  // external/foo-service, which relies on the External Proxy knowing that
-  // 'external/foo-service' maps to a client for 'dns:///foo-service'.
+  // be known to the External Proxy. The External Proxy uses this target to look
+  // up the actual endpoint (e.g., 'dns:///foo-service').
   string target = 1; // Required.
   // An RPC service name including package name. format: package_name.service_name
   string service_name = 2; // Required.

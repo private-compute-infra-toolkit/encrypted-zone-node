@@ -19,9 +19,10 @@ use enforcer_proto::enforcer::v1::ez_isolate_bridge_server::{
     EzIsolateBridge, EzIsolateBridgeServer,
 };
 use enforcer_proto::enforcer::v1::{
-    InvokeIsolateRequest, InvokeIsolateResponse, IsolateStatus, UpdateIsolateStateRequest,
+    InvokeIsolateRequest, InvokeIsolateResponse, UpdateIsolateStateRequest,
     UpdateIsolateStateResponse,
 };
+use ez_error::EzError;
 use isolate_info::IsolateId;
 use simple_tonic_stream::SimpleStreamingWrapper;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -40,6 +41,7 @@ type InvokeIsolateResult = Result<Response<InvokeIsolateResponse>, Status>;
 const ISOLATE_TEST_CHANNEL_SIZE: usize = 128;
 pub const TEST_ERROR_CODE: i32 = 99;
 pub const TEST_ERROR_MESSAGE: &str = "TEST_ERROR";
+pub const TEST_ERROR_SERVICE_NAME: &str = "ErrorService";
 pub const DEFAULT_ISOLATE_UNIX_SOCKET: &str = "/tmp/default-isolate.sock";
 pub const ECHO_ISOLATE_OPERATOR_DOMAIN: &str = "echo_isolate_service_test_domain";
 pub const ECHO_ISOLATE_SERVICE_NAME: &str = "echo_isolate_service";
@@ -141,6 +143,21 @@ impl FakeIsolate for DefaultEchoIsolate {
     ) {
         let delay = self.delay;
         while let Some(invoke_isolate_request) = client_to_junction_rx.recv().await {
+            if invoke_isolate_request
+                .control_plane_metadata
+                .as_ref()
+                .unwrap()
+                .destination_service_name
+                == TEST_ERROR_SERVICE_NAME
+            {
+                let _ = junction_to_client_tx
+                    .send(Err(EzError::Status(Status::new(
+                        TEST_ERROR_CODE.into(),
+                        TEST_ERROR_MESSAGE,
+                    ))))
+                    .await;
+                return;
+            }
             invoke_isolate_requests.lock().unwrap().push(invoke_isolate_request.clone());
             let mut invoke_isolate_response =
                 create_echo_invoke_isolate_response(invoke_isolate_request.clone());
@@ -183,9 +200,9 @@ impl EzIsolateBridge for DefaultEchoIsolate {
             {
                 if let Some(ref metadata) = invoke_isolate_request.control_plane_metadata {
                     if metadata.destination_service_name == *ERROR_ISOLATE_SERVICE_NAME {
-                        let invoke_isolate_response =
-                            create_error_invoke_isolate_response(invoke_isolate_request.clone());
-                        let _ = invoke_isolate_response_tx.send(Ok(invoke_isolate_response)).await;
+                        let _ = invoke_isolate_response_tx
+                            .send(Err(Status::new(TEST_ERROR_CODE.into(), TEST_ERROR_MESSAGE)))
+                            .await;
                         continue;
                     }
                 }
@@ -205,8 +222,7 @@ impl EzIsolateBridge for DefaultEchoIsolate {
         let request = request.into_inner();
         if let Some(ref metadata) = request.control_plane_metadata {
             if metadata.destination_service_name == *ERROR_ISOLATE_SERVICE_NAME {
-                let invoke_isolate_response = create_error_invoke_isolate_response(request.clone());
-                return Ok(Response::new(invoke_isolate_response));
+                return Err(Status::new(TEST_ERROR_CODE.into(), TEST_ERROR_MESSAGE));
             }
         }
         let mut invoke_isolate_response = create_echo_invoke_isolate_response(request);
@@ -259,23 +275,7 @@ pub fn create_echo_invoke_isolate_response(
 ) -> InvokeIsolateResponse {
     InvokeIsolateResponse {
         control_plane_metadata: invoke_isolate_request.control_plane_metadata,
-        status: Some(IsolateStatus::default()),
         isolate_output_iscope: invoke_isolate_request.isolate_input_iscope,
         isolate_output: invoke_isolate_request.isolate_input,
-    }
-}
-
-// Mimics error response from SDK (application error wrapped in IsolateStatus)
-pub fn create_error_invoke_isolate_response(
-    invoke_isolate_request: InvokeIsolateRequest,
-) -> InvokeIsolateResponse {
-    InvokeIsolateResponse {
-        control_plane_metadata: invoke_isolate_request.control_plane_metadata,
-        status: Some(IsolateStatus {
-            code: TEST_ERROR_CODE,
-            message: TEST_ERROR_MESSAGE.to_string(),
-        }),
-        isolate_output_iscope: None,
-        isolate_output: None,
     }
 }

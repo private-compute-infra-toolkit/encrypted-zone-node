@@ -14,6 +14,7 @@
 
 use tonic::{Status, Streaming};
 
+#[derive(Debug)]
 /// Simplifies Tonic Streaming by converting the Result<Option<T>, Status>
 /// messages to Option<T>. Individual Status Errors are converted to Option::None.
 pub struct SimpleStreamingWrapper<T> {

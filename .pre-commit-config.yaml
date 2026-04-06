@@ -38,6 +38,7 @@ repos:
       - id: check-vcs-permalinks
       - id: check-executables-have-shebangs
       - id: detect-private-key
+        exclude: enforcer/ez_to_ez/test/.*.key
 
   - repo: https://github.com/jumanjihouse/pre-commit-hooks
     rev: 3.0.0

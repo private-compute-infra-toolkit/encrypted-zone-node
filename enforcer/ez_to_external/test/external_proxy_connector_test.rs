@@ -1,4 +1,4 @@
-// Copyright 2025 Google LLC
+// Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,16 +14,20 @@
 
 use data_scope_proto::enforcer::v1::DataScopeType;
 use enforcer_proto::enforcer::v1::{
-    ez_external_proxy_service_server::{EzExternalProxyService, EzExternalProxyServiceServer},
-    ControlPlaneMetadata, EzExternalProxyRequest, EzExternalProxyResponse, EzPayloadIsolateScope,
-    InvokeEzRequest, IsolateDataScope,
+    ControlPlaneMetadata, EzPayloadIsolateScope, InvokeEzRequest, IsolateDataScope,
 };
 use external_proxy_connector::{
     translate_to_proxy_request, ExternalProxyChannel, ExternalProxyConnector,
     ExternalProxyConnectorError,
 };
+use external_proxy_proto::enforcer::v1::{
+    ez_external_proxy_service_server::{EzExternalProxyService, EzExternalProxyServiceServer},
+    EzExternalProxyRequest, EzExternalProxyResponse,
+};
+use grpc_connector::GrpcChannelPool;
 use isolate_info::{BinaryServicesIndex, IsolateId};
 use payload_proto::enforcer::v1::EzPayloadData;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -44,9 +48,9 @@ fn get_mutex() -> &'static Mutex<()> {
 }
 
 #[derive(Clone, Default)]
-struct MockProxyService {
-    call_count: Arc<AtomicUsize>,
-    request_capture_tx: Option<Sender<EzExternalProxyRequest>>,
+pub struct MockProxyService {
+    pub call_count: Arc<AtomicUsize>,
+    pub request_capture_tx: Option<Sender<EzExternalProxyRequest>>,
 }
 
 #[tonic::async_trait]
@@ -65,8 +69,10 @@ impl EzExternalProxyService for MockProxyService {
         }
 
         // Create and return a single echo response.
-        let response =
-            EzExternalProxyResponse { external_response_payload: req.external_request_payload };
+        let response = EzExternalProxyResponse {
+            external_response_payload: req.external_request_payload,
+            response_metadata: HashMap::new(),
+        };
         Ok(tonic::Response::new(response))
     }
 
@@ -88,6 +94,7 @@ impl EzExternalProxyService for MockProxyService {
                 }
                 let response = EzExternalProxyResponse {
                     external_response_payload: req.external_request_payload,
+                    response_metadata: HashMap::new(),
                 };
                 if tx.send(Ok(response)).await.is_err() {
                     break;
@@ -123,7 +130,7 @@ impl EzExternalProxyService for FaultyProxyService {
 
 /// Sets up a mock gRPC server on a Unix Domain Socket
 /// Returns the address string and the TempDir handle
-async fn setup_uds_server(
+pub async fn setup_uds_server(
     mock_service: impl EzExternalProxyService,
 ) -> (String, oneshot::Sender<()>, tempfile::TempDir) {
     let (tx, rx) = oneshot::channel();
@@ -172,7 +179,7 @@ async fn setup_tcp_server(
 }
 
 /// Test connector with DataScopeManager
-async fn build_test_connector(
+pub async fn build_test_connector(
     server_address: String,
 ) -> Result<ExternalProxyConnector, ExternalProxyConnectorError> {
     std::env::set_var("PROXY_CONNECT_RETRY_COUNT", "2");
@@ -196,10 +203,10 @@ fn create_scope_test_request(scope: DataScopeType) -> InvokeEzRequest {
 }
 
 /// Creates a generic test request for testing connectivity. When DataScope is not important.
-fn create_generic_test_request(datagrams: Vec<Vec<u8>>) -> InvokeEzRequest {
+pub fn create_generic_test_request(datagrams: Vec<Vec<u8>>) -> InvokeEzRequest {
     InvokeEzRequest {
         control_plane_metadata: Some(ControlPlaneMetadata {
-            destination_operator_domain: "external/test-target".to_string(),
+            destination_operator_domain: "test-target".to_string(),
             destination_service_name: "test.Service".to_string(),
             destination_method_name: "TestMethod".to_string(),
             ..Default::default()
@@ -222,6 +229,7 @@ fn expected_response_metadata(original_metadata: &ControlPlaneMetadata) -> Contr
         destination_method_name: String::new(),
         destination_ez_instance_id: String::new(),
         shared_memory_handles: Vec::new(),
+        fileshare_handles: Vec::new(),
         ..Default::default()
     }
 }
@@ -232,7 +240,7 @@ async fn test_connect_retries_and_succeeds() {
     let uds_path = temp_dir.path().join("test-retry-proxy.sock");
     let connector_path = format!("unix:{}", uds_path.to_str().unwrap());
 
-    let connect_future = grpc_connector::connect(connector_path, 30, 1000);
+    let connect_future = GrpcChannelPool::new(connector_path, 30, 1, 1000, 2);
 
     tokio::time::sleep(Duration::from_millis(1500)).await;
     let (tx, rx) = oneshot::channel();
@@ -302,16 +310,14 @@ async fn test_proxy_external_end_to_end_unary_using_uds() {
     assert!(response_result.is_ok());
     let response = response_result.unwrap();
 
-    assert!(response.status.is_some());
     assert_eq!(
         response
             .ez_response_iscope
             .expect("Scopes should be mentioned for payload")
             .datagram_iscopes[0]
             .scope_type,
-        DataScopeType::Public.into()
+        i32::from(DataScopeType::Public)
     );
-    assert_eq!(response.status.unwrap().code, 0);
     let _ = shutdown_tx.send(());
 }
 
@@ -331,16 +337,14 @@ async fn test_proxy_external_end_to_end_unary() {
     assert!(response_result.is_ok());
     let response = response_result.unwrap();
 
-    assert!(response.status.is_some());
     assert_eq!(
         response
             .ez_response_iscope
             .expect("Scopes should be mentioned for payload")
             .datagram_iscopes[0]
             .scope_type,
-        DataScopeType::Public.into()
+        i32::from(DataScopeType::Public)
     );
-    assert_eq!(response.status.unwrap().code, 0);
     let _ = shutdown_tx.send(());
 }
 
@@ -367,7 +371,11 @@ async fn test_stream_proxy_external_end_to_end_streaming() {
     tx.send(request2.clone()).await.unwrap();
 
     // Receive and verify the first echo response.
-    let response1 = response_receiver.recv().await.expect("Should receive the first response");
+    let response1 = response_receiver
+        .recv()
+        .await
+        .expect("Should receive the first response")
+        .expect("Should receive a valid response");
     assert_eq!(response1.ez_response_payload, request1.isolate_request_payload);
     assert_eq!(
         response1
@@ -375,12 +383,15 @@ async fn test_stream_proxy_external_end_to_end_streaming() {
             .expect("Scopes should be mentioned for payload")
             .datagram_iscopes[0]
             .scope_type,
-        DataScopeType::Public.into()
+        i32::from(DataScopeType::Public)
     );
-    assert_eq!(response1.status.unwrap().code, 0);
 
     // Receive and verify the second echo response.
-    let response2 = response_receiver.recv().await.expect("Should receive the second response");
+    let response2 = response_receiver
+        .recv()
+        .await
+        .expect("Should receive the second response")
+        .expect("Should receive a valid response");
     assert_eq!(response2.ez_response_payload, request2.isolate_request_payload);
     assert_eq!(
         response2
@@ -388,9 +399,8 @@ async fn test_stream_proxy_external_end_to_end_streaming() {
             .expect("Scopes should be mentioned for payload")
             .datagram_iscopes[0]
             .scope_type,
-        DataScopeType::Public.into()
+        i32::from(DataScopeType::Public)
     );
-    assert_eq!(response2.status.unwrap().code, 0);
     let _ = shutdown_tx.send(());
 }
 
@@ -406,17 +416,22 @@ async fn stream_passes_for_ratified_isolate_with_userprivate_scope() {
     let connector = build_test_connector(server_address).await.unwrap();
 
     let (req_tx, req_rx) = mpsc::channel(1);
-    let mut response_receiver = connector.stream_proxy_external(isolate_id, req_rx).await.unwrap();
-
+    // Intentionally sending request before awaiting stream connection to prevent gRPC deadlock.
     req_tx.send(create_scope_test_request(DataScopeType::UserPrivate)).await.unwrap();
-    drop(req_tx); // Still a good practice to drop the sender
+    drop(req_tx); // Signals end of stream, necessary since connector now continues on error.
+
+    let mut response_receiver = connector.stream_proxy_external(isolate_id, req_rx).await.unwrap();
 
     // Wait for the response to ensure the call completed
     let err_response = response_receiver.recv().await.expect("Should receive an error response");
-    let status = err_response.status.expect("Response should have a status");
+    let status = err_response.expect_err("Response should have a status");
 
-    assert_eq!(status.code, 3, "Status code should be InvalidArgument");
-    assert!(status.message.contains("Permission Denied:"));
+    assert_eq!(
+        status.code(),
+        tonic::Code::PermissionDenied,
+        "Status code should be PermissionDenied"
+    );
+    assert!(status.message().contains("Permission Denied:"));
 
     assert_eq!(proxy_calls.load(Ordering::SeqCst), 0, "Proxy should not have been called");
     let _ = shutdown_tx.send(());
@@ -436,17 +451,23 @@ async fn stream_fails_for_ratified_isolate_with_translation_error() {
 
     let (req_tx, req_rx) = mpsc::channel(1);
 
+    // Intentionally sending request before awaiting stream connection to prevent gRPC deadlock.
     // Create a request that will fail translation because it has two datagrams
     let malformed_request = create_generic_test_request(vec![vec![1, 2], vec![3, 4]]);
     req_tx.send(malformed_request).await.unwrap();
+    drop(req_tx); // Signals end of stream, necessary since connector now continues on error.
     let mut response_receiver = connector.stream_proxy_external(isolate_id, req_rx).await.unwrap();
     let err_response = response_receiver.recv().await.expect("Should receive an error response");
-    let status = err_response.status.expect("Response should have a status");
+    let status = err_response.expect_err("Response should have a status");
 
     // Check for the gRPC InvalidArgument code (3) and the specific error message.
-    assert_eq!(status.code, 3, "Status code should be InvalidArgument");
+    assert_eq!(
+        status.code(),
+        tonic::Code::InvalidArgument,
+        "Status code should be InvalidArgument"
+    );
     assert!(
-        status.message.contains("External calls must contain exactly one datagram."),
+        status.message().contains("External calls must contain exactly one datagram."),
         "Error message did not match expected"
     );
 
@@ -468,15 +489,17 @@ async fn stream_fails_for_opaque_isolate_with_userprivate_scope() {
     let connector = build_test_connector(server_address).await.unwrap();
 
     let (req_tx, req_rx) = mpsc::channel(1);
+    // Intentionally sending request before awaiting stream connection to prevent gRPC deadlock.
     req_tx.send(create_scope_test_request(DataScopeType::UserPrivate)).await.unwrap();
+    drop(req_tx); // Signals end of stream, necessary since connector now continues on error.
     let mut response_stream = connector.stream_proxy_external(isolate_id, req_rx).await.unwrap();
 
     // The call should be rejected with an error response.
     let response = response_stream.recv().await.unwrap();
-    let status = response.status.expect("Response should have a status");
+    let status = response.expect_err("Response should have a status");
 
-    assert_eq!(status.code, 3);
-    assert!(status.message.contains("Permission Denied"));
+    assert_eq!(status.code(), tonic::Code::PermissionDenied);
+    assert!(status.message().contains("Permission Denied"));
 
     // The proxy should NOT be called.
     assert_eq!(proxy_calls.load(Ordering::SeqCst), 0);
@@ -486,23 +509,29 @@ async fn stream_fails_for_opaque_isolate_with_userprivate_scope() {
 /// Tests Opaque Isolate with DomainOwned DataScope and should succeed due to less sensitive data.
 #[tokio::test]
 async fn stream_passes_for_opaque_isolate_with_domainowned_scope() {
+    let _lock = get_mutex().lock().await;
+
     let isolate_id = IsolateId::new(BinaryServicesIndex::new(false));
-    let mock_proxy =
-        MockProxyService { call_count: Arc::new(AtomicUsize::new(0)), request_capture_tx: None };
-    let proxy_calls = mock_proxy.call_count.clone();
+    let proxy_calls = Arc::new(AtomicUsize::new(0));
 
-    let (server_address, shutdown_tx, _temp_dir) = setup_uds_server(mock_proxy).await;
+    let (server_address, shutdown_tx, _temp_dir) = setup_uds_server(MockProxyService {
+        call_count: proxy_calls.clone(),
+        request_capture_tx: None,
+    })
+    .await;
 
-    // Build the connector and register the Isolate as Opaque.
     let connector = build_test_connector(server_address).await.unwrap();
     let (req_tx, req_rx) = mpsc::channel(1);
-    let mut response_receiver = connector.stream_proxy_external(isolate_id, req_rx).await.unwrap();
 
+    // Intentionally sending request before awaiting stream connection to prevent gRPC deadlock.
     req_tx.send(create_scope_test_request(DataScopeType::DomainOwned)).await.unwrap();
     drop(req_tx);
 
+    let mut response_receiver = connector.stream_proxy_external(isolate_id, req_rx).await.unwrap();
+
     // Wait for the response
-    let _ = response_receiver.recv().await;
+    let _ =
+        tokio::time::timeout(tokio::time::Duration::from_secs(5), response_receiver.recv()).await;
 
     // The assertion will now pass.
     assert_eq!(proxy_calls.load(Ordering::SeqCst), 1);
@@ -542,7 +571,7 @@ fn test_translate_to_proxy_request_fails_on_missing_metadata() {
 fn test_translate_to_proxy_request_fails_on_missing_payload() {
     let request = InvokeEzRequest {
         control_plane_metadata: Some(ControlPlaneMetadata {
-            destination_operator_domain: "external/test-target".to_string(),
+            destination_operator_domain: "test-target".to_string(),
             ..Default::default()
         }),
         isolate_request_payload: None,
@@ -595,7 +624,7 @@ async fn test_proxy_external_handles_server_error_using_tcp() {
     let response_result = connector.proxy_external(isolate_id, request.clone(), None).await;
 
     assert!(response_result.is_err(), "The call should fail due to a server error");
-    assert!(matches!(response_result, Err(ExternalProxyConnectorError::StreamFailed(_))),);
+    assert!(matches!(response_result, Err(ExternalProxyConnectorError::UnaryCallFailed(_))),);
     let _ = shutdown_tx.send(());
 }
 
@@ -614,7 +643,7 @@ async fn test_proxy_external_handles_server_error_using_uds() {
     let response_result = connector.proxy_external(isolate_id, request.clone(), None).await;
 
     assert!(response_result.is_err(), "The call should fail due to a server error");
-    assert!(matches!(response_result, Err(ExternalProxyConnectorError::StreamFailed(_))),);
+    assert!(matches!(response_result, Err(ExternalProxyConnectorError::UnaryCallFailed(_))),);
     let _ = shutdown_tx.send(());
 }
 
@@ -728,8 +757,6 @@ async fn stream_returns_transformed_metadata_in_response() {
         setup_uds_server(MockProxyService::default()).await;
     let connector = build_test_connector(server_address).await.unwrap();
     let (req_tx, res_rx) = mpsc::channel(10);
-    let mut response_receiver = connector.stream_proxy_external(isolate_id, res_rx).await.unwrap();
-
     // Create original metadata with unique values for testing transformation
     let original_metadata = ControlPlaneMetadata {
         ipc_message_id: 54321,
@@ -748,8 +775,14 @@ async fn stream_returns_transformed_metadata_in_response() {
 
     req_tx.send(test_request).await.unwrap();
 
+    let mut response_receiver = connector.stream_proxy_external(isolate_id, res_rx).await.unwrap();
+
     // Receive and verify response metadata
-    let response = response_receiver.recv().await.expect("Should receive a response");
+    let response = response_receiver
+        .recv()
+        .await
+        .expect("Should receive a response")
+        .expect("Response should be valid");
 
     let response_metadata =
         response.control_plane_metadata.expect("Response should contain metadata");

@@ -3,7 +3,8 @@
     "registry": {
       "host": "",
       "project": "",
-      "repository": ""
+      "repository": "",
+      "namespace": "private-compute-infra-toolkit/encrypted-zone-node"
     },
     "images": {
       "tool-env": {

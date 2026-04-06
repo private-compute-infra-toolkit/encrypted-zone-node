@@ -48,15 +48,20 @@ rust_binary(
     ],
 )
 
-# This rule has to be executed from the repo root.
-# TODO: move the rule to repo root once the mcp server works well enough
 genrule(
-    name = "pkg-mcp",
-    outs = ["pkg-mcp.bin"],
-    cmd_bash = """cat << EOF > '$@'
-tools/mcp/server/update_mcp_server "\\$$@"
-EOF""",
+    name = "install",
+    srcs = [
+        ":ez-build-fix.toml",
+        ":server",
+    ],
+    outs = ["install-ez-mcp.bin"],
+    cmd_bash = """cat <<EOF >'$@'
+mkdir -p {dir}
+cp -f "$(execpath :server)" "{dir}/ez-mcp"
+cp -f "$(execpath :ez-build-fix.toml)" "{dir}"
+chmod 755 "{dir}/ez-mcp"
+EOF""".format(dir = "tools/mcp/ez-mcp"),
     executable = True,
     local = True,
-    message = "Package the mcp server executable from the latest code",
+    message = "installing ez-mcp",
 )

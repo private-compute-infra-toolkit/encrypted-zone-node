@@ -42,3 +42,10 @@ EOF""",
     local = True,
     message = "copy bazel test logs",
 )
+
+# Alias was used to allow crate `boringssl-sys` to find the ssl library.
+alias(
+    name = "boringssl_ssl",
+    actual = "@boringssl//:ssl",
+    visibility = ["//visibility:public"],
+)

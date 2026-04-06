@@ -1,4 +1,4 @@
-// Copyright 2025 Google LLC
+// Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,8 +14,9 @@
 
 use anyhow::Result;
 use container_manager_request::{
-    ContainerManagerRequest, GetRunStatusRequest, GetRunStatusResponse, MountFileResponse,
-    MountReadOnlyFile, MountWritableFile, ResetIsolateRequest, ResetIsolateResponse,
+    ContainerManagerRequest, GetRunStatusRequest, GetRunStatusResponse, MountDirectoryResponse,
+    MountFileResponse, MountReadOnlyDirectory, MountReadOnlyFile, MountWritableDirectory,
+    MountWritableFile, ResetIsolateRequest, ResetIsolateResponse,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -67,6 +68,32 @@ impl ContainerManagerRequester {
         let (response_tx, response_rx) = oneshot::channel();
         self.send_request(ContainerManagerRequest::MountReadOnlyFile {
             req: mount_read_only_file_req,
+            resp: response_tx,
+        })
+        .await;
+        response_rx.await?
+    }
+
+    pub async fn mount_writable_directory(
+        &self,
+        req: MountWritableDirectory,
+    ) -> Result<MountDirectoryResponse> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.send_request(ContainerManagerRequest::MountWritableDirectory {
+            req,
+            resp: response_tx,
+        })
+        .await;
+        response_rx.await?
+    }
+
+    pub async fn mount_read_only_directory(
+        &self,
+        req: MountReadOnlyDirectory,
+    ) -> Result<MountDirectoryResponse> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.send_request(ContainerManagerRequest::MountReadOnlyDirectory {
+            req,
             resp: response_tx,
         })
         .await;
