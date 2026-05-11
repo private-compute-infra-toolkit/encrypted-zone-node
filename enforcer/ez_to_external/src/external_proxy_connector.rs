@@ -31,6 +31,7 @@ use metrics::common::{CallTracker, MessageTimerGuard, MetricAttributes, ServiceM
 use metrics::external_proxy_connector::ExternalProxyConnectorMetrics;
 use metrics::observed_proxy_channel::ObservedSender;
 use payload_proto::data_scope_proto::enforcer::v1::DataScopeType;
+use payload_proto::enforcer::v1::ez_hybrid_payload::DeliveryMethod;
 use payload_proto::enforcer::v1::EzPayloadData;
 use prost::Message;
 use std::collections::HashMap;
@@ -374,13 +375,20 @@ pub fn translate_to_proxy_request(
         ExternalProxyConnectorError::TranslationError("Missing isolate_request_payload".to_string())
     })?;
 
+    let inline_data = match payload.delivery_method {
+        Some(DeliveryMethod::InlineData(data)) => Ok(data),
+        _ => Err(ExternalProxyConnectorError::TranslationError(
+            "Can't use shared-memory for external comms.".to_string(),
+        )),
+    }?;
+
     // Check if the payload contains more than one datagram.
-    if payload.datagrams.len() != 1 {
+    if inline_data.datagrams.len() != 1 {
         return Err(ExternalProxyConnectorError::TranslationError(
             "External calls must contain exactly one datagram.".to_string(),
         ));
     }
-    let payload_bytes = payload.datagrams.into_iter().next().unwrap();
+    let payload_bytes = inline_data.datagrams.into_iter().next().unwrap();
 
     let target_domain = &metadata.destination_operator_domain;
 
@@ -403,9 +411,12 @@ fn translate_from_proxy_response(
     response_metadata: ControlPlaneMetadata,
 ) -> InvokeEzResponse {
     let payload = EzPayloadData { datagrams: vec![res.external_response_payload] };
+    let hybrid_payload = payload_proto::enforcer::v1::EzHybridPayload {
+        delivery_method: Some(DeliveryMethod::InlineData(payload)),
+    };
 
     InvokeEzResponse {
-        ez_response_payload: Some(payload),
+        ez_response_payload: Some(hybrid_payload),
         control_plane_metadata: Some(response_metadata),
         ez_response_iscope: Some(EzPayloadIsolateScope {
             datagram_iscopes: vec![IsolateDataScope {

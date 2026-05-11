@@ -26,12 +26,14 @@ rust_library(
         "//enforcer/v1:external_proxy_rust",
         "//enforcer/v1:ez_service_rust",
         "//enforcer/v1:ez_to_ez_service_rust",
+        "//enforcer/v1:manifest_rust",
         "@crates//:anyhow",
         "@crates//:futures",
         "@crates//:hyper-util",
         "@crates//:log",
         "@crates//:opentelemetry",
         "@crates//:opentelemetry-otlp",
+        "@crates//:opentelemetry-proto",
         "@crates//:opentelemetry_sdk",
         "@crates//:prost",
         "@crates//:tokio",
@@ -55,7 +57,10 @@ rust_library(
 rust_test(
     name = "metrics_test",
     size = "small",
-    srcs = ["test/metrics_test.rs"],
+    srcs = [
+        "test/metrics_test.rs",
+        "test/receiver_test.rs",
+    ],
     deps = [
         ":metrics",
         ":metrics_test_utils",

@@ -48,18 +48,20 @@ service EzIsolateBridge {
 }
 
 message InvokeIsolateRequest {
+  reserved 3;
   ControlPlaneMetadata control_plane_metadata = 1;
   EzPayloadIsolateScope isolate_input_iscope = 2;
   // When this payload is part of an external request, this field MUST
   // contain exactly one datagram. The external proxy only supports a single
   // payload from the enforcer.
-  EzPayloadData isolate_input = 3;
+  EzHybridPayload isolate_input = 4;
 }
 
 message InvokeIsolateResponse {
+  reserved 3;
   ControlPlaneMetadata control_plane_metadata = 1;
   EzPayloadIsolateScope isolate_output_iscope = 2;
-  EzPayloadData isolate_output = 3;
+  EzHybridPayload isolate_output = 4;
 }
 
 message UpdateIsolateStateRequest {

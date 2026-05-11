@@ -366,6 +366,14 @@ crate.spec(
     version = "0.31.0",
 )
 crate.spec(
+    features = [
+        "gen-tonic",
+        "metrics",
+    ],
+    package = "opentelemetry-proto",
+    version = "0.31.0",
+)
+crate.spec(
     package = "tracing",
     version = "0.1.44",
 )

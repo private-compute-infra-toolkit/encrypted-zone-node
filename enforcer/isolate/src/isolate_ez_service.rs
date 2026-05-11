@@ -540,6 +540,7 @@ impl StreamHandler {
         let metrics = self.metrics.clone();
         let metric_attr_req = metric_attr.clone();
 
+        let first_req_clone = first_req.clone();
         tokio::spawn(async move {
             {
                 // Send the first request that we already consumed.
@@ -564,8 +565,14 @@ impl StreamHandler {
             }
         });
 
-        let connect_result = handler.remote_streaming_connect(from_local_rx).await;
+        let connect_result = handler
+            .remote_streaming_connect(
+                first_req_clone.control_plane_metadata.as_ref(),
+                from_local_rx,
+            )
+            .await;
 
+        // If remote stream can't be connected, return error to the caller.
         let Ok(mut from_outbound_rx) = connect_result else {
             let connect_error = connect_result.unwrap_err();
             let connect_status = match connect_error.downcast_ref::<Status>() {
@@ -824,9 +831,14 @@ impl RestrictionsEnforcer {
         {
             Some(destination_isolate_service) => destination_isolate_service,
             None => {
-                return Err(Status::failed_precondition(
-                    "Failed to find destination isolate service in InvokeEZ Request",
-                ));
+                let detailed_err_msg = format!(
+                    "Failed to find destination isolate service index for {}.{} (method: {}) in InvokeEZ Request from Isolate {}",
+                    metadata.destination_operator_domain,
+                    metadata.destination_service_name,
+                    metadata.destination_method_name,
+                    self.isolate_id
+                );
+                return Err(Status::failed_precondition(detailed_err_msg));
             }
         };
 
@@ -838,7 +850,15 @@ impl RestrictionsEnforcer {
             })
             .await
         {
-            return Err(Status::failed_precondition(err.to_string()));
+            let detailed_err_msg = format!(
+                "Communication to the target backend dependency {}.{}.{} is not allowed as it is not defined in the EzManifest (Error: {}). Isolate attempting communication: {}",
+                metadata.destination_operator_domain,
+                metadata.destination_service_name,
+                metadata.destination_method_name,
+                err,
+                self.isolate_id
+            );
+            return Err(Status::failed_precondition(detailed_err_msg));
         }
 
         let route = destination_isolate_service.get_request_route();

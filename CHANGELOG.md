@@ -2,6 +2,66 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## 0.9.0 (2026-05-11)
+
+
+### Dependencies
+
+* **deps:** Update DevKit to release-3.1.1
+* **deps:** Update DevKit to release-3.2.0
+* **deps:** Update DevKit to release-3.3.0
+* **deps:** Update DevKit to release-3.4.0
+* **deps:** Update DevKit to release-3.5.0
+
+
+### EZ Policy Enforcer
+
+* **enforcer:** Add parameter to avoid duplicate service name
+* **enforcer:** Fix race condition in metrics startup + OTel endpoint bug
+* **enforcer:** Make console_subscriber_port optional
+* **enforcer:** Mount traces uds socket inside isolate
+* **enforcer:** remove allowed_attributes field from AllowedMetric
+* **enforcer:** Rename source metric attribute to ez_component_name
+* **enforcer:** start UDS reception server to route Isolate metrics
+* **enforcer:** Switch to EzHybridPayload as a no-op
+
+
+### mTLS
+
+* **mtls:** add TLS networking utilities to grpc_connector
+* **mtls:** integrate mTLS into inbound gRPC handler
+* **mtls:** integrate mTLS into outbound gRPC handler
+
+
+### Features
+
+* Add cc_proto/cpp_grpc_libs for diagnostics
+* add flag to run isolates as unprivileged user
+* Add HybridPayload definition to ez_payload.proto
+* Add ShmSlotReference and ShmSlotData to ez_shm_payload.proto
+* Add use_devkit Rule for Jeskit
+* **container:** mount OTel metrics UDS into Isolate containers
+* Enable devkit/gitlinks check during pre-commit
+* ignore .agents/ dir used for Jetski Rules/Skills
+* implement *secure* tmpfs mount at /tmp
+* improve msg when rejecting isolate attempted comms
+* **metrics:** add receiver for filtering and identity injection
+* **node:** Improve health manager logging
+* Remove options.proto
+
+
+### Bug Fixes
+
+* Allow different Isolates with binary & pub id
+* forcefully disable otlp traces
+* Reinstate otel_safe_endpoint flag
+* Use unsafe endpoint for isolate metrics
+
+
+### Documentation
+
+* Fix links in README files
+
 ## 0.8.0 (2026-04-06)
 
 

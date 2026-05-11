@@ -25,14 +25,7 @@ load("//:container_deps.bzl", "get_user")
         name = "enforcer{}".format(flavor.suffix),
         srcs = ["main.rs"],
         crate_features = flavor.features,
-        rustc_flags = [
-            # TODO: consider building two binaries (with diagnostics service
-            # without optimalisations and without diagnostics service but with optimalisations)
-            "-C",
-            "debuginfo=2",
-            "-C",
-            "opt-level=0",
-        ],
+        rustc_flags = flavor.rustc_flags,
         visibility = ["//visibility:public"],
         deps = [
             "//enforcer/container:container_custom",
@@ -198,7 +191,6 @@ cp -f $(execpath :enforcer_rootfs_test.tar) {dir}/enforcer_rootfs_test.tar
 cp -f $(execpath //enforcer/v1:ez_service_descriptor_set) \
       $(execpath //enforcer/v1:enforcer_descriptor_set) \
       $(execpath //enforcer/v1:manifest_descriptor_set) {dir}/proto
-cp -f $(execpath :enforcer_debug) {dir}/enforcer_bin
 echo "Successfully copied all artifacts to {dir}"
 EOF""".format(dir = "dist/enforcer"),
     executable = True,

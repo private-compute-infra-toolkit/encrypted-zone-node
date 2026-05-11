@@ -109,6 +109,28 @@ async fn test_connect_uds_failure() {
 }
 
 #[tokio::test]
+async fn test_new_tls_fails_with_non_tls_server() {
+    // TODO: Add TLS enabled mock server for testing purpose.
+    // The next CL will introduce acceptor and therefore making it possible to run mock
+    // TLS server for testing purpose.
+    let (addr, shutdown_tx, _temp_dir) = setup_uds_server().await;
+    let connector =
+        boring::ssl::SslConnector::builder(boring::ssl::SslMethod::tls()).unwrap().build();
+    let result = GrpcChannelPool::new_tls(
+        addr,
+        /*pool_size=*/ 1,
+        /*retry_count=*/ 1,
+        /*retry_delay_ms=*/ 10,
+        /*retry_scaling=*/ 2,
+        connector,
+        /*sni=*/ "localhost".to_string(),
+    )
+    .await;
+    assert!(result.is_err());
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
 async fn test_connect_tcp_retry_and_succeed() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

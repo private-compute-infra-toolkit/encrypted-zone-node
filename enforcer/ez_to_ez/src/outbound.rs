@@ -21,56 +21,62 @@ use enforcer_proto::enforcer::v1::{
 use ez_to_ez_service_proto::enforcer::v1::{
     ez_to_ez_api_client::EzToEzApiClient, EzCallRequest, EzCallResponse,
 };
-use grpc_connector::{
-    GrpcChannelPool, DEFAULT_CONNECT_RETRY_COUNT, DEFAULT_CONNECT_RETRY_DELAY_MS,
-    DEFAULT_CONNECT_RETRY_SCALING, DEFAULT_POOL_SIZE,
-};
+use grpc_connector::GrpcChannelPool;
 use metrics::common::ServiceMetrics;
 use metrics::observed_proxy_channel::ObservedSender;
 use outbound_ez_to_ez_client::OutboundEzToEzClient;
+use payload_proto::enforcer::v1::ez_hybrid_payload::DeliveryMethod;
 use payload_proto::enforcer::v1::EzPayloadScope;
-use std::env;
+use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio::sync::OnceCell;
+use tokio::sync::RwLock;
 use tokio_stream::wrappers::ReceiverStream;
+use tonic::transport::Channel;
 
 const EZ_TO_EZ_CHANNEL_SIZE: usize = 256;
 const EZ_TO_EZ_EMPTY_PAYLOAD_ERROR: &str = "Empty payload data from remote enforcer";
 
+/// Configuration for the outbound EZ-to-EZ mTLS.
+#[derive(Clone)]
+pub struct OutboundTlsConfig {
+    pub factory: mtls::mtls::TlsConnectorFactory,
+    pub trust_domain: String,
+}
+
 /// Handles outbound requests from the local enforcer to remote enforcers.
 #[derive(Clone)]
 pub struct OutboundEzToEzHandler<MetricsImpl: ServiceMetrics> {
+    proxy_address: String,
     client_channel_pool: GrpcChannelPool,
     metrics: MetricsImpl,
+
+    // TLS Config is set to turn on mTLS between Ez-to-Ez.
+    tls_config: Option<OutboundTlsConfig>,
+    // Map from unique SNI to TLS client channel pool.
+    // A connection represents the connection to a unique peer enforcer.
+    // Since multiple threads may want to create GrpcChannelPool concurrently,
+    // we use OnceCell to ensure that only one task initializes the channel pool for a given SNI.
+    tls_channel_pool: Arc<RwLock<HashMap<String, Arc<OnceCell<GrpcChannelPool>>>>>,
 }
 
 impl<MetricsImpl: ServiceMetrics> OutboundEzToEzHandler<MetricsImpl> {
-    pub async fn new(address: String, metrics: MetricsImpl) -> Result<Self> {
-        let retry_delay_ms = env::var("PROXY_CONNECT_RETRY_DELAY_MS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_CONNECT_RETRY_DELAY_MS);
-
-        let retry_count = env::var("PROXY_CONNECT_RETRY_COUNT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_CONNECT_RETRY_COUNT);
-
-        let retry_scaling = env::var("PROXY_CONNECT_RETRY_SCALING")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_CONNECT_RETRY_SCALING);
-
-        let client_channel_pool = GrpcChannelPool::new(
-            address.to_string(),
-            DEFAULT_POOL_SIZE,
-            retry_count,
-            retry_delay_ms,
-            retry_scaling,
-        )
-        .await
-        .map_err(|e| anyhow!("Failed to connect to EzToEz proxy: {}", e))?;
-
-        Ok(Self { client_channel_pool, metrics })
+    pub async fn new(
+        proxy_address: String,
+        metrics: MetricsImpl,
+        tls_config: Option<OutboundTlsConfig>,
+    ) -> Result<Self> {
+        let client_channel_pool = GrpcChannelPool::new_from_env(&proxy_address)
+            .await
+            .map_err(|e| anyhow!("Failed to connect to EzToEz proxy: {}", e))?;
+        Ok(Self {
+            proxy_address,
+            client_channel_pool,
+            metrics,
+            tls_config,
+            tls_channel_pool: Arc::new(RwLock::new(HashMap::new())),
+        })
     }
 
     async fn handle_outbound_requests(
@@ -110,8 +116,72 @@ impl<MetricsImpl: ServiceMetrics> OutboundEzToEzHandler<MetricsImpl> {
         }
         log::info!("Done transporting responses from remote to local enforcer.");
     }
-}
 
+    // This function gets or creates a TLS channel based on the SNI constructed from
+    // the Control Plane Metadata.
+    async fn get_or_create_channel(&self, meta: Option<&ControlPlaneMetadata>) -> Result<Channel> {
+        // Fallback to default pool if TLS is not configured.
+        let tls_config = match &self.tls_config {
+            Some(config) => config,
+            None => return Ok(self.client_channel_pool.next_channel()),
+        };
+        // If TLS is configured, we need metadata to route the request (SNI).
+        let meta = match meta {
+            Some(m) => m,
+            None => return Err(anyhow!("Missing ControlPlaneMetadata for TLS routing")),
+        };
+
+        // Construct the SNI for the destination peer.
+        let sni = mtls::mtls::sni(
+            &meta.destination_ez_instance_id,
+            &meta.destination_isolate_name,
+            &meta.destination_publisher_id,
+            &meta.destination_operator_domain,
+            &tls_config.trust_domain,
+        );
+
+        let cell = {
+            let read_guard = self.tls_channel_pool.read().await;
+            read_guard.get(&sni).cloned()
+        };
+
+        // Use OnceCell to ensure that only one task initializes the channel pool
+        // for a given SNI, avoiding duplicate work and thundering herd issues
+        // when multiple requests for the same SNI arrive concurrently.
+        let cell = if let Some(c) = cell {
+            c
+        } else {
+            let mut write_guard = self.tls_channel_pool.write().await;
+            // Double check in case another task created it while we were awaiting.
+            write_guard
+                .entry(sni.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new()))
+                .clone()
+        };
+
+        let tls_config_clone = tls_config.clone();
+        let sni_clone = sni.clone();
+        let operator_domain = meta.destination_operator_domain.clone();
+        let proxy_address = self.proxy_address.clone();
+
+        // When OnceCell is empty, it'll execute the closure and store the result in the OnceCell.
+        // Otherwise, it'll directly return the stored result.
+        // This prevents multiple concurrent channel creation calls from race condition.
+        let pool = cell
+            .get_or_try_init(|| async move {
+                let connector = tls_config_clone.factory.create_connector(&operator_domain).await?;
+                grpc_connector::GrpcChannelPool::new_tls_from_env(
+                    &proxy_address,
+                    connector,
+                    sni_clone,
+                )
+                .await
+            })
+            .await?;
+
+        Ok(pool.next_channel())
+    }
+}
 #[tonic::async_trait]
 impl<MetricsImpl: ServiceMetrics> OutboundEzToEzClient for OutboundEzToEzHandler<MetricsImpl> {
     async fn remote_invoke(
@@ -120,18 +190,13 @@ impl<MetricsImpl: ServiceMetrics> OutboundEzToEzClient for OutboundEzToEzHandler
         timeout: Option<std::time::Duration>,
     ) -> Result<InvokeEzResponse> {
         let original_metadata = request.control_plane_metadata.clone();
-        log::info!(
-            "OutboundEzToEz: outbound EZ-to-EZ control_plane_metadata: {:?}",
-            original_metadata
-        );
         let ez_call_request = invoke_ez_request_to_ez_call_request(request);
-        let mut client = EzToEzApiClient::new(self.client_channel_pool.next_channel());
-
+        let channel = self.get_or_create_channel(original_metadata.as_ref()).await?;
+        let mut client = EzToEzApiClient::new(channel);
         let mut tonic_request = tonic::Request::new(ez_call_request);
         if let Some(duration) = timeout {
             tonic_request.set_timeout(duration);
         }
-
         let response = client
             .ez_call(tonic_request)
             .await
@@ -146,9 +211,11 @@ impl<MetricsImpl: ServiceMetrics> OutboundEzToEzClient for OutboundEzToEzHandler
 
     async fn remote_streaming_connect(
         &self,
+        first_request_metadata: Option<&ControlPlaneMetadata>,
         from_local_rx: mpsc::Receiver<InvokeEzRequest>,
     ) -> Result<mpsc::Receiver<anyhow::Result<InvokeEzResponse>>> {
-        let mut client = EzToEzApiClient::new(self.client_channel_pool.next_channel());
+        let channel = self.get_or_create_channel(first_request_metadata).await?;
+        let mut client = EzToEzApiClient::new(channel);
 
         let channels = metrics::observed_proxy_channel::create_proxy_channels(
             EZ_TO_EZ_CHANNEL_SIZE,
@@ -193,7 +260,10 @@ fn invoke_ez_request_to_ez_call_request(request: InvokeEzRequest) -> EzCallReque
     EzCallRequest {
         control_plane_metadata: request.control_plane_metadata,
         payload_scope,
-        payload_data: request.isolate_request_payload,
+        payload_data: request.isolate_request_payload.and_then(|hp| match hp.delivery_method {
+            Some(DeliveryMethod::InlineData(data)) => Some(data),
+            _ => None,
+        }),
     }
 }
 
@@ -225,6 +295,10 @@ fn ez_call_response_to_invoke_ez_response(
     Ok(InvokeEzResponse {
         control_plane_metadata: original_metadata,
         ez_response_iscope,
-        ez_response_payload: response.payload_data,
+        ez_response_payload: response.payload_data.map(|data| {
+            payload_proto::enforcer::v1::EzHybridPayload {
+                delivery_method: Some(DeliveryMethod::InlineData(data)),
+            }
+        }),
     })
 }

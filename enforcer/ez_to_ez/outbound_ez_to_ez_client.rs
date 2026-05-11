@@ -14,7 +14,7 @@
 
 use anyhow::Result;
 use dyn_clone::DynClone;
-use enforcer_proto::enforcer::v1::{InvokeEzRequest, InvokeEzResponse};
+use enforcer_proto::enforcer::v1::{ControlPlaneMetadata, InvokeEzRequest, InvokeEzResponse};
 use tokio::sync::mpsc::Receiver;
 
 /// The OutboundEzToEzClient trait defines the interface for sending requests to a remote EZ enforcer from an Isolate.
@@ -28,8 +28,11 @@ pub trait OutboundEzToEzClient: Send + Sync + DynClone {
     ) -> Result<InvokeEzResponse>;
 
     /// Establishes a streaming connection with a remote enforcer.
+    /// The `first_request_metadata` is used for selecting the appropriate connection
+    /// to the remote enforcer.
     async fn remote_streaming_connect(
         &self,
+        first_request_metadata: Option<&ControlPlaneMetadata>,
         from_local_rx: Receiver<InvokeEzRequest>,
     ) -> Result<Receiver<Result<InvokeEzResponse>>>;
 }

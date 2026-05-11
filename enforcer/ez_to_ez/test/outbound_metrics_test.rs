@@ -34,13 +34,14 @@ async fn test_outbound_stream_metrics() {
     let server_address = format!("http://localhost:{}", port);
 
     let metrics = OutboundMetrics::default();
-    let handler = OutboundEzToEzHandler::new(server_address, metrics).await.unwrap();
+    let handler = OutboundEzToEzHandler::new(server_address, metrics, None).await.unwrap();
 
     let first_payload = "hello metrics 1";
     let second_payload = "hello metrics 2";
 
     let (local_to_outbound, from_local_rx) = mpsc::channel(10);
-    let mut outbound_to_local = handler.remote_streaming_connect(from_local_rx).await.unwrap();
+    let mut outbound_to_local =
+        handler.remote_streaming_connect(None, from_local_rx).await.unwrap();
 
     let initial_request = create_test_request(Some(first_payload));
     local_to_outbound.send(initial_request).await.unwrap();

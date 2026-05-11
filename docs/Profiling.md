@@ -43,7 +43,7 @@ enabled.
     mkdir -p manual_testing/enforcer/proto/v1
 
     # Copy the Enforcer binary
-    cp dist/enforcer/enforcer_debug manual_testing/enforcer_bin
+    cp dist/enforcer/enforcer_debug manual_testing/enforcer_debug
 
     # Copy the manifest descriptor set to the expected location
     cp dist/enforcer/v1/manifest_descriptor_set.pb \
@@ -76,7 +76,7 @@ enabled.
 
     ```bash
     cd manual_testing
-    ./enforcer_bin --manifest-path=manifest.json
+    ./enforcer_debug --manifest-path=manifest.json
     ```
 
     By default, the Enforcer will listen on `localhost:53459`.

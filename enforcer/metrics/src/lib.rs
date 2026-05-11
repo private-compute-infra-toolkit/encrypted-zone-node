@@ -34,6 +34,7 @@ pub mod observed_proxy_channel;
 pub mod observed_stream;
 pub mod outbound;
 pub mod public_api;
+pub mod receiver;
 
 /// Holds the providers so they can be kept alive or shut down gracefully.
 pub struct OtelProviders {

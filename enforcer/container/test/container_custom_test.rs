@@ -70,6 +70,7 @@ fn default_container_opts(operation: &str, mount_src: Option<PathBuf>) -> Contai
         },
         network: NetworkOptions::default(),
         env: vec![],
+        run_isolate_as_unprivileged: false,
     }
 }
 
@@ -303,6 +304,8 @@ async fn container_run_status_signaled() {
     let opts = default_container_opts("sleep", None);
     let mut container = default_container();
     container.start(&opts).await.unwrap();
+    // Give some time for the process to be reparented to the subreaper.
+    sleep(Duration::from_millis(100)).await;
     assert_eq!(container.get_run_status().unwrap(), ContainerRunStatus::Running);
     container.stop().await.unwrap();
     // Give some time for the signal to be delivered to the process and clean up.
@@ -320,4 +323,33 @@ async fn container_root_is_readonly() {
     container.start(&opts).await.unwrap();
     let data = String::from_utf8(server_handle.await.unwrap()).unwrap();
     assert!(data.contains("Read-only file system"), "Expected read-only error, got: {}", data);
+}
+
+#[tokio::test]
+async fn container_tmpfs_mount() {
+    let (uds_dir, uds_listener) = setup();
+    let server_handle = handle(uds_listener, 100);
+    let opts = default_container_opts("verify-tmpfs-mount", Some(uds_dir.path().to_path_buf()));
+    let mut container = default_container();
+    container.start(&opts).await.unwrap();
+    let data = String::from_utf8(server_handle.await.unwrap()).unwrap();
+    assert_ne!(data, "not found", "/tmp mount not found");
+    let options: Vec<&str> = data.split(',').collect();
+    assert!(options.contains(&"nosuid"), "missing nosuid: {}", data);
+    assert!(options.contains(&"nodev"), "missing nodev: {}", data);
+    assert!(options.contains(&"noexec"), "missing noexec: {}", data);
+}
+
+#[tokio::test]
+async fn container_run_unprivileged() {
+    let (uds_dir, uds_listener) = setup();
+    let server_handle = handle(uds_listener, 100);
+    let mut opts = default_container_opts("get-uid", Some(uds_dir.path().to_path_buf()));
+    opts.run_isolate_as_unprivileged = true;
+
+    let mut container = default_container();
+    container.start(&opts).await.expect("Failed to start unprivileged container");
+
+    let data = String::from_utf8(server_handle.await.unwrap()).unwrap();
+    assert_eq!(data, "1000", "Expected UID 1000 inside unprivileged container, got: {}", data);
 }

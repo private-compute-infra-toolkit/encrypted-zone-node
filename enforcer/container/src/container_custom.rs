@@ -34,6 +34,9 @@ use tempfile::TempDir;
 const OLD_ROOT: &str = "old_root";
 const ROOTFS: &str = "rootfs";
 
+const UNPRIVILEGED_UID: u32 = 1000;
+const UNPRIVILEGED_GID: u32 = 1000;
+
 static INIT_AS_SUBREAPER: Once = Once::new();
 
 enum Status {
@@ -62,7 +65,8 @@ impl ContainerCustom {
         prctl::set_name(name.as_c_str())
             .map_err(|e| anyhow::anyhow!("Failed to set process name: {}", e))?;
         // Create a new user namespace.
-        self.setup_user_ns().map_err(|e| anyhow::anyhow!("Failed to set up user ns: {}", e))?;
+        self.setup_user_ns(opts.run_isolate_as_unprivileged)
+            .map_err(|e| anyhow::anyhow!("Failed to set up user ns: {}", e))?;
         // Create remaining namespaces nested under the user namespace created above.
         let mut ns_flags = CloneFlags::CLONE_NEWNS
             | CloneFlags::CLONE_NEWCGROUP
@@ -86,6 +90,7 @@ impl ContainerCustom {
         self.mount_devs()?;
         self.mount_sys()?;
         self.mount_proc_fs()?;
+        self.mount_tmp_fs()?;
         // Mount the requested files and dirs in the new root.
         for mount in opts.mounts.iter() {
             self.mount_safe(
@@ -131,22 +136,35 @@ impl ContainerCustom {
         Ok(())
     }
 
-    fn setup_user_ns(&self) -> anyhow::Result<()> {
-        // Do this first since the pid/gid values will change to nobody after unshare.
-        let uid_map = format!("0 {} 1", users::get_current_uid());
-        let gid_map = format!("0 {} 1", users::get_current_gid());
+    fn setup_user_ns(&self, run_isolate_as_unprivileged: bool) -> anyhow::Result<()> {
+        let (uid_map, gid_map) = if run_isolate_as_unprivileged {
+            (
+                format!("{} {} 1", UNPRIVILEGED_UID, users::get_current_uid()),
+                format!("{} {} 1", UNPRIVILEGED_GID, users::get_current_gid()),
+            )
+        } else {
+            (
+                format!("0 {} 1", users::get_current_uid()),
+                format!("0 {} 1", users::get_current_gid()),
+            )
+        };
+
         // Create new user namespace with unshare.
         sched::unshare(CloneFlags::CLONE_NEWUSER)
             .map_err(|e| anyhow::anyhow!("Failed to unshare new user namespace: {}", e))?;
+
         // We need to disable setgroups to prevent the process from modifying its group
         // membership and bypassing security (e.g. possibly removing denylisted groups).
+        // This is also required for unprivileged users to be able to write to gid_map.
         std::fs::write("/proc/self/setgroups", "deny")
             .map_err(|e| anyhow::anyhow!("Failed to write to /proc/self/setgroups: {}", e))?;
+
         // Maps user / groups from the container to the host.
         std::fs::write("/proc/self/uid_map", uid_map)
             .map_err(|e| anyhow::anyhow!("Failed to write to /proc/self/uid_map: {}", e))?;
         std::fs::write("/proc/self/gid_map", gid_map)
             .map_err(|e| anyhow::anyhow!("Failed to write to /proc/self/gid_map: {}", e))?;
+
         Ok(())
     }
 
@@ -246,6 +264,23 @@ impl ContainerCustom {
             .map_err(|e| anyhow::anyhow!("Failed to create {} directory: {}", PROC, e))?;
         mount::mount(None::<&str>, PROC, Some("proc"), MsFlags::empty(), None::<&str>)
             .map_err(|e| anyhow::anyhow!("Failed to mount proc filesystem at {}: {}", PROC, e))?;
+        Ok(())
+    }
+
+    // Mounts a tmpfs at /tmp in the container.
+    fn mount_tmp_fs(&self) -> anyhow::Result<()> {
+        const TMP: &str = "/tmp";
+        const TMPFS: &str = "tmpfs";
+        std::fs::create_dir_all(TMP)
+            .map_err(|e| anyhow::anyhow!("Failed to create {} directory: {}", TMP, e))?;
+        mount::mount(
+            Some(TMPFS),
+            TMP,
+            Some(TMPFS),
+            MsFlags::MS_NOEXEC | MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
+            Some("size=64M,mode=1777"),
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to mount tmpfs filesystem at {}: {}", TMP, e))?;
         Ok(())
     }
 

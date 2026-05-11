@@ -23,7 +23,9 @@ use ez_to_ez_service_proto::enforcer::v1::{
 use metrics_test_utils::TestMetrics;
 use outbound_ez_to_ez_client::OutboundEzToEzClient;
 use outbound_ez_to_ez_handler::OutboundEzToEzHandler;
-use payload_proto::enforcer::v1::EzPayloadData;
+use payload_proto::enforcer::v1::{
+    ez_hybrid_payload::DeliveryMethod, EzHybridPayload, EzPayloadData,
+};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -125,8 +127,11 @@ pub fn create_test_request(input_payload: Option<&str>) -> InvokeEzRequest {
                 ..Default::default()
             }],
         }),
-        isolate_request_payload: input_payload
-            .map(|payload| EzPayloadData { datagrams: vec![payload.as_bytes().to_vec()] }),
+        isolate_request_payload: input_payload.map(|payload| EzHybridPayload {
+            delivery_method: Some(DeliveryMethod::InlineData(EzPayloadData {
+                datagrams: vec![payload.as_bytes().to_vec()],
+            })),
+        }),
     }
 }
 
@@ -134,14 +139,18 @@ pub fn create_test_request(input_payload: Option<&str>) -> InvokeEzRequest {
 async fn test_outbound_unary_flow() {
     let (port, shutdown_tx) = start_fake_proxy_server(None).await;
     let server_address = format!("http://localhost:{}", port);
-    let handler = OutboundEzToEzHandler::new(server_address, TestMetrics::default()).await.unwrap();
+    let handler =
+        OutboundEzToEzHandler::new(server_address, TestMetrics::default(), None).await.unwrap();
 
     let expected_payload = "hello unary";
     let request = create_test_request(Some(expected_payload));
 
     let response = handler.remote_invoke(request, None).await.unwrap();
 
-    let output_payload = response.ez_response_payload.unwrap().datagrams[0].clone();
+    let output_payload = match response.ez_response_payload.unwrap().delivery_method.unwrap() {
+        DeliveryMethod::InlineData(inline) => inline.datagrams[0].clone(),
+        _ => panic!("Expected InlineData"),
+    };
     assert_eq!(output_payload, expected_payload.as_bytes());
 
     let _ = shutdown_tx.send(());
@@ -151,7 +160,8 @@ async fn test_outbound_unary_flow() {
 async fn test_outbound_unary_empty_payload() {
     let (port, shutdown_tx) = start_fake_proxy_server(None).await;
     let server_address = format!("http://localhost:{}", port);
-    let handler = OutboundEzToEzHandler::new(server_address, TestMetrics::default()).await.unwrap();
+    let handler =
+        OutboundEzToEzHandler::new(server_address, TestMetrics::default(), None).await.unwrap();
 
     let request = create_test_request(None);
 
@@ -168,7 +178,8 @@ async fn test_outbound_unary_call_timeout_propagation() {
     let server_delay = Duration::from_millis(200);
     let (port, shutdown_tx) = start_fake_proxy_server(Some(server_delay)).await;
     let server_address = format!("http://localhost:{}", port);
-    let handler = OutboundEzToEzHandler::new(server_address, TestMetrics::default()).await.unwrap();
+    let handler =
+        OutboundEzToEzHandler::new(server_address, TestMetrics::default(), None).await.unwrap();
 
     let request = create_test_request(Some("timeout test"));
     let client_timeout = Duration::from_millis(100);
@@ -197,26 +208,36 @@ async fn test_outbound_unary_call_timeout_propagation() {
 async fn test_outbound_streaming_flow() {
     let (port, shutdown_tx) = start_fake_proxy_server(None).await;
     let server_address = format!("http://localhost:{}", port);
-    let handler = OutboundEzToEzHandler::new(server_address, TestMetrics::default()).await.unwrap();
+    let handler =
+        OutboundEzToEzHandler::new(server_address, TestMetrics::default(), None).await.unwrap();
 
     let first_payload = "hello";
     let second_payload = "world";
 
     let (local_to_outbound, from_local_rx) = mpsc::channel(10);
-    let mut outbound_to_local = handler.remote_streaming_connect(from_local_rx).await.unwrap();
+    let mut outbound_to_local =
+        handler.remote_streaming_connect(None, from_local_rx).await.unwrap();
 
     let initial_request = create_test_request(Some(first_payload));
     local_to_outbound.send(initial_request).await.unwrap();
 
     let first_response = outbound_to_local.recv().await.unwrap().unwrap();
-    let first_output_payload = first_response.ez_response_payload.unwrap().datagrams[0].clone();
+    let first_output_payload =
+        match first_response.ez_response_payload.unwrap().delivery_method.unwrap() {
+            DeliveryMethod::InlineData(inline) => inline.datagrams[0].clone(),
+            _ => panic!("Expected InlineData"),
+        };
     assert_eq!(first_output_payload, first_payload.as_bytes());
 
     let second_request = create_test_request(Some(second_payload));
     local_to_outbound.send(second_request).await.unwrap();
 
     let second_response = outbound_to_local.recv().await.unwrap().unwrap();
-    let second_output_payload = second_response.ez_response_payload.unwrap().datagrams[0].clone();
+    let second_output_payload =
+        match second_response.ez_response_payload.unwrap().delivery_method.unwrap() {
+            DeliveryMethod::InlineData(inline) => inline.datagrams[0].clone(),
+            _ => panic!("Expected InlineData"),
+        };
     assert_eq!(second_output_payload, second_payload.as_bytes());
 
     drop(local_to_outbound);

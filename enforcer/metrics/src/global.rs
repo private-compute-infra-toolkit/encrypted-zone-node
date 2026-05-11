@@ -120,3 +120,15 @@ pub fn unsafe_meter(name: &'static str) -> Meter {
 pub fn unsafe_meter_with_scope(scope: InstrumentationScope) -> Meter {
     unsafe_meter_provider().meter_with_scope(scope)
 }
+
+/// Resets the global providers to their default No-Op state.
+/// Useful in tests to avoid leaking background threads from periodic exporters.
+pub fn reset_global_providers() {
+    let global = global_providers().write();
+    if let Ok(mut state) = global {
+        *state = GlobalProviders::new();
+        log::info!(target: "MeterProvider.Reset", "Global meter providers reset to No-Op.");
+    } else {
+        log::error!(target: "MeterProvider.ResetFailed", "Failed to reset global providers.");
+    }
+}

@@ -172,7 +172,7 @@ machines that run their EZ workloads.
 
 Furthermore, because a server running in Encrypted Zone runs behind the EZ Enforcer, RPCs with the
 server must be made according to the
-[EzPublicApi](https://github.com/private-compute-infra-toolkit/encrypted-zone-sdk/enforcer/v1/ez_service.proto)
+[EzPublicApi](https://github.com/private-compute-infra-toolkit/encrypted-zone-sdk/blob/main/enforcer/v1/ez_service.proto)
 in open-source gRPC. When lifting-and-shifting applications into EZ, this necessitates packaging
 incoming requests & outgoing responses of your service's native protobuf format into EzPublicApi
 format. Depending on the protocol of your existing service, it may also require protocol translation

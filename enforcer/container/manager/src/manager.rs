@@ -36,6 +36,7 @@ use junction_trait::Junction;
 use manifest_parser::{get_strictest_scope, parse_manifest};
 use manifest_proto::enforcer::v1::ez_backend_dependency::RouteType;
 use manifest_proto::enforcer::v1::ez_manifest::ManifestType;
+use manifest_proto::enforcer::v1::IsolateMetricsPolicy;
 use manifest_proto::enforcer::v1::{
     BinaryManifest, EzBackendDependency, EzManifest, EzServiceSpec, IsolateRuntimeConfigs,
 };
@@ -62,6 +63,11 @@ const EZ_ISOLATE_BRIDGE_UDS: &str = "ez-isolate-bridge-uds";
 const ISOLATE_EZ_BRIDGE_ENFORCER_UDS: &str = "isolate-ez-bridge-uds";
 // Name of FIFO used to signal from Enforcer to Isolate that the Isolate -> EZ Bridge is ready.
 const ISOLATE_EZ_BRIDGE_ENFORCER_UDS_READY: &str = "isolate-ez-bridge-uds.ready";
+// UDS name for exporting OTel metrics
+const OTLP_METRICS_UDS: &str = "otlp-metrics.sock";
+// UDS name for OTLP traces. This will exist under [SHARING_DIR_NAME] for Container.
+#[cfg(feature = "debug")]
+const OTEL_TRACES_UDS: &str = "traces-otlp.sock";
 const DEV_SHM_PATH: &str = "/dev/shm";
 const RATIFIED_ISOLATE_DOMAIN: &str = "EZ_Trusted";
 
@@ -72,6 +78,7 @@ pub struct ContainerManager<ContainerT: Container> {
     isolate_container_map: Arc<DashMap<IsolateId, IsolateContainer<ContainerT>>>,
     // IsolateServiceIndex to ContainerStartupArgs map (used to start new containers via IsolateMngrRequest)
     container_startup_args_map: Arc<DashMap<BinaryServicesIndex, ContainerStartupArgs>>,
+    etc_hosts_written: Arc<DashMap<(String, String), ()>>,
     isolate_junction: Box<dyn Junction>,
     state_manager: IsolateStateManager,
     manifest_validator: ManifestValidator,
@@ -80,6 +87,8 @@ pub struct ContainerManager<ContainerT: Container> {
     shared_mem_manager: SharedMemManager,
     fileshare_manager: FileshareManager,
     interceptor: Interceptor,
+    otel_traces_endpoint: Option<String>,
+    run_isolate_as_unprivileged: bool,
 }
 
 #[derive(Debug)]
@@ -98,6 +107,8 @@ pub struct ContainerManagerArgs {
     pub common_bind_mounts: Vec<String>,
     pub max_decoding_message_size: usize,
     pub isolate_runtime_configs: IsolateRuntimeConfigs,
+    pub otel_traces_endpoint: Option<String>,
+    pub run_isolate_as_unprivileged: bool,
 }
 
 // Internal struct to store Container and it's related properties.
@@ -113,13 +124,15 @@ struct IsolateContainer<ContainerT: Container> {
 /// Data required to initiate a new container.
 #[derive(Clone, Debug)]
 struct ContainerStartupArgs {
-    root_dir_name: String,
     binary_filename: String,
     command_line_args: Vec<String>,
     strictest_scope: DataScopeType,
     shared_root: Arc<TempDir>,
     bind_mounts: Vec<String>,
     env_vars: Vec<String>,
+    publisher_id: String,
+    metrics_policy: IsolateMetricsPolicy,
+    run_isolate_as_unprivileged: bool,
 }
 
 impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
@@ -127,6 +140,7 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
         let isolate_mngr = Self {
             isolate_container_map: Arc::new(DashMap::new()),
             container_startup_args_map: Arc::new(DashMap::new()),
+            etc_hosts_written: Arc::new(DashMap::new()),
             isolate_junction: args.isolate_junction,
             state_manager: args.isolate_state_manager,
             manifest_validator: args.manifest_validator,
@@ -135,6 +149,8 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             shared_mem_manager: args.shared_mem_manager,
             fileshare_manager: args.fileshare_manager,
             interceptor: args.interceptor,
+            otel_traces_endpoint: args.otel_traces_endpoint,
+            run_isolate_as_unprivileged: args.run_isolate_as_unprivileged,
         };
 
         let ez_manifest =
@@ -257,28 +273,26 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
                 etc_hosts_path.parent().context("etc_hosts_path has no parent")?;
             fs::create_dir_all(etc_hosts_parent_dir)
                 .context(format!("Failed to create directory {etc_hosts_parent_dir:?}"))?;
-            {
-                let mut file =
-                    match OpenOptions::new().write(true).create_new(true).open(&etc_hosts_path) {
-                        Ok(f) => {
-                            println!("Successfully created file: {:?}", etc_hosts_path);
-                            f
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                            println!("File already exists: {:?}. Skipping write.", etc_hosts_path);
-                            return Ok(());
-                        }
-                        Err(e) => {
-                            return Err(e).context(format!(
-                                "Failed to exclusively create file {:?}",
-                                etc_hosts_path
-                            ));
-                        }
-                    };
 
-                file.write_all(etc_hosts.as_bytes())
-                    .context(format!("Failed to write to file {:?}", etc_hosts_path))?;
+            let key = (publisher_id.clone(), binary_manifest.binary_filename.clone());
+            if self.etc_hosts_written.insert(key, ()).is_none() {
+                match OpenOptions::new().write(true).create_new(true).open(&etc_hosts_path) {
+                    Ok(mut file) => {
+                        file.write_all(etc_hosts.as_bytes())
+                            .context(format!("Failed to write to file {:?}", etc_hosts_path))?;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        println!("File already exists: {:?}. Skipping write.", etc_hosts_path);
+                    }
+                    Err(e) => {
+                        return Err(e).context(format!(
+                            "Failed to exclusively create file {:?}",
+                            etc_hosts_path
+                        ));
+                    }
+                };
             }
+
             bind_mounts.push(format!("{}:{}", etc_hosts_path.display(), "/etc/hosts",));
         }
 
@@ -286,8 +300,7 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
         let mut env_vars = base_env_vars.clone();
         env_vars.push(format!("EZ_MAX_DECODING_MESSAGE_SIZE={max_decoding_message_size:#?}"));
         let container_startup_args = ContainerStartupArgs {
-            root_dir_name: publisher_id.clone(),
-            binary_filename: binary_manifest.binary_filename,
+            binary_filename: binary_manifest.binary_filename.clone(),
             // Copy is required because command_line_args is now owned by container_startup_args.
             command_line_args: command_line_args.clone(),
             strictest_scope,
@@ -297,6 +310,10 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             ),
             bind_mounts,
             env_vars,
+            publisher_id: publisher_id.clone(),
+            // Use an empty metrics policy if nothing is specified
+            metrics_policy: binary_manifest.metrics_policy.unwrap_or_default(),
+            run_isolate_as_unprivileged: self.run_isolate_as_unprivileged,
         };
 
         self.container_startup_args_map
@@ -310,17 +327,12 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             );
         } else {
             for _ in 0..number_of_isolates {
-                let self_clone = self.clone();
-                let container_startup_args = container_startup_args.clone();
-
-                tokio::spawn(async move {
-                    let container_add_result = self_clone
-                        .add_new_isolate(binary_services_index, container_startup_args)
-                        .await;
-                    if container_add_result.is_err() {
-                        log::error!("Container add failed: {container_add_result:?}");
-                    }
-                });
+                self.add_new_isolate(AddIsolateRequest {
+                    isolate_id: IsolateId::new(binary_services_index),
+                    current_data_scope_type: DataScopeType::Public,
+                    allowed_data_scope_type: strictest_scope,
+                })
+                .await?;
             }
         }
         Ok(())
@@ -507,22 +519,26 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
         }
     }
 
-    async fn add_new_isolate(
-        &self,
-        binary_services_index: BinaryServicesIndex,
-        container_startup_args: ContainerStartupArgs,
-    ) -> Result<()> {
-        let isolate_id = IsolateId::new(binary_services_index);
+    async fn add_new_isolate(&self, request: AddIsolateRequest) -> Result<()> {
+        let binary_services_index = request.isolate_id.get_binary_services_index();
+        let container_startup_args_ref = self
+            .container_startup_args_map
+            .get(&binary_services_index)
+            .context("IsolateManager received unrecognized IsolateServiceIndex")?;
+        let container_startup_args = container_startup_args_ref.value().clone();
+        drop(container_startup_args_ref); // drop ref to minimize contention for DashMap
+
+        let isolate_id = request.isolate_id;
         log::info!("adding isolate: {isolate_id:?}");
         let root_dir =
-            tempfile::Builder::new().prefix(&container_startup_args.root_dir_name).tempdir()?;
+            tempfile::Builder::new().prefix(&container_startup_args.publisher_id).tempdir()?;
         let root = Arc::clone(&container_startup_args.shared_root);
         // Check that DEV_SHM_PATH exists and is a directory.
         if !std::path::Path::new(DEV_SHM_PATH).is_dir() {
             anyhow::bail!("directory not found: {}", DEV_SHM_PATH);
         }
         let sharing_dir = tempfile::Builder::new()
-            .prefix(&container_startup_args.root_dir_name)
+            .prefix(&container_startup_args.publisher_id)
             .tempdir_in(DEV_SHM_PATH)?;
         log::info!("sharing_dir: {sharing_dir:?}");
         let mut container = ContainerT::new(ContainerRoot::ReadOnlyRoot(root))?;
@@ -533,7 +549,8 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             get_isolate_ez_bridge_enforcer_side_uds_path(&sharing_dir);
         let isolate_ez_bridge_ready_enforcer_side_fifo_path =
             get_isolate_ez_bridge_ready_enforcer_side_fifo_path(&sharing_dir);
-
+        let otlp_metrics_enforcer_side_uds_path =
+            get_otlp_metrics_enforcer_side_uds_path(&sharing_dir);
         let mut mounts = vec![MountOptions {
             source: sharing_dir.path().to_path_buf(),
             destination: PathBuf::from(SHARING_DIR_NAME),
@@ -550,12 +567,24 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             }
         }
 
+        #[cfg(feature = "debug")]
+        {
+            if let Some(ref endpoint) = self.otel_traces_endpoint {
+                if let Some(source_path) = extract_unix_path(endpoint) {
+                    mounts.push(MountOptions {
+                        source: source_path,
+                        destination: PathBuf::from(SHARING_DIR_NAME).join(OTEL_TRACES_UDS),
+                    });
+                }
+            }
+        }
+
         // Create a fifo that the Isolate will block on until the EZ server is ready.
         mkfifo(isolate_ez_bridge_ready_enforcer_side_fifo_path.as_str(), Mode::S_IRWXU)?;
 
         let opts = ContainerOptions {
             name: isolate_id.to_string(),
-            binary_filename: container_startup_args.binary_filename,
+            binary_filename: container_startup_args.binary_filename.clone(),
             command_line_arguments: container_startup_args.command_line_args,
             mounts,
             env: container_startup_args.env_vars,
@@ -566,21 +595,27 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             },
             #[cfg(not(feature = "disable_netns"))]
             network: NetworkOptions::default(),
+            run_isolate_as_unprivileged: container_startup_args.run_isolate_as_unprivileged,
         };
+        self.isolate_ez_service_mngr
+            .start_isolate_ez_server(isolate_ez_service_manager::StartIsolateEzServerArgs {
+                isolate_id,
+                isolate_address: isolate_ez_bridge_enforcer_side_uds_path.clone(),
+                isolate_fifo_path: isolate_ez_bridge_ready_enforcer_side_fifo_path,
+                otel_metrics_address: otlp_metrics_enforcer_side_uds_path,
+                metrics_policy: container_startup_args.metrics_policy,
+                isolate_name: container_startup_args.binary_filename.clone(),
+                publisher_id: container_startup_args.publisher_id,
+            })
+            .await;
+
         container.start(&opts).await?;
 
         self.isolate_container_map.insert(
             isolate_id,
             IsolateContainer { container, _root_dir: root_dir, _sharing_dir: sharing_dir },
         );
-        self.add_isolate_to_state_mngr(isolate_id, container_startup_args.strictest_scope).await?;
-        self.isolate_ez_service_mngr
-            .start_isolate_ez_server(
-                isolate_id,
-                isolate_ez_bridge_enforcer_side_uds_path,
-                isolate_ez_bridge_ready_enforcer_side_fifo_path,
-            )
-            .await;
+        self.add_isolate_to_state_mngr(isolate_id, request.allowed_data_scope_type).await?;
         self.add_isolate_to_junction(isolate_id, ez_isolate_bridge_enforcer_side_uds_path)
             .await
             .context("IsolateJunction addIsolate failed")?;
@@ -629,7 +664,7 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
         self.state_manager
             .remove_isolate(RemoveIsolateRequest { isolate_id: reset_isolate_req.isolate_id })
             .await?;
-        self.isolate_ez_service_mngr.stop_isolate_ez_server(reset_isolate_req.isolate_id).await;
+        self.isolate_ez_service_mngr.stop_isolate_servers(reset_isolate_req.isolate_id).await;
         let _ = self.shared_mem_manager.remove_isolate(reset_isolate_req.isolate_id).await;
         let _ = self.fileshare_manager.remove_isolate(reset_isolate_req.isolate_id).await;
 
@@ -643,7 +678,12 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
         // Since the container has stopped, the Isolate's client is dead and won't receive this
         // response in a real scenario. However, Container Manager tests use this response to
         // synchronize and wait for the new container and its Isolate EZ Server to start.
-        self.add_new_isolate(binary_services_index, container_startup_args).await?;
+        self.add_new_isolate(AddIsolateRequest {
+            isolate_id: IsolateId::new(binary_services_index),
+            current_data_scope_type: DataScopeType::Public,
+            allowed_data_scope_type: container_startup_args.strictest_scope,
+        })
+        .await?;
         Ok(ResetIsolateResponse {})
     }
 
@@ -770,6 +810,10 @@ fn get_isolate_ez_bridge_ready_enforcer_side_fifo_path(sharing_dir: &TempDir) ->
     sharing_dir.path().join(ISOLATE_EZ_BRIDGE_ENFORCER_UDS_READY).display().to_string()
 }
 
+fn get_otlp_metrics_enforcer_side_uds_path(sharing_dir: &TempDir) -> String {
+    sharing_dir.path().join(OTLP_METRICS_UDS).display().to_string()
+}
+
 fn get_file_mount_enforcer_path(enforcer_file_name: &str) -> String {
     std::path::Path::new(DEV_SHM_PATH).join(enforcer_file_name).display().to_string()
 }
@@ -789,4 +833,14 @@ fn get_etc_hosts_path(publisher_id: &str, binary_filename: &str) -> PathBuf {
         "isolate_etc_hosts/{}_{}/etc/hosts",
         sanitized_publisher_id, sanitized_binary_filename
     )))
+}
+
+#[cfg(feature = "debug")]
+fn extract_unix_path(endpoint: &str) -> Option<PathBuf> {
+    endpoint.strip_prefix("unix:").map(|mut path| {
+        while path.starts_with("//") {
+            path = &path[1..];
+        }
+        PathBuf::from(path)
+    })
 }

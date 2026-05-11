@@ -42,7 +42,9 @@ use isolate_info::{BinaryServicesIndex, IsolateId, IsolateServiceIndex, IsolateS
 use isolate_service_mapper::IsolateServiceMapper;
 use junction_test_utils::FakeJunction;
 use manifest_proto::enforcer::v1::IsolateRuntimeConfigs;
-use payload_proto::enforcer::v1::EzPayloadData;
+use payload_proto::enforcer::v1::{
+    ez_hybrid_payload::DeliveryMethod, EzHybridPayload, EzPayloadData,
+};
 use shared_memory_manager::SharedMemManager;
 use simple_tonic_stream::SimpleStreamingWrapper;
 use state_manager::{IsolateStateManager, IsolateStateManagerError};
@@ -68,6 +70,9 @@ const JSON_MANIFEST_PATH_WRONG_DOMAIN: &str =
     "enforcer/container/manager/test/testdata/test_manifest_wrong_domain.json";
 const JSON_MANIFEST_PATH_INTERCEPTOR: &str =
     "enforcer/container/manager/test/testdata/test_manifest_interceptor.json";
+const LOCALHOST_OTLP_ENDPOINT: &str = "http://localhost:4317";
+const JSON_MANIFEST_PATH_OTEL: &str =
+    "enforcer/container/manager/test/testdata/test_manifest_otel.json";
 
 // The following constants are from the test manifests.
 // From test_manifest_one_isolate.json
@@ -108,6 +113,7 @@ impl TestHarness {
     async fn new(
         manifest_path: &str,
         isolate_runtime_configs: &IsolateRuntimeConfigs,
+        otel_endpoint: Option<String>,
     ) -> Result<Self> {
         // Clear the tracker for test isolation.
         FakeContainer::clear_tracker();
@@ -142,6 +148,8 @@ impl TestHarness {
                 ez_to_ez_outbound_handler: None,
                 max_decoding_message_size: MAX_DECODING_SIZE,
                 interceptor: interceptor.clone(),
+                otel_endpoint: otel_endpoint.clone(),
+                disable_metrics_filtering: false,
             });
 
         let container_manager_args = ContainerManagerArgs {
@@ -158,6 +166,8 @@ impl TestHarness {
             max_decoding_message_size: MAX_DECODING_SIZE,
             isolate_runtime_configs: isolate_runtime_configs.clone(),
             interceptor: interceptor.clone(),
+            otel_traces_endpoint: None,
+            run_isolate_as_unprivileged: false,
         };
 
         let container_manager = ContainerManager::<FakeContainer>::start(container_manager_args)
@@ -196,7 +206,7 @@ impl TestHarness {
             .iter()
             .for_each(|entry| isolate_ids.push(*entry.key()));
         for isolate_id in isolate_ids.iter() {
-            self.isolate_ez_service_manager.stop_isolate_ez_server(*isolate_id).await
+            self.isolate_ez_service_manager.stop_isolate_servers(*isolate_id).await
         }
         self.container_manager.stop().await;
     }
@@ -210,10 +220,13 @@ impl TestHarness {
 // 5. The ContainerManager correctly tracks the state of the Isolate.
 #[tokio::test]
 async fn test_start_one_isolate() {
-    let mut harness =
-        TestHarness::new(JSON_MANIFEST_PATH_ONE_ISOLATE, &IsolateRuntimeConfigs::default())
-            .await
-            .expect("TestHarness::new should succeed");
+    let mut harness = TestHarness::new(
+        JSON_MANIFEST_PATH_ONE_ISOLATE,
+        &IsolateRuntimeConfigs::default(),
+        /* otel_endpoint= */ None,
+    )
+    .await
+    .expect("TestHarness::new should succeed");
 
     let isolate_and_uds_vec =
         check_container_started(vec![HELLOWORLD_BINARY]).await.expect("Container should start");
@@ -301,10 +314,13 @@ async fn test_start_one_isolate() {
 // 5. The mounted read-only file also has the correct paths.
 #[tokio::test]
 async fn test_mount_files() {
-    let mut harness =
-        TestHarness::new(JSON_MANIFEST_PATH_ONE_ISOLATE, &IsolateRuntimeConfigs::default())
-            .await
-            .expect("TestHarness::new should succeed");
+    let mut harness = TestHarness::new(
+        JSON_MANIFEST_PATH_ONE_ISOLATE,
+        &IsolateRuntimeConfigs::default(),
+        /* otel_endpoint= */ None,
+    )
+    .await
+    .expect("TestHarness::new should succeed");
 
     let isolate_and_uds_vec =
         check_container_started(vec![HELLOWORLD_BINARY]).await.expect("Container should start");
@@ -381,10 +397,13 @@ async fn test_mount_files() {
 // 8. State related to the old Isolate (e.g., in SharedMemManager) is cleaned up.
 #[tokio::test]
 async fn test_isolate_reset() {
-    let mut harness =
-        TestHarness::new(JSON_MANIFEST_PATH_MULTIPLE_ISOLATE, &IsolateRuntimeConfigs::default())
-            .await
-            .expect("TestHarness::new should succeed");
+    let mut harness = TestHarness::new(
+        JSON_MANIFEST_PATH_MULTIPLE_ISOLATE,
+        &IsolateRuntimeConfigs::default(),
+        /* otel_endpoint= */ None,
+    )
+    .await
+    .expect("TestHarness::new should succeed");
 
     let isolate_and_uds_vec =
         check_container_started(vec![SUMMATION_BINARY, PRECOMPUTED_BACKEND_BINARY])
@@ -540,9 +559,10 @@ async fn test_start_one_isolate_with_override() {
             etc_hosts: etc_hosts.to_string(),
         }],
     };
-    let mut harness = TestHarness::new(JSON_MANIFEST_PATH_ONE_ISOLATE, &configs)
-        .await
-        .expect("TestHarness::new should succeed");
+    let mut harness =
+        TestHarness::new(JSON_MANIFEST_PATH_ONE_ISOLATE, &configs, /* otel_endpoint= */ None)
+            .await
+            .expect("TestHarness::new should succeed");
 
     let isolate_and_uds_vec =
         check_container_started(vec![HELLOWORLD_BINARY]).await.expect("Container should start");
@@ -586,10 +606,13 @@ async fn test_start_one_isolate_with_override() {
 // 4. Manifest-defined data scopes are correctly validated.
 #[tokio::test]
 async fn test_ratified_isolate() {
-    let mut harness =
-        TestHarness::new(JSON_MANIFEST_PATH_RATIFIED_ISOLATE, &IsolateRuntimeConfigs::default())
-            .await
-            .expect("TestHarness::new should succeed");
+    let mut harness = TestHarness::new(
+        JSON_MANIFEST_PATH_RATIFIED_ISOLATE,
+        &IsolateRuntimeConfigs::default(),
+        /* otel_endpoint= */ None,
+    )
+    .await
+    .expect("TestHarness::new should succeed");
 
     let isolate_and_uds_vec =
         check_container_started(vec![HELLOWORLD_BINARY]).await.expect("Container should start");
@@ -674,9 +697,13 @@ async fn test_ratified_isolate() {
 
 #[tokio::test]
 async fn test_ratified_isolate_wrong_domain_manifest() {
-    let _ = TestHarness::new(JSON_MANIFEST_PATH_WRONG_DOMAIN, &IsolateRuntimeConfigs::default())
-        .await
-        .expect_err("TestHarness::new should fail");
+    let _ = TestHarness::new(
+        JSON_MANIFEST_PATH_WRONG_DOMAIN,
+        &IsolateRuntimeConfigs::default(),
+        /* otel_endpoint= */ None,
+    )
+    .await
+    .expect_err("TestHarness::new should fail");
 }
 
 // This test verifies that backend dependencies declared in the manifest are correctly processed and enforced. It checks that:
@@ -686,10 +713,13 @@ async fn test_ratified_isolate_wrong_domain_manifest() {
 // 4. A call to `validate_backend_dependency` fails for a dependency that is not listed in the manifest.
 #[tokio::test]
 async fn test_backend_dependencies() {
-    let mut harness =
-        TestHarness::new(JSON_MANIFEST_PATH_MULTIPLE_ISOLATE, &IsolateRuntimeConfigs::default())
-            .await
-            .expect("TestHarness::new should succeed");
+    let mut harness = TestHarness::new(
+        JSON_MANIFEST_PATH_MULTIPLE_ISOLATE,
+        &IsolateRuntimeConfigs::default(),
+        /* otel_endpoint= */ None,
+    )
+    .await
+    .expect("TestHarness::new should succeed");
 
     // Wait for containers to start
     let isolate_and_uds_vec =
@@ -775,10 +805,13 @@ async fn test_backend_dependencies() {
 
 #[tokio::test]
 async fn test_interceptor() {
-    let mut harness =
-        TestHarness::new(JSON_MANIFEST_PATH_INTERCEPTOR, &IsolateRuntimeConfigs::default())
-            .await
-            .expect("TestHarness::new should succeed");
+    let mut harness = TestHarness::new(
+        JSON_MANIFEST_PATH_INTERCEPTOR,
+        &IsolateRuntimeConfigs::default(),
+        /* otel_endpoint= */ None,
+    )
+    .await
+    .expect("TestHarness::new should succeed");
 
     // Wait for containers to start
     let isolate_and_uds_vec =
@@ -903,8 +936,10 @@ fn create_random_request(isolate_service_info: &IsolateServiceInfo) -> InvokeEzR
                 mapped_scope_owner: None,
             }],
         }),
-        isolate_request_payload: Some(EzPayloadData {
-            datagrams: vec![random_request_data.to_vec()],
+        isolate_request_payload: Some(EzHybridPayload {
+            delivery_method: Some(DeliveryMethod::InlineData(EzPayloadData {
+                datagrams: vec![random_request_data.to_vec()],
+            })),
         }),
     }
 }
@@ -1102,4 +1137,77 @@ fn create_call_request_for_interceptor() -> CallRequest {
         method_name: "StreamingIntegerSequence".to_string(),
         ..Default::default()
     }
+}
+#[tokio::test]
+async fn test_otel_endpoint_http() {
+    let mut harness = TestHarness::new(
+        JSON_MANIFEST_PATH_OTEL,
+        &IsolateRuntimeConfigs::default(),
+        /* otel_endpoint= */ Some(LOCALHOST_OTLP_ENDPOINT.to_string()),
+    )
+    .await
+    .expect("TestHarness::new should succeed");
+
+    let isolate_and_uds_vec =
+        check_container_started(vec![HELLOWORLD_BINARY]).await.expect("Container should start");
+
+    let fake_container_id = isolate_and_uds_vec[0].0;
+    let tracker = FakeContainer::get_tracker();
+    let container_data = tracker.get(&fake_container_id).unwrap();
+
+    let isolate_ez_bridge_enforcer_side_uds_path =
+        container_data.isolate_ez_bridge_enforcer_side_uds_path.clone().unwrap();
+    let _ = notify_isolate_ready(isolate_ez_bridge_enforcer_side_uds_path).await;
+    assert!(!container_data
+        .boot_mounts
+        .iter()
+        .any(|m| m.destination.to_string_lossy() == "/otlp_safe_metrics.sock"));
+    drop(container_data);
+    drop(tracker);
+
+    harness.stop().await;
+    ensure_isolate_stopped(fake_container_id).await.expect("Container should stop");
+}
+
+#[tokio::test]
+async fn test_otel_endpoint_unix() {
+    test_otel_endpoint_unix_variant("unix:").await;
+}
+
+#[tokio::test]
+async fn test_otel_endpoint_unix_slash_slash() {
+    test_otel_endpoint_unix_variant("unix://").await;
+}
+
+async fn test_otel_endpoint_unix_variant(endpoint_val: &str) {
+    let mut harness = TestHarness::new(
+        JSON_MANIFEST_PATH_OTEL,
+        &IsolateRuntimeConfigs::default(),
+        /* otel_endpoint= */ Some(endpoint_val.to_string()),
+    )
+    .await
+    .expect("TestHarness::new should succeed");
+
+    let isolate_and_uds_vec =
+        check_container_started(vec![HELLOWORLD_BINARY]).await.expect("Container should start");
+
+    let fake_container_id = isolate_and_uds_vec[0].0;
+    let tracker = FakeContainer::get_tracker();
+    let container_data = tracker.get(&fake_container_id).unwrap();
+
+    let isolate_ez_bridge_enforcer_side_uds_path =
+        container_data.isolate_ez_bridge_enforcer_side_uds_path.clone().unwrap();
+    let _ = notify_isolate_ready(isolate_ez_bridge_enforcer_side_uds_path).await;
+
+    // Now it always sets it if Some
+
+    assert!(!container_data
+        .boot_mounts
+        .iter()
+        .any(|m| m.destination.to_string_lossy() == "/otlp_safe_metrics.sock"));
+    drop(container_data);
+    drop(tracker);
+
+    harness.stop().await;
+    ensure_isolate_stopped(fake_container_id).await.expect("Container should stop");
 }

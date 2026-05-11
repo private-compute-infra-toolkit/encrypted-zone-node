@@ -25,10 +25,12 @@ rust_binary(
     deps = [
         "@crates//:anyhow",
         "@crates//:clap",
+        "@crates//:libc",
         "@crates//:memmap2",
         "@crates//:ping",
         "@crates//:rand",
         "@crates//:sha2",
+        "@crates//:users",
     ],
 )
 

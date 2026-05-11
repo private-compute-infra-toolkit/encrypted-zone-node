@@ -98,6 +98,7 @@ async fn verify_write(bundle_path: &str) -> anyhow::Result<(NamedTempFile, Vec<u
         }],
         network: NetworkOptions::default(),
         env: vec![],
+        run_isolate_as_unprivileged: false,
     };
     container.start(&opts).await?;
 
@@ -137,6 +138,7 @@ async fn verify_read(bundle_path: &str, file: &NamedTempFile) -> anyhow::Result<
         }],
         network: NetworkOptions::default(),
         env: vec![],
+        run_isolate_as_unprivileged: false,
     };
     container.start(&opts).await?;
 
@@ -175,6 +177,7 @@ async fn verify_read_only(bundle_path: &str, file: &NamedTempFile) -> anyhow::Re
         }],
         network: NetworkOptions::default(),
         env: vec![],
+        run_isolate_as_unprivileged: false,
     };
     container.start(&opts).await?;
 

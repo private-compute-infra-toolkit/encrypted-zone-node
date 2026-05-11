@@ -14,7 +14,6 @@
 
 load("@com_google_protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
 load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
-load("@com_google_protobuf//bazel:py_proto_library.bzl", "py_proto_library")
 load("@rules_buf//buf:defs.bzl", "buf_lint_test")
 load("@rules_pkg//pkg:mappings.bzl", "pkg_attributes", "pkg_files")
 load("@rules_proto//proto:defs.bzl", "proto_descriptor_set")
@@ -106,6 +105,7 @@ proto_library(
     name = "payload_proto",
     srcs = [
         "ez_payload.proto",
+        "ez_shm_payload.proto",
     ],
     visibility = ["//visibility:public"],
     deps = [
@@ -231,43 +231,6 @@ pkg_files(
     attributes = pkg_attributes(mode = "0400"),
     prefix = "/enforcer/proto/v1",
     visibility = ["//visibility:public"],
-)
-
-proto_library(
-    name = "options_proto",
-    srcs = ["options.proto"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":data_scope_proto",
-        "@com_google_protobuf//:descriptor_proto",
-    ],
-)
-
-cc_proto_library(
-    name = "options_cc_proto",
-    visibility = ["//visibility:public"],
-    deps = [":options_proto"],
-)
-
-py_proto_library(
-    name = "options_py_proto",
-    visibility = ["//visibility:public"],
-    deps = [":options_proto"],
-)
-
-buf_lint_test(
-    name = "options_lint",
-    size = "small",
-    config = ":buf.yaml",
-    targets = [":options_proto"],
-)
-
-proto_descriptor_set(
-    name = "options_descriptor_set",
-    visibility = ["//visibility:public"],
-    deps = [
-        ":options_proto",
-    ],
 )
 
 proto_library(

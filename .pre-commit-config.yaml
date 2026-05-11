@@ -63,6 +63,12 @@ repos:
 
   - repo: local
     hooks:
+      - id: gitlinks
+        name: Check gitlinks
+        language: script
+        entry: devkit/gitlinks --check
+        always_run: true
+        pass_filenames: false
       - id: addlicense
         name: addlicense
         language: golang
@@ -73,7 +79,21 @@ repos:
         entry: addlicense -v
         types_or:
           - text
-
+      - id: buildifier
+        name: buildifier
+        description: Format bazel WORKSPACE, BUILD and .bzl files with a standard convention.
+        language: golang
+        additional_dependencies:
+          - github.com/bazelbuild/buildtools/buildifier@6.1.1
+        always_run: true
+        pass_filenames: true
+        types_or:
+          - bazel
+        entry: buildifier
+        args:
+          - -lint=fix
+          - -mode=fix
+          - -warnings=all
       - id: addlicense-check
         name: addlicense check
         language: golang
@@ -84,6 +104,14 @@ repos:
         entry: addlicense -check
         types_or:
           - text
+      - id: docker-rustfmt
+        name: rustfmt (docker)
+        language: docker_image
+        require_serial: true
+        verbose: true
+        entry: rust:1.93.0-slim-bookworm bash -c 'rustup component add rustfmt 2>/dev/null && rustfmt "$@"' --
+        types: [rust]
+        args: ['--edition', '2021']
 
   - repo: https://github.com/pre-commit/mirrors-prettier
     rev: v3.1.0
@@ -111,24 +139,6 @@ repos:
           - -c
           - .markdown-link-check.json
 
-  - repo: local
-    hooks:
-      - id: buildifier
-        name: buildifier
-        description: Format bazel WORKSPACE, BUILD and .bzl files with a standard convention.
-        language: golang
-        additional_dependencies:
-          - github.com/bazelbuild/buildtools/buildifier@6.1.1
-        always_run: true
-        pass_filenames: true
-        types_or:
-          - bazel
-        entry: buildifier
-        args:
-          - -lint=fix
-          - -mode=fix
-          - -warnings=all
-
   - repo: https://github.com/cpplint/cpplint
     rev: 1.6.1
     hooks:
@@ -144,14 +154,3 @@ repos:
     rev: v2.4.1
     hooks:
       - id: codespell
-
-  - repo: local
-    hooks:
-      - id: docker-rustfmt
-        name: rustfmt (docker)
-        language: docker_image
-        require_serial: true
-        verbose: true
-        entry: rust:1.93.0-slim-bookworm bash -c 'rustup component add rustfmt 2>/dev/null && rustfmt "$@"' --
-        types: [rust]
-        args: ['--edition', '2021']

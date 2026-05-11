@@ -34,7 +34,6 @@ message GetDiagnosticRequest {
 // Specification for a CPU profile.
 message CpuProfileSpec {
   // Duration for the CPU profile collection in seconds. Must be at least 1.
-  // TODO: b/491741154 - Find a better way of expressing Duration.
   int64 duration_seconds = 1;
 }
 

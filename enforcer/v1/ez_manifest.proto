@@ -120,9 +120,7 @@ message AllowedMetric {
   }
   // The type of the metric being defined.
   MetricType type = 2;
-  // A list of attribute keys (labels) allowed for this metric.
-  // Attributes not in this list will be stripped from the exported metric.
-  repeated string allowed_attributes = 3;
+  reserved 3;
 }
 
 // Describes a service implemented in the binary, to run as an EZ Isolate.

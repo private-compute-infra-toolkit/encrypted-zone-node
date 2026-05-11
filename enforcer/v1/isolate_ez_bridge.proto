@@ -69,15 +69,17 @@ service IsolateEzBridge {
 }
 
 message InvokeEzRequest {
+  reserved 3;
   ControlPlaneMetadata control_plane_metadata = 1;
   EzPayloadIsolateScope isolate_request_iscope = 2;
-  EzPayloadData isolate_request_payload = 3;
+  EzHybridPayload isolate_request_payload = 4;
 }
 
 message InvokeEzResponse {
+  reserved 3;
   ControlPlaneMetadata control_plane_metadata = 1;
   EzPayloadIsolateScope ez_response_iscope = 2;
-  EzPayloadData ez_response_payload = 3;
+  EzHybridPayload ez_response_payload = 4;
 }
 
 message CreateMemshareRequest {

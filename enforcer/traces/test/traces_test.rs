@@ -27,7 +27,9 @@ async fn test_trace_export() {
     // Note: setup_telemetry sets the global tracing subscriber.
     // This means this test can only be run once per process and cannot run in parallel
     // with other tests that set the global subscriber.
-    let provider = setup_telemetry(&endpoint, &None).await.expect("Failed to setup telemetry");
+    let provider = setup_telemetry(traces::ENFORCER_SERVICE_NAME, &endpoint, &None)
+        .await
+        .expect("Failed to setup telemetry");
 
     // 3. Generate Traces
     {

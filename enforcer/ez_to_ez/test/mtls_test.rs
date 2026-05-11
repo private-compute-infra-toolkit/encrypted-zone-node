@@ -17,12 +17,19 @@ use ez_mtls_proto::enforcer::v1::{
     GetCertificateRequest, GetCertificateResponse, ReportSniRequest, ReportSniResponse,
 };
 use manifest_proto::enforcer::v1::EzManifest;
-use mtls::mtls::{sni, EzMtlsManager, EzToEzPolicy, SpiffeUri};
-use std::collections::HashSet;
+use mtls::mtls::{sni, EzMtlsManager, SpiffeUri};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
+
+use enforcer_proto::enforcer::v1::ControlPlaneMetadata;
+use metrics_test_utils::TestMetrics;
+use outbound_ez_to_ez_client::OutboundEzToEzClient;
+use outbound_ez_to_ez_handler::{OutboundEzToEzHandler, OutboundTlsConfig};
+use payload_proto::enforcer::v1::{
+    ez_hybrid_payload::DeliveryMethod, EzHybridPayload, EzPayloadData,
+};
 
 #[test]
 fn test_sni() {
@@ -96,18 +103,21 @@ async fn test_connect_ez_mtls() {
         publisher_id: "test-publisher".to_string(),
         ..Default::default()
     };
-    let policy = std::sync::Arc::new(EzToEzPolicy {
-        allowed_trust_domains: HashSet::new(),
-        allowed_operator_domains: HashSet::new(),
-        allowed_publisher_ids: HashSet::new(),
-        allowed_workload_names: HashSet::new(),
-    });
+    let config = mtls::mtls::EzMtlsManagerConfig {
+        mtls_key_path: key_path,
+        csr_path,
+        proxy_address: server_addr,
+        ez_manifest,
+    };
+    let manager_result = EzMtlsManager::build(config).await;
+    assert!(
+        manager_result.is_ok(),
+        "Failed to connect to mock mTLS service: {:?}",
+        manager_result.err()
+    );
+    let manager = manager_result.unwrap();
 
-    let result = EzMtlsManager::create(key_path, csr_path, server_addr, &ez_manifest, policy).await;
-    assert!(result.is_ok(), "Failed to connect to mock mTLS service: {:?}", result.err());
-    let manager = result.unwrap();
-
-    let fetch_result = manager.fetch_certificate(vec![1, 2, 3]).await;
+    let fetch_result = manager.fetch_certificate().await;
     assert!(fetch_result.is_ok(), "Failed to fetch certificate");
 
     let report_result = manager.report_snis(vec!["test-sni".to_string()]).await;
@@ -152,34 +162,6 @@ fn test_parse_spiffe_uri_invalid() {
     );
 }
 
-#[test]
-fn test_spiffe_policy_verify() {
-    let policy = EzToEzPolicy {
-        allowed_trust_domains: HashSet::from(["allow.trust".to_string()]),
-        allowed_operator_domains: HashSet::from(["allow.operator".to_string()]),
-        allowed_publisher_ids: HashSet::from(["allow.publisher".to_string()]),
-        allowed_workload_names: HashSet::from(["allow.workload".to_string()]),
-    };
-
-    let valid_uri = SpiffeUri {
-        trust_domain: "allow.trust".to_string(),
-        operator_domain: "allow.operator".to_string(),
-        publisher_id: "allow.publisher".to_string(),
-        workload_name: "allow.workload".to_string(),
-    };
-
-    assert!(policy.verify(&valid_uri));
-
-    let invalid_uri = SpiffeUri {
-        trust_domain: "deny.trust".to_string(),
-        operator_domain: "allow.operator".to_string(),
-        publisher_id: "allow.publisher".to_string(),
-        workload_name: "allow.workload".to_string(),
-    };
-
-    assert!(!policy.verify(&invalid_uri));
-}
-
 /// Tests the end-to-end mTLS handshake between a simulated server and client.
 /// It spawns a mock `EzMtlsService` to obtain test certificates, initializes
 /// `EzMtlsManager`s for both ends, and configures an `SslAcceptor` and `SslConnector`
@@ -210,35 +192,25 @@ async fn test_tls_acceptor_connector() {
         publisher_id: "release@google.com".to_string(),
         ..Default::default()
     };
-    let policy = std::sync::Arc::new(EzToEzPolicy {
-        allowed_trust_domains: HashSet::from(["avs.tca.fakeca".to_string()]),
-        allowed_operator_domains: HashSet::from([
-            "privacy-sandbox-dev-jobs@prod.google.com".to_string()
-        ]),
-        allowed_publisher_ids: HashSet::from(["release@google.com".to_string()]),
-        // TODO: /v/ will not be part of the SPIFFE ID. Will remove in next CLs.
-        allowed_workload_names: HashSet::from(["encrypted-zone/v/1.0.0".to_string()]),
-    });
-
-    let server_manager = EzMtlsManager::create(
-        key_path.clone(),
-        csr_path.clone(),
-        server_addr.clone(),
-        &ez_manifest,
-        policy.clone(),
-    )
-    .await
-    .expect("Failed to create server manager");
+    let config = mtls::mtls::EzMtlsManagerConfig {
+        mtls_key_path: key_path.clone(),
+        csr_path: csr_path.clone(),
+        proxy_address: server_addr.clone(),
+        ez_manifest,
+    };
+    let server_manager =
+        EzMtlsManager::build(config.clone()).await.expect("Failed to initialize server manager");
     let client_manager =
-        EzMtlsManager::create(key_path, csr_path, server_addr, &ez_manifest, policy.clone())
-            .await
-            .expect("Failed to create client manager");
+        EzMtlsManager::build(config).await.expect("Failed to initialize client manager");
 
     let acceptor =
         server_manager.create_tls_acceptor().await.expect("Failed to create TLS acceptor");
 
-    let connector =
-        client_manager.create_tls_connector().await.expect("Failed to create TLS connector");
+    let connector = client_manager
+        .get_connector_factory()
+        .create_connector(&client_manager.spiffe_identity().operator_domain)
+        .await
+        .expect("Failed to create TLS connector");
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -296,37 +268,28 @@ async fn test_boring_tls_stream_duplex() {
         ..Default::default()
     };
 
+    let config = mtls::mtls::EzMtlsManagerConfig {
+        mtls_key_path: key_path.clone(),
+        csr_path: csr_path.clone(),
+        proxy_address: server_addr.clone(),
+        ez_manifest,
+    };
     // Create a mTLS manager to fetch the certificates from the mock server and load certificates from testdata.
-    let policy = std::sync::Arc::new(EzToEzPolicy {
-        allowed_trust_domains: HashSet::from(["avs.tca.fakeca".to_string()]),
-        allowed_operator_domains: HashSet::from([
-            "privacy-sandbox-dev-jobs@prod.google.com".to_string()
-        ]),
-        allowed_publisher_ids: HashSet::from(["release@google.com".to_string()]),
-        allowed_workload_names: HashSet::from(["encrypted-zone/v/1.0.0".to_string()]),
-    });
-
-    let server_manager = EzMtlsManager::create(
-        key_path.clone(),
-        csr_path.clone(),
-        server_addr.clone(),
-        &ez_manifest,
-        policy.clone(),
-    )
-    .await
-    .expect("Failed to create server manager");
+    let server_manager =
+        EzMtlsManager::build(config.clone()).await.expect("Failed to initialize server manager");
 
     // Create a client side mTLS manager.
     let client_manager =
-        EzMtlsManager::create(key_path, csr_path, server_addr, &ez_manifest, policy.clone())
-            .await
-            .expect("Failed to create client manager");
+        EzMtlsManager::build(config).await.expect("Failed to initialize client manager");
 
     let acceptor =
         server_manager.create_tls_acceptor().await.expect("Failed to create TLS acceptor");
 
-    let connector =
-        client_manager.create_tls_connector().await.expect("Failed to create TLS connector");
+    let connector = client_manager
+        .get_connector_factory()
+        .create_connector(&client_manager.spiffe_identity().operator_domain)
+        .await
+        .expect("Failed to create TLS connector");
 
     // Use duplex stream to test SSL behavior on byte stream.
     let (client_stream, server_stream) = tokio::io::duplex(1024);
@@ -368,8 +331,22 @@ async fn test_boring_tls_stream_duplex() {
     let _ = tx.send(()); // Stop mock service
 }
 
-#[tokio::test]
-async fn test_tls_handshake_rejected_by_policy() {
+struct TestContext {
+    /// Keeps the temporary directory (and the UDS socket within it) alive.
+    _dir: tempfile::TempDir,
+    /// Sender to signal shutdown to the mock EzMtlsService.
+    mock_service_tx: tokio::sync::oneshot::Sender<()>,
+    /// Handle to the background task running the inbound server.
+    server_task: tokio::task::JoinHandle<()>,
+    /// Manager for the client's mTLS identities.
+    client_manager: EzMtlsManager,
+    /// The outbound handler instance used to make calls.
+    outbound_handler: OutboundEzToEzHandler<TestMetrics>,
+}
+
+/// Creates and initializes a complete test context, including the inbound server, mock service,
+/// and outbound handler, all configured for mTLS communication.
+async fn create_test_context() -> TestContext {
     let key_path = "enforcer/ez_to_ez/test/testdata/leaf.key".to_string();
     let csr_path = "enforcer/ez_to_ez/test/testdata/leaf.csr".to_string();
 
@@ -389,91 +366,215 @@ async fn test_tls_handshake_rejected_by_policy() {
             .unwrap();
     });
 
-    let ez_manifest = EzManifest {
+    let ez_manifest = manifest_proto::enforcer::v1::EzManifest {
         isolate_name: "encrypted-zone".to_string(),
         publisher_id: "release@google.com".to_string(),
         ..Default::default()
     };
 
-    let valid_policy = std::sync::Arc::new(EzToEzPolicy {
-        allowed_trust_domains: HashSet::from(["avs.tca.fakeca".to_string()]),
-        allowed_operator_domains: HashSet::from([
-            "privacy-sandbox-dev-jobs@prod.google.com".to_string()
-        ]),
-        allowed_publisher_ids: HashSet::from(["release@google.com".to_string()]),
-        allowed_workload_names: HashSet::from(["encrypted-zone/v/1.0.0".to_string()]),
-    });
+    let config = mtls::mtls::EzMtlsManagerConfig {
+        mtls_key_path: key_path.clone(),
+        csr_path: csr_path.clone(),
+        proxy_address: server_addr.clone(),
+        ez_manifest,
+    };
 
-    let invalid_policy = std::sync::Arc::new(EzToEzPolicy {
-        allowed_trust_domains: HashSet::from(["avs.tca.fakeca".to_string()]),
-        allowed_operator_domains: HashSet::from([
-            "privacy-sandbox-dev-jobs@prod.google.com".to_string()
-        ]),
-        allowed_publisher_ids: HashSet::from(["release@example.com".to_string()]),
-        allowed_workload_names: HashSet::from(["encrypted-zone/v/1.0.0".to_string()]),
-    });
+    let server_manager = EzMtlsManager::build(config.clone()).await.unwrap();
+    let client_manager = EzMtlsManager::build(config).await.unwrap();
 
-    // Server side policy is invalid, so the server should reject the client.
-    let server_manager = EzMtlsManager::create(
-        key_path.clone(),
-        csr_path.clone(),
-        server_addr.clone(),
-        &ez_manifest,
-        invalid_policy.clone(),
-    )
-    .await
-    .expect("Failed to create server manager");
+    let acceptor = server_manager.create_tls_acceptor().await.unwrap();
 
-    let client_manager = EzMtlsManager::create(
-        key_path.clone(),
-        csr_path.clone(),
-        server_addr,
-        &ez_manifest,
-        valid_policy.clone(),
-    )
-    .await
-    .expect("Failed to create client manager");
+    let dir = tempfile::tempdir().unwrap();
+    let socket_path = dir.path().join("test.sock");
+    let server_address = format!("unix:{}", socket_path.to_str().unwrap());
 
-    let acceptor =
-        server_manager.create_tls_acceptor().await.expect("Failed to create TLS acceptor");
+    let fake_junction = junction_test_utils::FakeJunction::default();
+    let handler =
+        inbound_ez_to_ez_handler::InboundEzToEzHandler::new(Box::new(fake_junction.clone()));
 
-    let connector =
-        client_manager.create_tls_connector().await.expect("Failed to create TLS connector");
+    let tls_config = inbound_ez_to_ez_handler::InboundTlsConfig {
+        acceptor,
+        handshake_timeout: std::time::Duration::from_secs(2),
+        max_concurrent_handshakes: 5,
+    };
 
-    let (client_stream, server_stream) = tokio::io::duplex(1024);
-
+    let server_addr_clone = server_address.clone();
     let server_task = tokio::spawn(async move {
-        let result = tokio_boring::accept(&acceptor, server_stream).await;
-        assert!(result.is_err(), "Server handshake should have failed");
-    });
-
-    let client_task = tokio::spawn(async move {
-        let result = tokio_boring::connect(
-            connector.configure().unwrap().verify_hostname(false),
-            "dummy-sni-value",
-            client_stream,
+        inbound_ez_to_ez_handler::launch_server(
+            handler,
+            &server_addr_clone,
+            4 * 1024 * 1024,
+            Some(tls_config),
         )
         .await;
-
-        match result {
-            Ok(mut stream) => {
-                // If connect returned Ok, try to read to detect that the server rejected us.
-                use tokio::io::AsyncReadExt;
-                let mut buf = [0u8; 128];
-                let read_result = stream.read(&mut buf).await;
-                assert!(
-                    read_result.is_err() || (read_result.is_ok() && read_result.unwrap() == 0),
-                    "Client should have failed to read due to server rejection"
-                );
-            }
-            Err(_) => {
-                // Client handshake failed directly, which is also fine.
-            }
-        }
     });
 
-    let (server_result, client_result) = tokio::join!(server_task, client_task);
-    server_result.expect("Server task panicked");
-    client_result.expect("Client task panicked");
-    let _ = tx.send(());
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let outbound_tls_config = OutboundTlsConfig {
+        factory: client_manager.get_connector_factory(),
+        trust_domain: client_manager.spiffe_identity().trust_domain.clone(),
+    };
+
+    let outbound_handler = OutboundEzToEzHandler::new(
+        server_address.clone(),
+        TestMetrics::default(),
+        Some(outbound_tls_config),
+    )
+    .await
+    .unwrap();
+
+    TestContext { _dir: dir, mock_service_tx: tx, server_task, client_manager, outbound_handler }
+}
+
+/// Tests the full e2e flow between OutboundEzToEzHandler and InboundEzToEzHandler over mTLS.
+/// It verifies that:
+/// 1. The outbound handler correctly creates a TLS connection using the TlsConnectorFactory.
+/// 2. The inbound server correctly accepts the TLS connection using InboundTlsConfig.
+/// 3. A gRPC call can be made over the established mTLS connection.
+///
+/// This test will fail if:
+/// 1. The TLS handshake fails (e.g. certs don't match, trust domain mismatch).
+/// 2. The gRPC call fails (e.g. protocol error, timeout).
+/// 3. The response payload does not match the request payload.
+#[tokio::test]
+async fn test_e2e_mtls() {
+    let ctx = create_test_context().await;
+
+    let meta = ControlPlaneMetadata {
+        destination_operator_domain: ctx.client_manager.spiffe_identity().operator_domain.clone(),
+        ..Default::default()
+    };
+
+    let request = enforcer_proto::enforcer::v1::InvokeEzRequest {
+        control_plane_metadata: Some(meta.clone()),
+        isolate_request_payload: Some(EzHybridPayload {
+            delivery_method: Some(DeliveryMethod::InlineData(EzPayloadData {
+                datagrams: vec![b"hello world".to_vec()],
+            })),
+        }),
+        ..Default::default()
+    };
+
+    let response = ctx.outbound_handler.remote_invoke(request, None).await;
+
+    assert!(response.is_ok(), "Remote invoke failed: {:?}", response.err());
+    let response = response.unwrap();
+    let output_payload = match response.ez_response_payload.unwrap().delivery_method.unwrap() {
+        DeliveryMethod::InlineData(inline) => inline.datagrams[0].clone(),
+        _ => panic!("Expected InlineData"),
+    };
+    assert_eq!(output_payload, b"hello world");
+    let _ = ctx.mock_service_tx.send(()); // Stop mock service
+    ctx.server_task.abort(); // Stop server task
+}
+
+/// Tests the streaming invoke flow between OutboundEzToEzHandler and InboundEzToEzHandler over mTLS.
+#[tokio::test]
+async fn test_e2e_mtls_streaming() {
+    let ctx = create_test_context().await;
+
+    let meta = ControlPlaneMetadata {
+        destination_operator_domain: ctx.client_manager.spiffe_identity().operator_domain.clone(),
+        ..Default::default()
+    };
+
+    let (req_tx, req_rx) = tokio::sync::mpsc::channel(10);
+    let mut res_rx =
+        ctx.outbound_handler.remote_streaming_connect(Some(&meta), req_rx).await.unwrap();
+
+    let stream_request = enforcer_proto::enforcer::v1::InvokeEzRequest {
+        control_plane_metadata: Some(meta),
+        isolate_request_payload: Some(EzHybridPayload {
+            delivery_method: Some(DeliveryMethod::InlineData(EzPayloadData {
+                datagrams: vec![b"hello streaming".to_vec()],
+            })),
+        }),
+        ..Default::default()
+    };
+
+    req_tx.send(stream_request).await.unwrap();
+    let response = res_rx.recv().await.unwrap().unwrap();
+    let output_payload = match response.ez_response_payload.unwrap().delivery_method.unwrap() {
+        DeliveryMethod::InlineData(inline) => inline.datagrams[0].clone(),
+        _ => panic!("Expected InlineData"),
+    };
+    assert_eq!(output_payload, b"hello streaming");
+
+    let _ = ctx.mock_service_tx.send(()); // Stop mock service
+    ctx.server_task.abort(); // Stop server task
+}
+
+/// Tests that the outbound handler fails to connect when the peer identity does not match the expected identity.
+/// This verifies that SPIFFE identity verification is working.
+#[tokio::test]
+async fn test_e2e_mtls_wrong_identity() {
+    // Set retry count to 1 to fail fast in test
+    std::env::set_var("PROXY_CONNECT_RETRY_COUNT", "1");
+
+    let ctx = create_test_context().await;
+
+    // The server side doesn't have "wrong_domain" as its operator domain in SPIFFE ID.
+    // The server returned certificate must match the outbound request destination_operator_domain.
+    let meta = ControlPlaneMetadata {
+        destination_operator_domain: "wrong_domain".to_string(),
+        ..Default::default()
+    };
+
+    let request = enforcer_proto::enforcer::v1::InvokeEzRequest {
+        control_plane_metadata: Some(meta),
+        isolate_request_payload: Some(EzHybridPayload {
+            delivery_method: Some(DeliveryMethod::InlineData(EzPayloadData {
+                datagrams: vec![b"hello world".to_vec()],
+            })),
+        }),
+        ..Default::default()
+    };
+
+    let response = ctx.outbound_handler.remote_invoke(request, None).await;
+
+    assert!(response.is_err(), "Expected remote invoke to fail due to identity mismatch");
+    let err = response.err().unwrap();
+    assert!(
+        format!("{:?}", err).contains("CERTIFICATE_VERIFY_FAILED"),
+        "Expected error to contain 'CERTIFICATE_VERIFY_FAILED', got: {:?}",
+        err
+    );
+
+    let _ = ctx.mock_service_tx.send(()); // Stop mock service
+    ctx.server_task.abort(); // Stop server task
+}
+
+/// Tests that the inbound handler correctly propagates errors from the junction back to the client.
+/// This verifies that error handling is working across the mTLS boundary.
+#[tokio::test]
+async fn test_e2e_mtls_junction_error() {
+    let ctx = create_test_context().await;
+
+    let meta = ControlPlaneMetadata {
+        destination_operator_domain: ctx.client_manager.spiffe_identity().operator_domain.clone(),
+        // "ErrorService" triggers FakeJunction to return an error, as defined in junction/test_utils.rs
+        destination_service_name: "ErrorService".to_string(),
+        ..Default::default()
+    };
+
+    let request = enforcer_proto::enforcer::v1::InvokeEzRequest {
+        control_plane_metadata: Some(meta),
+        isolate_request_payload: Some(EzHybridPayload {
+            delivery_method: Some(DeliveryMethod::InlineData(EzPayloadData {
+                datagrams: vec![b"hello world".to_vec()],
+            })),
+        }),
+        ..Default::default()
+    };
+
+    let response = ctx.outbound_handler.remote_invoke(request, None).await;
+
+    assert!(response.is_err(), "Expected remote invoke to fail due to junction error");
+    let err = response.err().unwrap();
+    let status = err.downcast_ref::<tonic::Status>().expect("Expected tonic::Status");
+    assert_eq!(status.message(), "TEST_ERROR");
+
+    let _ = ctx.mock_service_tx.send(()); // Stop mock service
+    ctx.server_task.abort(); // Stop server task
 }

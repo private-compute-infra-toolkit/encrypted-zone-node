@@ -44,6 +44,8 @@ enum Operation {
     ExitSuccess,
     ExitFail,
     TryWriteRoot,
+    VerifyTmpfsMount,
+    GetUid,
 }
 
 #[derive(Parser)]
@@ -184,6 +186,23 @@ fn main() -> anyhow::Result<()> {
                 Ok(_) => stream.write_all(b"writable")?,
                 Err(e) => stream.write_all(e.to_string().as_bytes())?,
             }
+        }
+        Operation::VerifyTmpfsMount => {
+            let mut stream = UnixStream::connect(UDS_PATH)?;
+            let mountinfo = fs::read_to_string("/proc/self/mountinfo")?;
+            for line in mountinfo.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 6 && parts[4] == "/tmp" {
+                    stream.write_all(parts[5].as_bytes())?;
+                    return Ok(());
+                }
+            }
+            stream.write_all(b"not found")?;
+        }
+        Operation::GetUid => {
+            let mut stream = UnixStream::connect(UDS_PATH)?;
+            let uid = users::get_current_uid();
+            stream.write_all(uid.to_string().as_bytes())?;
         }
     }
     Ok(())

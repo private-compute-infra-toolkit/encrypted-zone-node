@@ -36,7 +36,9 @@ async fn test_console_subscriber_connection() {
     // Note: setup_telemetry sets the global tracing subscriber.
     // This means this test can only be run once per process and cannot run in parallel
     // with other tests that set the global subscriber.
-    let _provider = setup_telemetry(&None, &Some(port)).await.expect("Failed to setup telemetry");
+    let _provider = setup_telemetry(traces::ENFORCER_SERVICE_NAME, &None, &Some(port))
+        .await
+        .expect("Failed to setup telemetry");
 
     // TODO: wait until the server starts, rather than a fixed duration
     tokio::time::sleep(Duration::from_millis(100)).await;

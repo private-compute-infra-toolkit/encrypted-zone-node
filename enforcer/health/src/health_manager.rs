@@ -82,9 +82,14 @@ impl HealthManager {
             start_timestamp: start_time,
             end_timestamp: to_timestamp(std::time::SystemTime::now()),
         };
-        log::debug!("[Health Manager] Report: {:#?}", report);
+        let mut latest = self.latest_report.write().await;
+        if latest.isolates != report.isolates {
+            log::info!("[Health Manager] Report: {:#?}", report);
+        } else {
+            log::info!("[Health Manager] Report: No changes");
+        }
         self.update_health_metrics(&report);
-        *self.latest_report.write().await = report;
+        *latest = report;
     }
 
     fn update_health_metrics(&self, report: &EzIsolateHealthReport) {
@@ -174,6 +179,7 @@ impl HealthManager {
                 results.push(health);
             }
         }
+        results.sort_by(|a, b| a.isolate_id.cmp(&b.isolate_id));
         results
     }
 

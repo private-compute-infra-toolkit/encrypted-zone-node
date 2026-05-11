@@ -26,10 +26,10 @@ allows you to inspect the runtime state of tokio tasks, resources, and more in r
 ### 1. Launch the Enforcer with the Console Port
 
 To enable the console subscriber, you must provide a port using the `--console-subscriber-port` flag
-when starting the `enforcer_bin` executable:
+when starting the enforcer executable:
 
 ```sh
-./dist/enforcer/enforcer_bin --manifest-path=path/to/manifest.json --console-subscriber-port <CONSOLE-SUBSCRIBER-PORT>
+dist/enforcer/enforcer_debug --manifest-path=path/to/manifest.json --console-subscriber-port <CONSOLE-SUBSCRIBER-PORT>
 ```
 
 ### 2. Connect the Console

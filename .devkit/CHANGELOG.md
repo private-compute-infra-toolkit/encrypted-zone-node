@@ -2,6 +2,82 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## 3.5.0 (2026-04-27)
+
+
+### Dependencies
+
+* **deps:** Upgrade gemini-cli to 0.39.1
+
+
+### Bug Fixes
+
+* Check only references during devkit/gitlinks --check
+
+## 3.4.0 (2026-04-23)
+
+
+### Dependencies
+
+* **deps:** Update apt packages (diff hash: b8e5e7c1)
+* **deps:** Update apt packages (diff hash: f33ba631)
+* **deps:** Upgrade gemini-cli to 0.38.2
+
+
+### Features
+
+* Add devkit/gitlinks command
+* add license header check in templates
+* automate apt package updates
+* automate apt package updates
+
+
+### Bug Fixes
+
+* Load function definitions before use in upgrade_packages
+* Make upgrade_gemini_cli script locally executable
+* source lib_build.sh using absolute path in gob_utils.sh
+
+## 3.3.0 (2026-04-16)
+
+
+### Dependencies
+
+* **deps:** Upgrade gemini-cli to 0.37.1
+* **deps:** Upgrade gemini-cli to 0.38.1
+
+## 3.2.0 (2026-04-09)
+
+
+### Dependencies
+
+* **deps:** update git to 2.54.0-rc0 and build from source
+
+
+### Bug Fixes
+
+* avoid docker groupd ID conflicts
+* docker image pulling
+
+## 3.1.0 (2026-04-09)
+
+
+### Dependencies
+
+* **deps:** Upgrade gemini-cli to 0.36.0
+* **deps:** upgrade git in tool-env to 2.53.0
+
+
+### Features
+
+* automatically grant xhost permission for X11 display
+
+
+### Bug Fixes
+
+* **docs:** update prerequisites
+* propagate host file descriptor limits to docker container
+
 ## 3.0.0 (2026-04-02)
 
 

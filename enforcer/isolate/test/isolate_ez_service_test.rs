@@ -44,7 +44,9 @@ use isolate_test_utils::{
 use junction_test_utils::FakeJunction;
 use manifest_proto::enforcer::v1::ez_backend_dependency::RouteType;
 use outbound_ez_to_ez_client::OutboundEzToEzClient;
-use payload_proto::enforcer::v1::EzPayloadData;
+use payload_proto::enforcer::v1::{
+    ez_hybrid_payload::DeliveryMethod, EzHybridPayload, EzPayloadData,
+};
 use shared_memory_manager::SharedMemManager;
 use state_manager::IsolateStateManager;
 use std::sync::{
@@ -186,6 +188,7 @@ impl OutboundEzToEzClient for MockEzToEzOutboundHandler {
 
     async fn remote_streaming_connect(
         &self,
+        _first_request_metadata: Option<&ControlPlaneMetadata>,
         mut from_local_rx: Receiver<InvokeEzRequest>,
     ) -> anyhow::Result<Receiver<Result<InvokeEzResponse>>> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
@@ -1642,8 +1645,10 @@ fn create_test_request(domain: &str, name: &str) -> InvokeEzRequest {
                 ..Default::default()
             }],
         }),
-        isolate_request_payload: Some(EzPayloadData {
-            datagrams: vec!["hello world".as_bytes().to_vec()],
+        isolate_request_payload: Some(EzHybridPayload {
+            delivery_method: Some(DeliveryMethod::InlineData(EzPayloadData {
+                datagrams: vec!["hello world".as_bytes().to_vec()],
+            })),
         }),
     }
 }
@@ -1718,8 +1723,14 @@ async fn add_to_data_scope_requester(
 
 fn get_sample_invoke_ez_response() -> InvokeEzResponse {
     InvokeEzResponse {
-        ez_response_payload: Some(EzPayloadData {
-            datagrams: vec!["hello world".as_bytes().to_vec()],
+        ez_response_payload: Some(payload_proto::enforcer::v1::EzHybridPayload {
+            delivery_method: Some(
+                payload_proto::enforcer::v1::ez_hybrid_payload::DeliveryMethod::InlineData(
+                    payload_proto::enforcer::v1::EzPayloadData {
+                        datagrams: vec!["hello world".as_bytes().to_vec()],
+                    },
+                ),
+            ),
         }),
         ez_response_iscope: Some(EzPayloadIsolateScope {
             datagram_iscopes: vec![IsolateDataScope {

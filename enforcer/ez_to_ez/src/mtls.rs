@@ -19,10 +19,9 @@ use boring::ssl::{SslAcceptor, SslConnector, SslMethod, SslVerifyMode};
 use boring::x509::{store::X509StoreBuilder, X509};
 use ez_mtls_proto::enforcer::v1::ez_mtls_service_client::EzMtlsServiceClient;
 use ez_mtls_proto::enforcer::v1::{GetCertificateRequest, ReportSniRequest};
-use grpc_connector::{GrpcChannelPool, DEFAULT_POOL_SIZE};
+use grpc_connector::GrpcChannelPool;
 use manifest_proto::enforcer::v1::{ez_manifest::ManifestType, EzManifest};
 use sha2::Digest;
-use std::collections::HashSet;
 use std::sync::Arc;
 use tonic::transport::Channel;
 
@@ -128,111 +127,114 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWr
     }
 }
 
+// Connected is required by serve_with_incoming.
+impl<S: tonic::transport::server::Connected> tonic::transport::server::Connected
+    for BoringTlsStream<S>
+{
+    type ConnectInfo = S::ConnectInfo;
+
+    fn connect_info(&self) -> Self::ConnectInfo {
+        self.inner.get_ref().connect_info()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct EzMtlsManagerConfig {
+    // TODO: All keys and CSRs will be generated in enforcer memory.
+    // Path to read the mTLS private key in der format.
+    pub mtls_key_path: String,
+    // Path to read the CSR in der format.
+    pub csr_path: String,
+    // Address to talk to EZ proxy.
+    pub proxy_address: String,
+    // EzManifest to parse for SNI fields.
+    pub ez_manifest: EzManifest,
+}
+
 /// A manager for the EzMtlsService connection that holds the current certificate and SNIs.
 #[derive(Clone)]
-#[allow(dead_code)]
 pub struct EzMtlsManager {
+    #[allow(dead_code)]
+    config: EzMtlsManagerConfig,
+
+    // Certificates will be fetched periodically every 24 hours.
+    // Therefore, we should keep the connection.
     // A channel pool is held for periodic interaction with the proxy.
+    #[allow(dead_code)]
     client_channel_pool: GrpcChannelPool,
     // Client for the EzMtlsService.
     client: EzMtlsServiceClient<Channel>,
+
     // Leaf private key for mTLS encryption.
     leaf_private_key: PKey<Private>,
+    // Certificate signing request in der format.
+    csr: Vec<u8>,
     // Vector of X509 certificates.
     // The leaf certificate is at index 0, followed by intermediate certificates.
     cert_chain: Arc<ArcSwap<Vec<X509>>>,
     // Trust anchors for certificate verification.
     trust_anchors: Arc<ArcSwap<Vec<X509>>>,
-    // Policy for SPIFFE URI authorization.
-    policy: Arc<EzToEzPolicy>,
+    // The SPIFFE URI of this manager parsed from the leaf certificate.
+    spiffe_identity: SpiffeUri,
 }
 
 impl EzMtlsManager {
-    /// Establishes a connection to the `EzMtlsService` through the specified address.
-    ///
-    /// The client will make initial requests to fetch the certificate and report SNIs.
-    ///
-    /// # Arguments
-    ///
-    /// * `mtls_key_path` - The file path to the leaf private key for mTLS.
-    /// * `csr_path` - The file path to the certificate signing request (CSR) used for fetching the certificate.
-    /// * `address` - The address of the `EzMtlsService` proxy to connect to.
-    /// * `ez_manifest` - The EzManifest proto for the current EZ instance.
-    pub async fn create(
-        mtls_key_path: String,
-        csr_path: String,
-        address: String,
-        ez_manifest: &EzManifest,
-        policy: Arc<EzToEzPolicy>,
-    ) -> Result<Self> {
-        // TODO: Use a shared connect module in utils because it's repeated multiple times.
-        let retry_delay_ms = std::env::var("PROXY_CONNECT_RETRY_DELAY_MS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(grpc_connector::DEFAULT_CONNECT_RETRY_DELAY_MS);
-        let retry_count = std::env::var("PROXY_CONNECT_RETRY_COUNT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(grpc_connector::DEFAULT_CONNECT_RETRY_COUNT);
-        let retry_scaling = std::env::var("PROXY_CONNECT_RETRY_SCALING")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(grpc_connector::DEFAULT_CONNECT_RETRY_SCALING);
-        let client_channel_pool = GrpcChannelPool::new(
-            address.to_string(),
-            DEFAULT_POOL_SIZE,
-            retry_count,
-            retry_delay_ms,
-            retry_scaling,
-        )
-        .await
-        .map_err(|e| anyhow!("Failed to connect to EzToEz proxy: {}", e))?;
+    /// Builds and initializes a new `EzMtlsManager`.
+    pub async fn build(config: EzMtlsManagerConfig) -> Result<Self> {
+        let (client_channel_pool, mut client) = Self::create_client(&config).await?;
+        let (leaf_private_key, csr) = Self::load_keys(&config).await?;
+        let (cert_chain, trust_anchors) = Self::fetch_certs(&mut client, &csr).await?;
+        let spiffe_identity = Self::parse_spiffe_id(&cert_chain)?;
+        Self::report_initial_snis_internal(&mut client, &spiffe_identity, &config.ez_manifest)
+            .await?;
+        Ok(Self {
+            config,
+            client_channel_pool,
+            client,
+            leaf_private_key,
+            csr,
+            cert_chain: Arc::new(ArcSwap::from_pointee(cert_chain)),
+            trust_anchors: Arc::new(ArcSwap::from_pointee(trust_anchors)),
+            spiffe_identity,
+        })
+    }
+
+    /// Returns the SPIFFE identity of this manager.
+    pub fn spiffe_identity(&self) -> SpiffeUri {
+        self.spiffe_identity.clone()
+    }
+
+    /// Creates the gRPC client and channel pool.
+    async fn create_client(
+        config: &EzMtlsManagerConfig,
+    ) -> Result<(GrpcChannelPool, EzMtlsServiceClient<Channel>)> {
+        let client_channel_pool = GrpcChannelPool::new_from_env(&config.proxy_address)
+            .await
+            .map_err(|e| anyhow!("Failed to connect to EzToEz proxy: {}", e))?;
         let client = EzMtlsServiceClient::new(client_channel_pool.next_channel());
-        // TODO: The private key will be generated in-memory instead of read from a file.
-        let leaf_private_key_bytes = tokio::fs::read(mtls_key_path)
+        Ok((client_channel_pool, client))
+    }
+
+    /// Reads the leaf private key and CSR from disk.
+    async fn load_keys(config: &EzMtlsManagerConfig) -> Result<(PKey<Private>, Vec<u8>)> {
+        let leaf_private_key_bytes = tokio::fs::read(&config.mtls_key_path)
             .await
             .context("Failed to read leaf private key from path")?;
         let leaf_private_key = PKey::private_key_from_pem(&leaf_private_key_bytes)
             .context("Failed to parse leaf private key from pem")?;
-        let csr = tokio::fs::read(csr_path).await.context("Failed to read leaf CSR from path")?;
-        // TODO: Initialize trust anchors from a trust anchor file. Currently, we trust the fetched root certificate.
-        let manager = Self {
-            client_channel_pool,
-            client,
-            cert_chain: Arc::new(ArcSwap::from_pointee(vec![])),
-            leaf_private_key,
-            trust_anchors: Arc::new(ArcSwap::from_pointee(vec![])),
-            policy,
-        };
 
-        manager
-            .fetch_certificate(csr)
-            .await
-            .context("Failed to fetch preliminary mTLS certificates")?;
+        let csr =
+            tokio::fs::read(&config.csr_path).await.context("Failed to read leaf CSR from path")?;
 
-        // TODO: Parse the operator domain and trust domain from the leaf certificate.
-        let sni_params = extract_sni_params(ez_manifest);
-        let mut snis = Vec::new();
-        for (isolate_name, publisher_id) in sni_params {
-            snis.push(sni(
-                // Empty means it'll match any request that doesn't specify an ez_instance_id.
-                /* ez_instance_id= */
-                "",
-                isolate_name,
-                publisher_id,
-                "placeholder-operator",
-                "placeholder-domain",
-            ));
-        }
-
-        manager.report_snis(snis).await.context("Failed to report preliminary SNIs")?;
-        Ok(manager)
+        Ok((leaf_private_key, csr))
     }
 
-    /// Fetches a certificate from the mTLS service using the given CSR, and stores it internally.
-    pub async fn fetch_certificate(&self, csr: Vec<u8>) -> Result<()> {
-        let req = GetCertificateRequest { csr, evidence: None, endorsements: None };
-        let mut client = self.client.clone();
+    /// Fetches initial certificates.
+    async fn fetch_certs(
+        client: &mut EzMtlsServiceClient<Channel>,
+        csr: &[u8],
+    ) -> Result<(Vec<X509>, Vec<X509>)> {
+        let req = GetCertificateRequest { csr: csr.to_vec(), evidence: None, endorsements: None };
         let resp = client.get_certificate(tonic::Request::new(req)).await.map_err(|e| {
             anyhow::anyhow!("Failed to fetch certificate from EzMtlsService: {}", e)
         })?;
@@ -242,14 +244,128 @@ impl EzMtlsManager {
             parsed_certs.push(X509::from_der(&cert)?);
         }
 
-        // TODO: Remove this. Initialize trust anchors from a trust anchor file.
+        let mut trust_anchors = Vec::new();
         if let Some(last_cert) = parsed_certs.last() {
+            trust_anchors.push(last_cert.clone());
+        }
+
+        Ok((parsed_certs, trust_anchors))
+    }
+
+    /// Parses the SPIFFE ID from the leaf certificate.
+    fn parse_spiffe_id(cert_chain: &[X509]) -> Result<SpiffeUri> {
+        let leaf_cert = cert_chain.first().context("No leaf certificate found in chain")?;
+        let spiffe_identity = Self::extract_spiffe_uri_from_cert(leaf_cert)
+            .context("Failed to extract SPIFFE ID from leaf certificate")?;
+        Ok(spiffe_identity)
+    }
+
+    /// Reports initial SNIs to the proxy.
+    async fn report_initial_snis_internal(
+        client: &mut EzMtlsServiceClient<Channel>,
+        spiffe_identity: &SpiffeUri,
+        ez_manifest: &EzManifest,
+    ) -> Result<()> {
+        let sni_params = extract_sni_params(ez_manifest);
+        let mut snis = Vec::new();
+        for (isolate_name, publisher_id) in sni_params {
+            snis.push(sni(
+                "",
+                isolate_name,
+                publisher_id,
+                &spiffe_identity.operator_domain,
+                &spiffe_identity.trust_domain,
+            ));
+        }
+
+        let req = ReportSniRequest { sni: snis };
+        client
+            .report_sni(tonic::Request::new(req))
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to report SNIs to EzMtlsService: {}", e))?;
+        Ok(())
+    }
+
+    /// Helper function to extract exactly one SPIFFE URI from a certificate.
+    fn extract_spiffe_uri_from_cert(cert: &boring::x509::X509Ref) -> anyhow::Result<SpiffeUri> {
+        let sans = cert
+            .subject_alt_names()
+            .ok_or_else(|| anyhow::anyhow!("Failed to extract SAN extensions from certificate"))?;
+
+        let mut uris = sans.into_iter().filter_map(|san| san.uri().map(|s| s.to_string()));
+        let first_uri = uris.next().ok_or_else(|| anyhow::anyhow!("No URI SAN found"))?;
+        if uris.next().is_some() {
+            anyhow::bail!("Multiple URI SANs found in certificate, SPIFFE requires exactly one.")
+        }
+        SpiffeUri::new(&first_uri).context("failed to parse spiffe URI from cert")
+    }
+
+    /// Helper function to verify that a certificate contains exactly one SPIFFE URI
+    /// and that it matches the expected identity.
+    fn verify_certificate_spiffe_identity(
+        cert: &boring::x509::X509Ref,
+        expected_identity: &SpiffeUri,
+    ) -> Result<(), boring::x509::X509VerifyError> {
+        match Self::extract_spiffe_uri_from_cert(cert) {
+            Ok(parsed) => {
+                if &parsed == expected_identity {
+                    Ok(())
+                } else {
+                    log::warn!("SPIFFE URI does not match expected identity");
+                    Err(boring::x509::X509VerifyError::APPLICATION_VERIFICATION)
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to extract SPIFFE ID: {}", e);
+                Err(boring::x509::X509VerifyError::APPLICATION_VERIFICATION)
+            }
+        }
+    }
+
+    /// Helper factory that builds a callback verifying if a peer's certificate contains exactly 1 SPIFFE URI SAN
+    /// and if it matches the expected spiffe id.
+    ///
+    /// In the future we may extend this to allow various inputs instead.
+    fn build_verify_spiffe_uri_callback(
+        &self,
+        expected_identity: SpiffeUri,
+    ) -> impl Fn(bool, &mut boring::x509::X509StoreContextRef) -> bool + Sync + Send + 'static {
+        move |ok: bool, ctx: &mut boring::x509::X509StoreContextRef| -> bool {
+            if !ok {
+                return false; // Trust chain or signature failed
+            }
+
+            // Intermediate certs don't need SAN checks. Only evaluate depth 0 (leaf).
+            if ctx.error_depth() != 0 {
+                return true;
+            }
+
+            if let Some(cert) = ctx.current_cert() {
+                if let Err(e) = Self::verify_certificate_spiffe_identity(cert, &expected_identity) {
+                    ctx.set_error(Err(e));
+                    return false;
+                }
+                return true;
+            }
+
+            log::warn!("Failed to get current certificate from context.");
+            ctx.set_error(Err(boring::x509::X509VerifyError::APPLICATION_VERIFICATION));
+            false
+        }
+    }
+
+    /// Fetches a certificate from the mTLS service using the CSR path in config, and stores it internally.
+    pub async fn fetch_certificate(&self) -> Result<()> {
+        let mut client = self.client.clone();
+        let (parsed_certs, new_anchors) = Self::fetch_certs(&mut client, &self.csr).await?;
+
+        self.cert_chain.store(Arc::new(parsed_certs));
+
+        if let Some(last_cert) = new_anchors.first() {
             let mut anchors = self.trust_anchors.load().as_ref().clone();
             anchors.push(last_cert.clone());
             self.trust_anchors.store(Arc::new(anchors));
         }
-
-        self.cert_chain.store(Arc::new(parsed_certs));
         Ok(())
     }
 
@@ -300,16 +416,20 @@ impl EzMtlsManager {
         let store = self.build_x509_store()?;
         acceptor.set_verify_cert_store(store)?;
 
+        // TODO: In the future, we may have multiple acceptable peer roles for incoming request.
         let verify_mode = SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT;
         acceptor.set_verify_callback(
             verify_mode,
-            build_verify_spiffe_uri_callback(self.policy.clone()),
+            self.build_verify_spiffe_uri_callback(self.spiffe_identity.clone()),
         );
         Ok(acceptor.build())
     }
 
-    /// Creates a TLS connector for outbound client connections.
-    pub async fn create_tls_connector(&self) -> anyhow::Result<SslConnector> {
+    /// Creates a TLS connector for outbound client connections with a specific expected identity.
+    async fn create_tls_connector_internal(
+        &self,
+        expected_identity: SpiffeUri,
+    ) -> anyhow::Result<SslConnector> {
         let mut connector = SslConnector::builder(SslMethod::tls())?;
         connector.set_private_key(&self.leaf_private_key)?;
 
@@ -335,9 +455,36 @@ impl EzMtlsManager {
         // Same verification as acceptor but without fail_if_no_peer_cert (the server provides it).
         connector.set_verify_callback(
             SslVerifyMode::PEER,
-            build_verify_spiffe_uri_callback(self.policy.clone()),
+            self.build_verify_spiffe_uri_callback(expected_identity),
         );
+        connector.set_verify_depth(2);
         Ok(connector.build())
+    }
+
+    /// Returns a factory that can create TLS connectors for specific targets.
+    pub fn get_connector_factory(&self) -> TlsConnectorFactory {
+        TlsConnectorFactory { manager: self.clone() }
+    }
+}
+
+/// A factory that can create TLS connectors for specific targets.
+#[derive(Clone)]
+pub struct TlsConnectorFactory {
+    manager: EzMtlsManager,
+}
+
+impl TlsConnectorFactory {
+    /// Creates a TLS connector for a specific target operator domain.
+    ///
+    /// TODO: We may add different fields to construct the connector in the future.
+    pub async fn create_connector(&self, operator_domain: &str) -> anyhow::Result<SslConnector> {
+        let expected_identity = SpiffeUri {
+            trust_domain: self.manager.spiffe_identity.trust_domain.clone(),
+            operator_domain: operator_domain.to_string(),
+            publisher_id: self.manager.spiffe_identity.publisher_id.clone(),
+            workload_name: self.manager.spiffe_identity.workload_name.clone(),
+        };
+        self.manager.create_tls_connector_internal(expected_identity).await
     }
 }
 
@@ -358,18 +505,22 @@ impl SpiffeUri {
     /// Parses a strictly formatted SPIFFE URI into its logical components.
     /// Expected format: spiffe://<trust_domain>/operator/<operator_domain>/publisher/<publisher_id>/workload/<workload_name>
     pub fn new(uri: &str) -> anyhow::Result<Self> {
+        const OPERATOR_TAG: &str = "/operator/";
+        const PUBLISHER_TAG: &str = "/publisher/";
+        const WORKLOAD_TAG: &str = "/workload/";
+
         let without_scheme = uri
             .strip_prefix("spiffe://")
             .ok_or_else(|| anyhow::anyhow!("Missing 'spiffe://' scheme"))?;
         // Find the indices of each delimiter
         let op_idx = without_scheme
-            .find("/operator/")
+            .find(OPERATOR_TAG)
             .ok_or_else(|| anyhow::anyhow!("Missing '/operator/' tag"))?;
         let pub_idx = without_scheme
-            .find("/publisher/")
+            .find(PUBLISHER_TAG)
             .ok_or_else(|| anyhow::anyhow!("Missing '/publisher/' tag"))?;
         let work_idx = without_scheme
-            .find("/workload/")
+            .find(WORKLOAD_TAG)
             .ok_or_else(|| anyhow::anyhow!("Missing '/workload/' tag"))?;
 
         // Validate that the tags appear in the correct sequential order
@@ -378,9 +529,9 @@ impl SpiffeUri {
         }
 
         let trust_domain = &without_scheme[..op_idx];
-        let operator_domain = &without_scheme[op_idx + "/operator/".len()..pub_idx];
-        let publisher_id = &without_scheme[pub_idx + "/publisher/".len()..work_idx];
-        let workload_name = &without_scheme[work_idx + "/workload/".len()..];
+        let operator_domain = &without_scheme[op_idx + OPERATOR_TAG.len()..pub_idx];
+        let publisher_id = &without_scheme[pub_idx + PUBLISHER_TAG.len()..work_idx];
+        let workload_name = &without_scheme[work_idx + WORKLOAD_TAG.len()..];
 
         Ok(Self {
             trust_domain: trust_domain.to_string(),
@@ -388,94 +539,5 @@ impl SpiffeUri {
             publisher_id: publisher_id.to_string(),
             workload_name: workload_name.to_string(),
         })
-    }
-}
-
-/// Helper factory that builds a callback verifying if a peer's certificate contains exactly 1 SPIFFE URI SAN
-/// and if it matches the allowlisted policy.
-fn build_verify_spiffe_uri_callback(
-    policy: Arc<EzToEzPolicy>,
-) -> impl Fn(bool, &mut boring::x509::X509StoreContextRef) -> bool + Sync + Send + 'static {
-    move |ok: bool, ctx: &mut boring::x509::X509StoreContextRef| -> bool {
-        if !ok {
-            return false; // Trust chain or signature failed
-        }
-
-        // Intermediate certs don't need SAN checks. Only evaluate depth 0 (leaf).
-        if ctx.error_depth() != 0 {
-            return true;
-        }
-
-        if let Some(cert) = ctx.current_cert() {
-            if let Some(sans) = cert.subject_alt_names() {
-                let mut uri_count = 0;
-                for san in sans {
-                    if let Some(uri) = san.uri() {
-                        uri_count += 1;
-                        if uri_count > 1 {
-                            log::warn!(
-                                "Multiple URI SANs found. SPIFFE SVID dictates exactly one."
-                            );
-                            ctx.set_error(Err(
-                                boring::x509::X509VerifyError::APPLICATION_VERIFICATION,
-                            ));
-                            return false;
-                        }
-
-                        // Extract and check fields
-                        match SpiffeUri::new(uri) {
-                            Ok(parsed) => {
-                                if policy.verify(&parsed) {
-                                    log::debug!("SPIFFE URI authorized correctly: {}", uri);
-                                    return true;
-                                } else {
-                                    log::warn!("SPIFFE URI rejected by policy: {}", uri);
-                                    ctx.set_error(Err(
-                                        boring::x509::X509VerifyError::APPLICATION_VERIFICATION,
-                                    ));
-                                    return false;
-                                }
-                            }
-                            Err(e) => {
-                                log::warn!("Malformed SPIFFE URI structure: {} - {}", uri, e);
-                                ctx.set_error(Err(
-                                    boring::x509::X509VerifyError::APPLICATION_VERIFICATION,
-                                ));
-                                return false;
-                            }
-                        }
-                    }
-                }
-                if uri_count == 0 {
-                    log::warn!("No URI SAN found in certificate. SPIFFE requires a URI.");
-                    ctx.set_error(Err(boring::x509::X509VerifyError::APPLICATION_VERIFICATION));
-                    return false;
-                }
-            }
-        }
-
-        log::warn!("Failed to extract SAN extensions from certificate.");
-        ctx.set_error(Err(boring::x509::X509VerifyError::APPLICATION_VERIFICATION));
-        false
-    }
-}
-
-/// Policy defining allowlisted components for SPIFFE URI authorization.
-/// We currently allow any combination of trust domains, operator domains, publisher IDs, and workload names configured in the policy.
-/// However, this may change in the future.
-pub struct EzToEzPolicy {
-    pub allowed_trust_domains: HashSet<String>,
-    pub allowed_operator_domains: HashSet<String>,
-    pub allowed_publisher_ids: HashSet<String>,
-    pub allowed_workload_names: HashSet<String>,
-}
-
-impl EzToEzPolicy {
-    /// Verifies if the parsed components are allowlisted by this policy.
-    pub fn verify(&self, uri: &SpiffeUri) -> bool {
-        self.allowed_trust_domains.contains(&uri.trust_domain)
-            && self.allowed_operator_domains.contains(&uri.operator_domain)
-            && self.allowed_publisher_ids.contains(&uri.publisher_id)
-            && self.allowed_workload_names.contains(&uri.workload_name)
     }
 }

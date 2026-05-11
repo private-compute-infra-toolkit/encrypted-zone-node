@@ -462,6 +462,22 @@ async fn start_api_server() -> (u16, oneshot::Sender<()>, FakeJunction) {
             })
             .await
     });
+    // Explicitly wait for readiness by polling the health report
+    let mut ready = false;
+    for _ in 0..50 {
+        // Try for up to 2.5 seconds
+        if let Ok(mut client) =
+            EzPublicApiClient::connect(format!("http://localhost:{}", port)).await
+        {
+            if client.get_health_report(GetHealthReportRequest {}).await.is_ok() {
+                ready = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(ready, "Server did not become ready in time");
+
     (port, shutdown_tx, fake_junction)
 }
 

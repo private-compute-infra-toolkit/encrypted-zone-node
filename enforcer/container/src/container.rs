@@ -77,6 +77,8 @@ pub struct ContainerOptions {
     pub network: NetworkOptions,
     /// Environment variables to set in the container.
     pub env: Vec<String>,
+    /// If true, the container will run as an unprivileged user (UID 1000).
+    pub run_isolate_as_unprivileged: bool,
 }
 
 #[tonic::async_trait]

@@ -24,9 +24,11 @@ rust_library(
     visibility = ["//visibility:public"],
     deps = [
         "@crates//:anyhow",
+        "@crates//:boring",
         "@crates//:hyper-util",
         "@crates//:log",
         "@crates//:tokio",
+        "@crates//:tokio-boring",
         "@crates//:tokio-retry",
         "@crates//:tonic",
         "@crates//:tower",
@@ -41,6 +43,7 @@ rust_test(
     deps = [
         ":grpc_connector",
         ":grpc_connector_test_rust",
+        "@crates//:boring",
         "@crates//:tempfile",
         "@crates//:tokio",
         "@crates//:tokio-stream",

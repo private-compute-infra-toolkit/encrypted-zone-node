@@ -176,6 +176,7 @@ rust_test(
         "@crates//:dashmap",
         "@crates//:hyper-util",
         "@crates//:rand",
+        "@crates//:tempfile",
         "@crates//:tokio",
         "@crates//:tokio-stream",
         "@crates//:tonic",

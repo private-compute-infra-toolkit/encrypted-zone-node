@@ -505,8 +505,21 @@ async fn test_junction_streaming_flow() {
     // spawn 20 requests concurrently and save the random data in a vec
     for _ in 0..20 {
         let invoke_isolate_request = create_random_request(&empty_isolate_info);
-        response_set
-            .insert(invoke_isolate_request.clone().isolate_input.unwrap().datagrams[0].clone());
+        response_set.insert(
+            match invoke_isolate_request
+                .isolate_input
+                .as_ref()
+                .unwrap()
+                .delivery_method
+                .as_ref()
+                .unwrap()
+            {
+                payload_proto::enforcer::v1::ez_hybrid_payload::DeliveryMethod::InlineData(d) => {
+                    d.datagrams[0].clone()
+                }
+                _ => panic!("Expected inline data"),
+            },
+        );
         let sender_clone = client_junction_channels.client_to_junction.clone();
         tokio::spawn(async move {
             assert!(sender_clone.send(invoke_isolate_request).await.is_ok());
@@ -518,9 +531,14 @@ async fn test_junction_streaming_flow() {
     for _ in 0..20 {
         let invoke_isolate_response =
             client_junction_channels.junction_to_client.recv().await.unwrap().unwrap();
-        assert!(
-            response_set.contains(&invoke_isolate_response.isolate_output.unwrap().datagrams[0])
-        );
+        let datagrams =
+            match invoke_isolate_response.isolate_output.unwrap().delivery_method.unwrap() {
+                payload_proto::enforcer::v1::ez_hybrid_payload::DeliveryMethod::InlineData(
+                    inline,
+                ) => inline.datagrams,
+                _ => panic!("Expected InlineData"),
+            };
+        assert!(response_set.contains(&datagrams[0]));
     }
 
     // Shutdown fake Isolate server
@@ -1104,7 +1122,13 @@ fn create_random_request(isolate_service_info: &IsolateServiceInfo) -> InvokeIso
                 mapped_scope_owner: None,
             }],
         }),
-        isolate_input: Some(EzPayloadData { datagrams: vec![random_request_data.to_vec()] }),
+        isolate_input: Some(payload_proto::enforcer::v1::EzHybridPayload {
+            delivery_method: Some(
+                payload_proto::enforcer::v1::ez_hybrid_payload::DeliveryMethod::InlineData(
+                    EzPayloadData { datagrams: vec![random_request_data.to_vec()] },
+                ),
+            ),
+        }),
     }
 }
 

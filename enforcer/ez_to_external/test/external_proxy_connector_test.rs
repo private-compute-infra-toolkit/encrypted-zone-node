@@ -26,7 +26,9 @@ use external_proxy_proto::enforcer::v1::{
 };
 use grpc_connector::GrpcChannelPool;
 use isolate_info::{BinaryServicesIndex, IsolateId};
-use payload_proto::enforcer::v1::EzPayloadData;
+use payload_proto::enforcer::v1::{
+    ez_hybrid_payload::DeliveryMethod, EzHybridPayload, EzPayloadData,
+};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -192,7 +194,11 @@ pub async fn build_test_connector(
 fn create_scope_test_request(scope: DataScopeType) -> InvokeEzRequest {
     InvokeEzRequest {
         control_plane_metadata: Some(ControlPlaneMetadata::default()),
-        isolate_request_payload: Some(EzPayloadData { datagrams: vec![vec![0]] }),
+        isolate_request_payload: Some(EzHybridPayload {
+            delivery_method: Some(DeliveryMethod::InlineData(EzPayloadData {
+                datagrams: vec![vec![0]],
+            })),
+        }),
         isolate_request_iscope: Some(EzPayloadIsolateScope {
             datagram_iscopes: vec![IsolateDataScope {
                 scope_type: scope as i32,
@@ -211,7 +217,9 @@ pub fn create_generic_test_request(datagrams: Vec<Vec<u8>>) -> InvokeEzRequest {
             destination_method_name: "TestMethod".to_string(),
             ..Default::default()
         }),
-        isolate_request_payload: Some(EzPayloadData { datagrams }),
+        isolate_request_payload: Some(EzHybridPayload {
+            delivery_method: Some(DeliveryMethod::InlineData(EzPayloadData { datagrams })),
+        }),
         isolate_request_iscope: Some(EzPayloadIsolateScope::default()),
     }
 }
@@ -559,7 +567,11 @@ fn test_translate_to_proxy_request_success() {
 fn test_translate_to_proxy_request_fails_on_missing_metadata() {
     let request = InvokeEzRequest {
         control_plane_metadata: None,
-        isolate_request_payload: Some(EzPayloadData { datagrams: vec![vec![1, 2, 3]] }),
+        isolate_request_payload: Some(EzHybridPayload {
+            delivery_method: Some(DeliveryMethod::InlineData(EzPayloadData {
+                datagrams: vec![vec![1, 2, 3]],
+            })),
+        }),
         isolate_request_iscope: None,
     };
     let result = translate_to_proxy_request(request);
@@ -669,7 +681,11 @@ async fn unary_returns_transformed_metadata_in_response() {
     // 2. Create a request with original metadata
     let test_request = InvokeEzRequest {
         control_plane_metadata: Some(original_metadata.clone()),
-        isolate_request_payload: Some(EzPayloadData { datagrams: vec![vec![10, 20]] }),
+        isolate_request_payload: Some(EzHybridPayload {
+            delivery_method: Some(DeliveryMethod::InlineData(EzPayloadData {
+                datagrams: vec![vec![10, 20]],
+            })),
+        }),
         ..Default::default()
     };
 
@@ -700,7 +716,11 @@ async fn unary_fails_on_missing_control_plane_metadata() {
     // Request with missing metadata
     let test_request = InvokeEzRequest {
         control_plane_metadata: None,
-        isolate_request_payload: Some(EzPayloadData { datagrams: vec![vec![10, 20]] }),
+        isolate_request_payload: Some(EzHybridPayload {
+            delivery_method: Some(DeliveryMethod::InlineData(EzPayloadData {
+                datagrams: vec![vec![10, 20]],
+            })),
+        }),
         ..Default::default()
     };
 
@@ -769,7 +789,11 @@ async fn stream_returns_transformed_metadata_in_response() {
     // Send Request (the first one sets the metadata for all responses)
     let test_request = InvokeEzRequest {
         control_plane_metadata: Some(original_metadata.clone()),
-        isolate_request_payload: Some(EzPayloadData { datagrams: vec![vec![1, 2, 3]] }),
+        isolate_request_payload: Some(EzHybridPayload {
+            delivery_method: Some(DeliveryMethod::InlineData(EzPayloadData {
+                datagrams: vec![vec![1, 2, 3]],
+            })),
+        }),
         ..Default::default()
     };
 

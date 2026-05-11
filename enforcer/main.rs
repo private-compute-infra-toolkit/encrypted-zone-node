@@ -77,9 +77,12 @@ struct EnforcerInputs {
     /// OTel traces endpoint
     #[arg(long)]
     otel_traces_endpoint: Option<String>,
+    /// Disable metrics filtering for debugging
+    #[arg(long, default_value_t = false)]
+    disable_metrics_filtering: bool,
     /// Port for tokio-console to listen on.
-    #[arg(long, default_value_t = 14255)]
-    console_subscriber_port: u16,
+    #[arg(long)]
+    console_subscriber_port: Option<u16>,
     /// Bind mount for all Isolates
     #[arg(
         short = 'b',
@@ -160,6 +163,27 @@ struct EnforcerInputs {
         help = "To be removed after CA integration is finished: Path to the mTLS leaf CSR."
     )]
     mtls_leaf_csr_path: Option<String>,
+
+    #[arg(
+        long,
+        default_value_t = 5,
+        help = "Timeout in seconds for the inbound EZ-to-EZ TLS handshake."
+    )]
+    ez_to_ez_handshake_timeout_secs: u64,
+
+    #[arg(
+        long,
+        default_value_t = 10,
+        help = "Maximum concurrent TLS handshakes for the inbound EZ-to-EZ server."
+    )]
+    ez_to_ez_max_concurrent_handshakes: usize,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "If true, the container will run as an unprivileged user (UID 1000)."
+    )]
+    run_isolate_as_unprivileged: bool,
 }
 
 enum Endpoint {
@@ -175,14 +199,15 @@ fn main() -> anyhow::Result<()> {
         logger::setup_logging()?;
 
         let _otel_providers = setup_otel_metrics(
-            enforcer_inputs.otel_safe_endpoint,
-            enforcer_inputs.otel_unsafe_endpoint,
+            enforcer_inputs.otel_safe_endpoint.clone(),
+            enforcer_inputs.otel_unsafe_endpoint.clone(),
         )
         .await?;
 
         let _otel_traces = traces::setup_telemetry(
+            traces::ENFORCER_SERVICE_NAME,
             &enforcer_inputs.otel_traces_endpoint,
-            &Some(enforcer_inputs.console_subscriber_port),
+            &enforcer_inputs.console_subscriber_port,
         )
         .await?;
 
@@ -233,18 +258,22 @@ fn main() -> anyhow::Result<()> {
         )
         .await;
 
+        let diagnostics_service = if let Some(port) = enforcer_inputs.console_subscriber_port {
+            let console_helper_endpoint = format!(
+                "http://[{}]:{}",
+                std::net::Ipv6Addr::LOCALHOST,
+                port
+            );
+            let console_helper =
+                Arc::new(console_helper::ConsoleHelperService::new(console_helper_endpoint));
+            Some(EnforcerDiagnosticService::new(
+                EnforcerPprofService::new(),
+                TokioDiagnosticService::new(console_helper),
+            ))
+        } else {
+            None
+        };
 
-        let console_helper_endpoint = format!(
-            "http://[{}]:{}",
-            std::net::Ipv6Addr::LOCALHOST,
-            enforcer_inputs.console_subscriber_port
-        );
-        let console_helper =
-            Arc::new(console_helper::ConsoleHelperService::new(console_helper_endpoint));
-        let diagnostics_service = EnforcerDiagnosticService::new(
-            EnforcerPprofService::new(),
-            TokioDiagnosticService::new(console_helper),
-        );
         let socket_addr_str = enforcer_inputs.external_to_ez_address.unwrap_or_else(|| {
             let host = enforcer_inputs.host;
             let port =
@@ -262,6 +291,8 @@ fn main() -> anyhow::Result<()> {
             .await;
         });
 
+        let mut inbound_tls_config = None;
+        let mut outbound_tls_config = None;
         if enforcer_inputs.enable_mtls {
             let proxy_address = enforcer_inputs.mtls_control_plane_uds_path.as_ref().context(
                 "mTLS enabled but mtls_control_plane_uds_path is missing. mTLS must be properly fetched.",
@@ -275,21 +306,24 @@ fn main() -> anyhow::Result<()> {
             // TODO: Remove duplicated manifest parsing happened in container manager.
             let ez_manifest = parse_manifest(enforcer_inputs.manifest_path.clone())
                 .context("couldn't parse EzManifest for mTLS SNI")?;
-            let policy = std::sync::Arc::new(mtls::mtls::EzToEzPolicy {
-                allowed_trust_domains: std::collections::HashSet::new(),
-                allowed_operator_domains: std::collections::HashSet::new(),
-                allowed_publisher_ids: std::collections::HashSet::new(),
-                allowed_workload_names: std::collections::HashSet::new(),
+            let config = mtls::mtls::EzMtlsManagerConfig {
+                mtls_key_path: key_path.clone(),
+                csr_path: csr_path.clone(),
+                proxy_address: proxy_address.clone(),
+                ez_manifest,
+            };
+            let mtls_manager = mtls::mtls::EzMtlsManager::build(config).await.context("Failed to bootstrap EzMtlsManager. mTLS connection must be successful.")?;
+            let acceptor = mtls_manager.create_tls_acceptor().await.context("Failed to create TLS acceptor")?;
+            inbound_tls_config = Some(inbound_ez_to_ez_handler::InboundTlsConfig {
+                acceptor,
+                handshake_timeout: std::time::Duration::from_secs(enforcer_inputs.ez_to_ez_handshake_timeout_secs),
+                max_concurrent_handshakes: enforcer_inputs.ez_to_ez_max_concurrent_handshakes,
             });
-            let _mtls_manager = mtls::mtls::EzMtlsManager::create(
-                key_path.clone(),
-                csr_path.clone(),
-                proxy_address.clone(),
-                &ez_manifest,
-                policy,
-            )
-            .await
-            .context("Failed to create and bootstrap EzMtlsManager. mTLS connection must be successful.")?;
+
+            outbound_tls_config = Some(outbound_ez_to_ez_handler::OutboundTlsConfig {
+                factory: mtls_manager.get_connector_factory(),
+                trust_domain: mtls_manager.spiffe_identity().trust_domain.clone(),
+            });
             log::info!("Successfully bootstrapped EzMtlsManager.");
         }
 
@@ -302,6 +336,7 @@ fn main() -> anyhow::Result<()> {
                     inbound_ez_to_ez_handler,
                     &address,
                     max_decoding_message_size,
+                    inbound_tls_config,
                 )
                 .await;
             })
@@ -322,6 +357,7 @@ fn main() -> anyhow::Result<()> {
                     OutboundEzToEzHandler::new(
                         ez_to_ez_outbound_address,
                         metrics::outbound::OutboundMetrics::default(),
+                        outbound_tls_config,
                     )
                     .await?,
                 ))
@@ -341,6 +377,8 @@ fn main() -> anyhow::Result<()> {
             ez_to_ez_outbound_handler,
             max_decoding_message_size,
             interceptor: interceptor.clone(),
+            otel_endpoint: enforcer_inputs.otel_safe_endpoint.clone(),
+            disable_metrics_filtering: enforcer_inputs.disable_metrics_filtering,
         };
 
         let isolate_ez_service_mngr = IsolateEzServiceManager::new(manager_deps);
@@ -362,6 +400,8 @@ fn main() -> anyhow::Result<()> {
             )
             .context("failed to parse isolate config configs")?,
             interceptor,
+            otel_traces_endpoint: enforcer_inputs.otel_traces_endpoint.clone(),
+            run_isolate_as_unprivileged: enforcer_inputs.run_isolate_as_unprivileged,
         };
 
         let mut container_manager =
@@ -389,7 +429,7 @@ fn main() -> anyhow::Result<()> {
 
 async fn launch_ez_public_api_server(
     ez_public_api: EzPublicApiService,
-    diagnostics_service: EnforcerDiagnosticService,
+    diagnostics_service: Option<EnforcerDiagnosticService>,
     socket_addr_str: &str,
     max_decoding_message_size: usize,
 ) {
@@ -402,7 +442,7 @@ async fn launch_ez_public_api_server(
         panic!("Failed to parse PublicApi socket address '{socket_addr_str}': {e}")
     });
 
-    let server_builder = Server::builder()
+    let mut server_builder = Server::builder()
         .trace_fn(|req| {
             let parent_context = global::get_text_map_propagator(|propagator| {
                 propagator.extract(&HeaderExtractor(req.headers()))
@@ -414,8 +454,11 @@ async fn launch_ez_public_api_server(
         .add_service(
             EzPublicApiServer::new(ez_public_api)
                 .max_decoding_message_size(max_decoding_message_size),
-        )
-        .add_service(DiagnosticServiceServer::new(diagnostics_service));
+        );
+
+    if let Some(diag_service) = diagnostics_service {
+        server_builder = server_builder.add_service(DiagnosticServiceServer::new(diag_service));
+    }
 
     let result = match endpoint {
         Endpoint::Tcp(addr) => {

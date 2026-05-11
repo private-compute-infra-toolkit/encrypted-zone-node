@@ -15,21 +15,53 @@
 prod = struct(
     suffix = "",
     features = [],
+    rustc_flags = [
+        "-C",
+        "opt-level=3",
+        # Absolute smallest footprint to make reverse-engineering as hard as
+        # possible.
+        "-C",
+        "strip=symbols",
+    ],
     ubuntu = "",
 )
 debug = struct(
     suffix = "_debug",
     features = ["debug"],
+    rustc_flags = [
+        "-C",
+        "opt-level=0",
+        "-C",
+        "debuginfo=2",
+        "-C",
+        "strip=none",
+    ],
     ubuntu = "_debug",
 )
 perf = struct(
     suffix = "_perf",
     features = ["debug"],
+    rustc_flags = [
+        "-C",
+        "opt-level=3",
+        "-C",
+        "debuginfo=2",
+        "-C",
+        "strip=none",
+    ],
     ubuntu = "_debug",
 )
 test = struct(
     suffix = "_test",
     features = ["debug", "disable_netns", "test"],
+    rustc_flags = [
+        "-C",
+        "opt-level=0",
+        "-C",
+        "debuginfo=2",
+        "-C",
+        "strip=none",
+    ],
     ubuntu = "_debug",
 )
 flavors = (prod, debug, perf, test)

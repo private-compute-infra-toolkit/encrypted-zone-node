@@ -33,7 +33,9 @@ async fn test_console_helper_fetches_task_statistics() {
     let console_endpoint = format!("http://[{}]:{}", std::net::Ipv6Addr::LOCALHOST, port);
 
     // 2. Start the tokio-console publisher internally using our traces module
-    let _provider = setup_telemetry(&None, &Some(port)).await.expect("Failed to setup telemetry");
+    let _provider = setup_telemetry(traces::ENFORCER_SERVICE_NAME, &None, &Some(port))
+        .await
+        .expect("Failed to setup telemetry");
 
     // TODO: b/491604619 - Replace fixed sleep with dynamic readiness check for tokio-console
     tokio::time::sleep(Duration::from_millis(100)).await;

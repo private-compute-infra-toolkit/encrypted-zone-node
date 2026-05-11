@@ -25,7 +25,12 @@ use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::{trace, Resource};
 use tracing_subscriber::{prelude::*, EnvFilter, Registry};
 
-async fn init_tracer(endpoint: &str) -> Result<trace::SdkTracerProvider, trace::TraceError> {
+pub const ENFORCER_SERVICE_NAME: &str = "enforcer";
+
+async fn init_tracer(
+    service_name: &str,
+    endpoint: &str,
+) -> Result<trace::SdkTracerProvider, trace::TraceError> {
     let mut exporter_builder = SpanExporter::builder().with_tonic();
 
     if endpoint.starts_with("unix:") {
@@ -47,7 +52,7 @@ async fn init_tracer(endpoint: &str) -> Result<trace::SdkTracerProvider, trace::
     let exporter = exporter_builder.build().map_err(|e| trace::TraceError::Other(e.into()))?;
 
     let resource = Resource::builder()
-        .with_attributes(vec![KeyValue::new("service.name", "enforcer")])
+        .with_attributes(vec![KeyValue::new("service.name", service_name.to_string())])
         .build();
 
     let provider = trace::SdkTracerProvider::builder()
@@ -62,13 +67,14 @@ async fn init_tracer(endpoint: &str) -> Result<trace::SdkTracerProvider, trace::
 }
 
 pub async fn setup_telemetry(
+    service_name: &str,
     endpoint: &Option<String>,
     console_subscriber_port: &Option<u16>,
 ) -> anyhow::Result<trace::SdkTracerProvider> {
     // 1. Initialize OpenTelemetry tracing IF an endpoint is provided.
     let (telemetry_layer, tracer_provider) = if let Some(endpoint) = endpoint {
-        let tracer_provider = init_tracer(endpoint).await?;
-        let tracer = tracer_provider.tracer("enforcer");
+        let tracer_provider = init_tracer(service_name, endpoint).await?;
+        let tracer = tracer_provider.tracer(service_name.to_string());
         let filter = EnvFilter::new("debug,h2=info");
         let layer = tracing_opentelemetry::layer().with_tracer(tracer).with_filter(filter);
         (Some(layer), tracer_provider)

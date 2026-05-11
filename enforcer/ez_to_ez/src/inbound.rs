@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use boring::ssl::SslAcceptor;
 use data_scope_proto::enforcer::v1::{DataScopeType, EzStaticScopeInfo};
 use enforcer_proto::enforcer::v1::{
     EzPayloadIsolateScope, InvokeIsolateRequest, InvokeIsolateResponse, IsolateDataScope,
@@ -29,9 +30,11 @@ use metrics::{
     observed_stream,
 };
 use opentelemetry::global;
-use payload_proto::enforcer::v1::EzPayloadScope;
+use payload_proto::enforcer::v1::{
+    ez_hybrid_payload::DeliveryMethod, EzHybridPayload, EzPayloadScope,
+};
 use prost::Message;
-use tokio::{net::UnixListener, sync::mpsc};
+use tokio::sync::mpsc;
 use tokio_stream::{
     wrappers::{ReceiverStream, UnixListenerStream},
     StreamExt,
@@ -191,7 +194,9 @@ fn ez_call_request_to_invoke_isolate_request(request: EzCallRequest) -> InvokeIs
         isolate_input_iscope: request
             .payload_scope
             .map(ez_payload_scope_to_ez_payload_isolate_scope),
-        isolate_input: request.payload_data,
+        isolate_input: request.payload_data.map(|payload| EzHybridPayload {
+            delivery_method: Some(DeliveryMethod::InlineData(payload)),
+        }),
     }
 }
 
@@ -257,14 +262,32 @@ fn invoke_isolate_response_to_ez_call_response(response: InvokeIsolateResponse) 
         }
     });
 
-    EzCallResponse { payload_scope, payload_data: response.isolate_output }
+    let payload_data = response.isolate_output.and_then(|hp| {
+        hp.delivery_method.and_then(|dm| {
+            if let DeliveryMethod::InlineData(data) = dm {
+                Some(data)
+            } else {
+                None
+            }
+        })
+    });
+
+    EzCallResponse { payload_scope, payload_data }
 }
 
+pub struct InboundTlsConfig {
+    pub acceptor: SslAcceptor,
+    pub handshake_timeout: std::time::Duration,
+    pub max_concurrent_handshakes: usize,
+}
+
+// TODO: Add e2e tests for inbound gRPC over TLS once outbound client supports TLS
 /// Launches the gRPC server for the inbound EZ-to-EZ API.
 pub async fn launch_server(
     handler: InboundEzToEzHandler,
     address: &str,
     max_decoding_message_size: usize,
+    tls_config: Option<InboundTlsConfig>,
 ) {
     log::info!("Starting inbound EZ-to-EZ server at {}...", address);
     let server_builder = Server::builder().add_service(
@@ -272,19 +295,62 @@ pub async fn launch_server(
     );
 
     let server_result = if let Some(path) = address.strip_prefix("unix:") {
-        // Attempt to remove old socket file, logging a warning on failure.
+        // Attempt to remove the old socket file if it exists.
         // This is not a critical error, as the subsequent bind will fail with a
         // more specific error if the path is still in use.
         if let Err(e) = std::fs::remove_file(path) {
             log::warn!("Could not remove old UDS socket at {path:?}: {e}. This may be ignored if the file did not exist.");
         }
-        let uds_result = UnixListener::bind(path);
+        let uds_result = tokio::net::UnixListener::bind(path);
         let Ok(uds) = uds_result else {
             log::error!("Failed to bind to UDS at {path:?}: {:?}", uds_result.unwrap_err());
             return;
         };
         let uds_stream = UnixListenerStream::new(uds);
-        server_builder.serve_with_incoming(uds_stream).await
+        if let Some(config) = tls_config {
+            let acceptor = std::sync::Arc::new(config.acceptor);
+            let timeout = config.handshake_timeout;
+            let max_concurrent = config.max_concurrent_handshakes;
+
+            // We map the incoming UDS stream to a stream of handshake futures.
+            // This allows us to perform the TLS handshake asynchronously before passing
+            // the connection to Tonic.
+            let mapped_stream = uds_stream.map(move |conn| {
+                let acceptor = acceptor.clone();
+                async move {
+                    match conn {
+                        Ok(stream) => {
+                            let handshake_future = tokio_boring::accept(&acceptor, stream);
+                            // Enforce a timeout on the handshake to prevent resource exhaustion
+                            // from slow or malicious clients.
+                            match tokio::time::timeout(timeout, handshake_future).await {
+                                Ok(Ok(tls_stream)) => Some(Ok::<_, std::io::Error>(
+                                    mtls::mtls::BoringTlsStream::new(tls_stream),
+                                )),
+                                Ok(Err(e)) => {
+                                    log::error!("TLS handshake failed: {}", e);
+                                    None
+                                }
+                                Err(_) => {
+                                    log::warn!("TLS handshake timed out");
+                                    None
+                                }
+                            }
+                        }
+                        Err(e) => Some(Err(e)),
+                    }
+                }
+            });
+            // Process up to `max_concurrent_handshakes` handshakes concurrently.
+            // This bounds the resources used by concurrent handshakes.
+            // Connections that fail the handshake or time out yield `None` and are filtered out.
+            let tls_stream =
+                futures::stream::StreamExt::buffer_unordered(mapped_stream, max_concurrent)
+                    .filter_map(|x| x);
+            server_builder.serve_with_incoming(tls_stream).await
+        } else {
+            server_builder.serve_with_incoming(uds_stream).await
+        }
     } else {
         log::error!("Invalid inbound EZ-to-EZ address: '{address}'. Address must be a UDS path starting with 'unix:'.");
         return;

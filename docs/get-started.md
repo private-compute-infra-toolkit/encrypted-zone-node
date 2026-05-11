@@ -50,7 +50,7 @@ the testing directory created in the previous step.
 
 ```bash
 bazel build //enforcer:enforcer_debug && \
-cp bazel-bin/enforcer/enforcer_debug manual_testing/enforcer_bin
+cp bazel-bin/enforcer/enforcer_debug manual_testing/enforcer_debug
 
 bazel build //enforcer/v1:manifest_descriptor_set && \
 cp bazel-bin/enforcer/v1/manifest_descriptor_set.pb \
@@ -94,7 +94,7 @@ cd $NODE/manual_testing
 Run the enforcer binary with the manifest path:
 
 ```bash
-./enforcer_bin --manifest-path=summation_by_looping_with_backend_manifest.json & BACKEND_PID=$!
+./enforcer_debug --manifest-path=summation_by_looping_with_backend_manifest.json & BACKEND_PID=$!
 ```
 
 By default, the enforcer runs on port 53459. If you anticipate a port conflict, you may override the

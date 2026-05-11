@@ -17,6 +17,7 @@ syntax = "proto3";
 package enforcer.v1;
 
 import "enforcer/v1/ez_data_scope.proto";
+import "enforcer/v1/ez_shm_payload.proto";
 
 // Holds an ordered list of datagrams that belong in various EzDataScopes (held
 // in a separate ordered list -- see EzPayloadScope). This message is defined
@@ -50,4 +51,16 @@ message EzPayload {
   // Contains a list of datagrams controlled by the scopes described in the
   // corresponding EzScopeDirectory.
   EzPayloadData payload_data = 2;
+}
+
+// Please see go/ez-ipc-optimization for context. EzHybridPayload allows us to
+// switch between transferring the RPC payload via gRPC over UDS, or via
+// shared memory between the sender and receiver of the payload.
+message EzHybridPayload {
+  oneof delivery_method {
+    // InlineData will be sent directly over the UDS socket.
+    EzPayloadData inline_data = 1;
+    // ShmSlotData will be read from shared memory.
+    ShmSlotData shm_data = 2;
+  }
 }

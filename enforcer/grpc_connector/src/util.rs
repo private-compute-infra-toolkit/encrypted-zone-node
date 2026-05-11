@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use anyhow::{Context, Result};
+use boring::ssl::SslConnector;
 use hyper_util::rt::tokio::TokioIo;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -27,6 +28,11 @@ pub const DEFAULT_CONNECT_RETRY_DELAY_MS: u64 = 1000;
 pub const DEFAULT_CONNECT_RETRY_SCALING: u64 = 2;
 pub const DEFAULT_CONNECT_RETRY_COUNT: usize = 30;
 pub const DEFAULT_POOL_SIZE: usize = 8;
+pub const DEFAULT_MAX_HEADER_LIST_SIZE: u32 = 32 * 1024 * 1024;
+
+pub const ENV_PROXY_CONNECT_RETRY_DELAY_MS: &str = "PROXY_CONNECT_RETRY_DELAY_MS";
+pub const ENV_PROXY_CONNECT_RETRY_COUNT: &str = "PROXY_CONNECT_RETRY_COUNT";
+pub const ENV_PROXY_CONNECT_RETRY_SCALING: &str = "PROXY_CONNECT_RETRY_SCALING";
 
 /// Holds a pool of tonic::Channels to a gRPC server.
 /// Provides an interface for round-robin selection of channels.
@@ -54,6 +60,90 @@ impl GrpcChannelPool {
                 .push(connect(address.clone(), retry_count, retry_delay_ms, retry_scaling).await?);
         }
         Ok(Self { channels, next_idx: Arc::new(AtomicUsize::new(0)) })
+    }
+
+    /// Creates a new GrpcChannelPool by reading retry configuration from environment variables.
+    pub async fn new_from_env(address: &str) -> Result<Self> {
+        let retry_delay_ms = std::env::var(ENV_PROXY_CONNECT_RETRY_DELAY_MS)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_CONNECT_RETRY_DELAY_MS);
+        let retry_count = std::env::var(ENV_PROXY_CONNECT_RETRY_COUNT)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_CONNECT_RETRY_COUNT);
+        let retry_scaling = std::env::var(ENV_PROXY_CONNECT_RETRY_SCALING)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_CONNECT_RETRY_SCALING);
+        Self::new(
+            address.to_string(),
+            DEFAULT_POOL_SIZE,
+            retry_count,
+            retry_delay_ms,
+            retry_scaling,
+        )
+        .await
+    }
+
+    /// Creates a new GrpcChannelPool with TLS enabled, establishing a connection to the given address.
+    ///
+    /// This function supports UDS connections with TLS (and will fail for TCP connections with TLS).
+    /// It includes a configurable retry mechanism with exponential backoff.
+    pub async fn new_tls(
+        address: String,
+        pool_size: usize,
+        retry_count: usize,
+        retry_multiplier: u64,
+        retry_initial_delay_ms: u64,
+        ssl_connector: SslConnector,
+        sni: String,
+    ) -> Result<Self> {
+        let mut channels = Vec::new();
+        for _ in 0..pool_size {
+            channels.push(
+                connect_tls(
+                    address.clone(),
+                    retry_count,
+                    retry_multiplier,
+                    retry_initial_delay_ms,
+                    ssl_connector.clone(),
+                    sni.clone(),
+                )
+                .await?,
+            );
+        }
+        Ok(Self { channels, next_idx: Arc::new(AtomicUsize::new(0)) })
+    }
+
+    /// Creates a new GrpcChannelPool with TLS enabled by reading retry configuration from environment variables.
+    pub async fn new_tls_from_env(
+        address: &str,
+        ssl_connector: SslConnector,
+        sni: String,
+    ) -> Result<Self> {
+        let retry_delay_ms = std::env::var(ENV_PROXY_CONNECT_RETRY_DELAY_MS)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_CONNECT_RETRY_DELAY_MS);
+        let retry_count = std::env::var(ENV_PROXY_CONNECT_RETRY_COUNT)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_CONNECT_RETRY_COUNT);
+        let retry_scaling = std::env::var(ENV_PROXY_CONNECT_RETRY_SCALING)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_CONNECT_RETRY_SCALING);
+        Self::new_tls(
+            address.to_string(),
+            DEFAULT_POOL_SIZE,
+            retry_count,
+            retry_scaling,
+            retry_delay_ms,
+            ssl_connector,
+            sni,
+        )
+        .await
     }
 
     /// Method to get the next channel in line.
@@ -91,6 +181,39 @@ async fn connect(
     Ok(channel)
 }
 
+/// Establishes a TLS-enabled connection to a gRPC service and returns the channel.
+async fn connect_tls(
+    address: String,
+    retry_count: usize,
+    retry_multiplier: u64,
+    initial_delay_ms: u64,
+    ssl_connector: SslConnector,
+    sni: String,
+) -> Result<Channel> {
+    log::info!("Attempting to connect to gRPC service (TLS) at {}...", address);
+
+    let retry_strategy = ExponentialBackoff::from_millis(initial_delay_ms)
+        .factor(retry_multiplier)
+        .take(retry_count);
+
+    let channel = if let Some(path) = address.strip_prefix("unix:") {
+        connect_uds_tls(path, retry_strategy, ssl_connector, sni).await?
+    } else {
+        anyhow::bail!("TLS over TCP is not supported yet.");
+    };
+
+    log::info!("Successfully connected to gRPC service (TLS) at {}.", address);
+    Ok(channel)
+}
+
+/// Creates an endpoint for a Unix Domain Socket with a specified header list size.
+fn create_uds_endpoint(header_list_size: u32) -> Result<Endpoint> {
+    // UDS connections in tonic require a URI, but the host part is ignored.
+    // We use http://localhost as a base URI and use the captured socket_path for connecting.
+    let endpoint = Endpoint::from_static("http://localhost");
+    Ok(endpoint.http2_max_header_list_size(header_list_size))
+}
+
 /// Handles connecting to a service via a Unix Domain Socket.
 async fn connect_uds(
     path: &str,
@@ -105,12 +228,7 @@ async fn connect_uds(
         async move {
             // UDS connections in tonic require a URI, but the host part is ignored.
             // We use http://localhost as a base URI and use the captured socket_path for connecting.
-            let endpoint = Endpoint::from_shared("http://localhost".to_string())
-                .map_err(|e| anyhow::anyhow!("Invalid UDS URI: {}", e))?;
-
-            // TODO: Make the limit configurable.
-            endpoint
-                .http2_max_header_list_size(32 * 1024 * 1024)
+            create_uds_endpoint(DEFAULT_MAX_HEADER_LIST_SIZE)?
                 .connect_with_connector(service_fn(move |_: Uri| {
                     let socket_path = socket_path.clone();
                     async move {
@@ -121,6 +239,56 @@ async fn connect_uds(
                 }))
                 .await
                 .context("Failed to connect to UDS endpoint")
+        }
+    };
+
+    Retry::spawn(retry_strategy, connect_action).await
+}
+
+/// Handles connecting to a service via a Unix Domain Socket with TLS.
+async fn connect_uds_tls(
+    path: &str,
+    retry_strategy: impl Iterator<Item = Duration> + Clone,
+    ssl_connector: SslConnector,
+    sni: String,
+) -> Result<Channel> {
+    // Normalize path to prevent redundant slashes and enable the fallback option
+    // (Unix domain socket behavior). Example: "unix:///tmp/socket" or "unix:/tmp/socket"
+    let path = path.strip_prefix("//").unwrap_or(path);
+    let socket_path = std::path::PathBuf::from(path);
+
+    let connect_action = || {
+        let socket_path = socket_path.clone();
+        let ssl_connector = ssl_connector.clone();
+        let sni = sni.clone();
+        async move {
+            // The endpoint URI is unused because we use a custom connector.
+            // However, it still expects a valid HTTP URI.
+            create_uds_endpoint(DEFAULT_MAX_HEADER_LIST_SIZE)?
+                .connect_with_connector(service_fn(move |_uri: Uri| {
+                    let socket_path = socket_path.clone();
+                    let ssl_connector = ssl_connector.clone();
+                    let sni = sni.clone();
+                    async move {
+                        let stream = UnixStream::connect(socket_path).await?;
+                        // SNI carries the peer isolate information and not used for hostname verification.
+                        // Disabling verify_hostname because SNI will not match the certificate.
+                        // ssl_connector.config() is a single-use object and should be called per connection.
+                        let tls_stream = tokio_boring::connect(
+                            ssl_connector
+                                .configure()
+                                .map_err(std::io::Error::other)?
+                                .verify_hostname(false),
+                            &sni,
+                            stream,
+                        )
+                        .await
+                        .map_err(std::io::Error::other)?;
+                        Ok::<_, std::io::Error>(TokioIo::new(tls_stream))
+                    }
+                }))
+                .await
+                .context("Failed to connect to UDS TLS endpoint")
         }
     };
 

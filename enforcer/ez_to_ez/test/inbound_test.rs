@@ -62,7 +62,13 @@ async fn test_inbound_unary_flow() {
 
     let server_address = uds_address.clone();
     let server_handle = tokio::spawn(async move {
-        inbound_ez_to_ez_handler::launch_server(handler, &server_address, 4 * 1024 * 1024).await;
+        inbound_ez_to_ez_handler::launch_server(
+            handler,
+            &server_address,
+            /*max_decoding_message_size=*/ 4 * 1024 * 1024,
+            /*tls_config=*/ None,
+        )
+        .await;
     });
     let expected_payload = "hello world";
     let request = create_test_request(expected_payload);
@@ -103,7 +109,13 @@ async fn test_inbound_unary_error_flow() {
 
     let server_address = uds_address.clone();
     let server_handle = tokio::spawn(async move {
-        inbound_ez_to_ez_handler::launch_server(handler, &server_address, 4 * 1024 * 1024).await;
+        inbound_ez_to_ez_handler::launch_server(
+            handler,
+            &server_address,
+            /*max_decoding_message_size=*/ 4 * 1024 * 1024,
+            /*tls_config=*/ None,
+        )
+        .await;
     });
     // Send empty EzCallRequest to invoke error path from junction
     let request = EzCallRequest::default();
@@ -142,7 +154,13 @@ async fn test_inbound_streaming_flow() {
 
     let server_address = uds_address.clone();
     let server_handle = tokio::spawn(async move {
-        inbound_ez_to_ez_handler::launch_server(handler, &server_address, 4 * 1024 * 1024).await;
+        inbound_ez_to_ez_handler::launch_server(
+            handler,
+            &server_address,
+            /*max_decoding_message_size=*/ 4 * 1024 * 1024,
+            /*tls_config=*/ None,
+        )
+        .await;
     });
     let (to_handler_tx, to_handler_rx) = mpsc::channel(10);
     let request_stream = ReceiverStream::new(to_handler_rx);

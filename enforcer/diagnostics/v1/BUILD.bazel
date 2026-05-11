@@ -12,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+load("@com_google_protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
 load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
 load("@rules_buf//buf:defs.bzl", "buf_lint_test")
+load("@rules_proto_grpc_cpp//:defs.bzl", "cpp_grpc_library")
 load("@rules_rust_prost//:defs.bzl", "rust_prost_library")
 
 exports_files(["buf.yaml"])
@@ -27,6 +29,16 @@ proto_library(
     ],
     visibility = ["//visibility:public"],
     deps = ["@com_google_protobuf//:duration_proto"],
+)
+
+cc_proto_library(
+    name = "diagnostics_cc_proto",
+    deps = [":diagnostics_proto"],
+)
+
+cpp_grpc_library(
+    name = "diagnostics_grpc_proto",
+    protos = [":diagnostics_proto"],
 )
 
 buf_lint_test(

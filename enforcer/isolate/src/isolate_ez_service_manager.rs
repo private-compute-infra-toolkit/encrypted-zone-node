@@ -22,10 +22,12 @@ use isolate_ez_service::{IsolateEzBridgeDependencies, IsolateEzBridgeService};
 use isolate_info::IsolateId;
 use isolate_service_mapper::IsolateServiceMapper;
 use junction_trait::Junction;
+use manifest_proto::enforcer::v1::IsolateMetricsPolicy;
+use metrics::receiver::IsolateMetricsReceiver;
+use opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_server::MetricsServiceServer;
 use outbound_ez_to_ez_client::OutboundEzToEzClient;
 use shared_memory_manager::SharedMemManager;
 use state_manager::IsolateStateManager;
-use std::fs::OpenOptions;
 use std::sync::Arc;
 use tokio::net::UnixListener;
 use tokio::task::{self, JoinHandle};
@@ -45,41 +47,77 @@ pub struct IsolateEzServiceManagerDependencies {
     pub data_scope_requester: DataScopeRequester,
     pub max_decoding_message_size: usize,
     pub interceptor: interceptor::Interceptor,
+    pub otel_endpoint: Option<String>,
+    pub disable_metrics_filtering: bool,
+}
+
+#[derive(Debug)]
+struct IsolateServerHandles {
+    isolate_ez_handle: JoinHandle<()>,
+    otel_metrics_handle: JoinHandle<()>,
 }
 
 /// Manager to maintain IsolateEzService servers for each Isolate. Enforcer has
 /// a unique UDS for each Isolate for this service and hence a unique server for each Isolate.
 #[derive(Clone, Debug)]
 pub struct IsolateEzServiceManager {
-    isolate_server_map: Arc<DashMap<IsolateId, JoinHandle<()>>>,
+    isolate_server_map: Arc<DashMap<IsolateId, IsolateServerHandles>>,
     deps: IsolateEzServiceManagerDependencies,
+}
+
+pub struct StartIsolateEzServerArgs {
+    pub isolate_id: IsolateId,
+    pub isolate_address: String,
+    pub isolate_fifo_path: String,
+    pub otel_metrics_address: String,
+    pub metrics_policy: IsolateMetricsPolicy,
+    pub isolate_name: String,
+    pub publisher_id: String,
 }
 
 impl IsolateEzServiceManager {
     pub fn new(deps: IsolateEzServiceManagerDependencies) -> Self {
         Self { isolate_server_map: Arc::new(DashMap::new()), deps }
     }
+
     /// Start a new IsolateEzService on the provided UDS address.
-    pub async fn start_isolate_ez_server(
-        &self,
-        isolate_id: IsolateId,
-        isolate_address: String,
-        isolate_fifo_path: String,
-    ) {
+    pub async fn start_isolate_ez_server(&self, args: StartIsolateEzServerArgs) {
         let service_mngr_clone = self.clone();
-        let server_handle = tokio::spawn(async move {
+        let isolate_ez_handle = tokio::spawn(async move {
             service_mngr_clone
-                .create_isolate_ez_server(isolate_id, isolate_address, isolate_fifo_path)
+                .create_isolate_ez_server(
+                    args.isolate_id,
+                    args.isolate_address,
+                    args.isolate_fifo_path,
+                )
                 .await;
         });
-        self.isolate_server_map.insert(isolate_id, server_handle);
+
+        let service_mngr_clone = self.clone();
+        let otel_metrics_handle = tokio::spawn(async move {
+            service_mngr_clone
+                .create_otel_metrics_server(
+                    args.otel_metrics_address,
+                    args.metrics_policy,
+                    args.isolate_name,
+                    args.publisher_id,
+                )
+                .await;
+        });
+
+        let handles = IsolateServerHandles { isolate_ez_handle, otel_metrics_handle };
+        self.isolate_server_map.insert(args.isolate_id, handles);
     }
 
     /// Stops the IsolateEzService server for the provided Isolate.
-    pub async fn stop_isolate_ez_server(&self, isolate_id: IsolateId) {
-        let server_handle_option = self.isolate_server_map.remove(&isolate_id);
-        if let Some((_isolate_id, server_handle)) = server_handle_option {
-            server_handle.abort();
+    pub async fn stop_isolate_servers(&self, isolate_id: IsolateId) {
+        let server_handles_option = self.isolate_server_map.remove(&isolate_id);
+        if let Some((_isolate_id, server_handles)) = server_handles_option {
+            server_handles.isolate_ez_handle.abort();
+            let _ = server_handles.isolate_ez_handle.await;
+
+            server_handles.otel_metrics_handle.abort();
+            let _ = server_handles.otel_metrics_handle.await;
         }
     }
 
@@ -90,17 +128,15 @@ impl IsolateEzServiceManager {
         isolate_fifo_path: String,
     ) {
         let uds_result = UnixListener::bind(&isolate_address);
-        let Ok(uds) = uds_result else {
-            log::error!("Couldn't bind to UDS {isolate_address}");
-            return;
-        };
+        let uds = uds_result
+            .unwrap_or_else(|_| panic!("Failed to bind to Isolate EZ UDS: {}", isolate_address));
         let uds_stream = UnixListenerStream::new(uds);
 
         // Once the UDS server is listening, the client can connect. In a separate task,
         // open the fifo for write which blocks until the read end is opened by the Isolate.
         // No need to await on this blocking call because the server can continue to start-up.
-        task::spawn_blocking(|| {
-            if let Err(e) = OpenOptions::new().write(true).open(isolate_fifo_path) {
+        task::spawn_blocking(move || {
+            if let Err(e) = std::fs::OpenOptions::new().write(true).open(isolate_fifo_path) {
                 log::error!("IsolateEzBridgeService Server signaling failed {:?}", e);
             }
         });
@@ -127,8 +163,44 @@ impl IsolateEzServiceManager {
             )
             .serve_with_incoming(uds_stream)
             .await;
-        if result.is_err() {
-            log::error!("IsolateEzBridgeService Server launch failed {:?}", result.err());
+        if let Err(e) = result {
+            log::error!("IsolateEzBridgeService Server error: {:?}", e);
+        }
+    }
+
+    async fn create_otel_metrics_server(
+        &self,
+        address: String,
+        policy: IsolateMetricsPolicy,
+        isolate_name: String,
+        publisher_id: String,
+    ) {
+        let uds_result = UnixListener::bind(&address);
+        let uds = uds_result.expect("Failed to bind to OTel metrics UDS");
+        let uds_stream = UnixListenerStream::new(uds);
+
+        let receiver = IsolateMetricsReceiver::new(
+            policy,
+            isolate_name,
+            publisher_id,
+            self.deps.otel_endpoint.clone(),
+            self.deps.max_decoding_message_size,
+            self.deps.disable_metrics_filtering,
+        )
+        .await
+        .expect("Failed to create IsolateMetricsReceiver");
+        let max_decoding_message_size = self.deps.max_decoding_message_size;
+        log::info!("Starting OTel metrics server task");
+        let result = Server::builder()
+            .add_service(
+                MetricsServiceServer::new(receiver)
+                    .max_decoding_message_size(max_decoding_message_size),
+            )
+            .serve_with_incoming(uds_stream)
+            .await;
+        log::info!("OTel metrics server task finished with result: {:?}", result);
+        if let Err(e) = result {
+            log::error!("OTel Metrics Server error: {:?}", e);
         }
     }
 }

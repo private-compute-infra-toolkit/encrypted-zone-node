@@ -34,6 +34,7 @@ use metrics::common::{MetricAttributes, ServiceMetrics};
 use metrics::observed_stream;
 use metrics::public_api::PublicApiMetrics;
 use payload_proto::enforcer::v1::EzPayloadData;
+use payload_proto::enforcer::v1::{ez_hybrid_payload::DeliveryMethod, EzHybridPayload};
 use prost::Message;
 use std::collections::HashMap;
 use std::iter::zip;
@@ -120,10 +121,6 @@ impl EzPublicApi for EzPublicApiService {
         let metadata_headers = trace_context;
         let invoke_isolate_request =
             create_invoke_isolate_request(call_request, session_id, metadata_headers);
-        log::info!(
-            "PublicApi: invoke isolate request control_plane_metadata: {:?}",
-            invoke_isolate_request.control_plane_metadata
-        );
         self.metrics.record_message_size_bytes(
             metric_attr.request(),
             invoke_isolate_request.encoded_len() as u64,
@@ -384,7 +381,9 @@ fn create_invoke_isolate_request(
             request_metadata,
         }),
         isolate_input_iscope,
-        isolate_input,
+        isolate_input: isolate_input.map(|data| EzHybridPayload {
+            delivery_method: Some(DeliveryMethod::InlineData(data)),
+        }),
     }
 }
 
@@ -407,17 +406,25 @@ fn create_call_response(
 
 fn convert_isolate_output_to_public_and_encrypted(
     iscope_option: Option<EzPayloadIsolateScope>,
-    isolate_output_option: Option<EzPayloadData>,
+    isolate_output_option: Option<EzHybridPayload>,
 ) -> (Vec<u8>, Vec<EncryptedField>) {
     let mut public_output = vec![];
     let mut encrypted_output = vec![];
 
     let (Some(iscope), Some(isolate_output)) = (iscope_option, isolate_output_option) else {
-        log::warn!("Both required fields EzPayloadIsolateScope & EzPayloadData were not present");
+        log::warn!("Both required fields EzPayloadIsolateScope & EzHybridPayload were not present");
         return (public_output, encrypted_output);
     };
 
-    for (iscope, vec_of_bytes) in zip(iscope.datagram_iscopes, isolate_output.datagrams) {
+    let datagrams = match isolate_output.delivery_method {
+        Some(DeliveryMethod::InlineData(inline)) => inline.datagrams,
+        _ => {
+            log::warn!("Expected InlineData in EzHybridPayload");
+            return (public_output, encrypted_output);
+        }
+    };
+
+    for (iscope, vec_of_bytes) in zip(iscope.datagram_iscopes, datagrams) {
         if iscope.scope_type() == DataScopeType::Public {
             public_output = vec_of_bytes;
         } else {
