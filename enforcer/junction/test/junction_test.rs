@@ -1208,3 +1208,156 @@ async fn test_junction_unary_timeout_internal_route() {
 }
 
 // TODO: Add metric tests
+
+#[derive(Clone)]
+struct DeadlockTestingIsolate;
+
+#[tonic::async_trait]
+impl EzIsolateBridge for DeadlockTestingIsolate {
+    type StreamInvokeIsolateStream =
+        tokio_stream::wrappers::ReceiverStream<Result<InvokeIsolateResponse, Status>>;
+
+    async fn stream_invoke_isolate(
+        &self,
+        request: Request<Streaming<InvokeIsolateRequest>>,
+    ) -> Result<Response<Self::StreamInvokeIsolateStream>, Status> {
+        let mut stream = request.into_inner();
+
+        // Wait for two requests before returning Response::new()
+        // Without the fix, the second request will never arrive because the junction
+        // won't start proxying until Response::new() is returned.
+        let req1 = stream.message().await.unwrap().unwrap();
+        let req2 = stream.message().await.unwrap().unwrap();
+
+        let (tx, rx) = tokio::sync::mpsc::channel(2);
+        tx.send(Ok(create_echo_invoke_isolate_response(req1))).await.unwrap();
+        tx.send(Ok(create_echo_invoke_isolate_response(req2))).await.unwrap();
+
+        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(rx)))
+    }
+
+    async fn invoke_isolate(
+        &self,
+        _request: Request<InvokeIsolateRequest>,
+    ) -> Result<Response<InvokeIsolateResponse>, Status> {
+        unimplemented!()
+    }
+
+    async fn update_isolate_state(
+        &self,
+        _request: Request<enforcer_proto::enforcer::v1::UpdateIsolateStateRequest>,
+    ) -> Result<Response<enforcer_proto::enforcer::v1::UpdateIsolateStateResponse>, Status> {
+        unimplemented!()
+    }
+}
+
+async fn start_deadlock_testing_isolate_server(test_isolate_id: IsolateId) -> oneshot::Sender<()> {
+    let fake_isolate = DeadlockTestingIsolate;
+
+    let unix_listener =
+        UnixListener::bind(format!("{}{}", DEFAULT_ISOLATE_UNIX_SOCKET, test_isolate_id)).unwrap();
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+    tokio::spawn(async move {
+        Server::builder()
+            .add_service(EzIsolateBridgeServer::new(fake_isolate))
+            .serve_with_incoming_shutdown(UnixListenerStream::new(unix_listener), async {
+                shutdown_rx.await.ok();
+            })
+            .await
+    });
+    shutdown_tx
+}
+
+#[tokio::test]
+async fn test_junction_streaming_deadlock_fix() {
+    let isolate_service_mapper = IsolateServiceMapper::default();
+    let (container_manager_request_tx, _container_manager_request_rx) =
+        tokio::sync::mpsc::channel(JUNCTION_TEST_CHANNEL_SIZE);
+    let container_manager_requester = ContainerManagerRequester::new(container_manager_request_tx);
+    let shared_memory_manager = SharedMemManager::new(container_manager_requester.clone());
+    let fileshare_manager = FileshareManager::new(container_manager_requester.clone());
+    let data_scope_requester = DataScopeRequester::new(u64::MAX);
+    let manifest_validator = ManifestValidator::default();
+    let isolate_state_manager =
+        IsolateStateManager::new(data_scope_requester.clone(), container_manager_requester.clone());
+    let isolate_junction = IsolateJunction::new(
+        data_scope_requester.clone(),
+        isolate_service_mapper.clone(),
+        shared_memory_manager.clone(),
+        fileshare_manager.clone(),
+        isolate_state_manager.clone(),
+        manifest_validator.clone(),
+    );
+
+    let isolate_service_info = IsolateServiceInfo {
+        operator_domain: "deadlock_domain".to_string(),
+        service_name: "deadlock_service".to_string(),
+    };
+
+    let binary_services_index = isolate_service_mapper
+        .new_binary_index(vec![isolate_service_info.clone()], false)
+        .await
+        .unwrap();
+
+    manifest_validator
+        .add_scope_info(AddManifestScopeRequest {
+            binary_services_index,
+            max_input_scope: DataScopeType::UserPrivate,
+            max_output_scope: DataScopeType::UserPrivate,
+        })
+        .await
+        .unwrap();
+
+    let isolate_id = IsolateId::new(binary_services_index);
+
+    let isolate_server_shutdown_tx = start_deadlock_testing_isolate_server(isolate_id).await;
+
+    let add_isolate_request = create_add_isolate_request(isolate_id);
+    isolate_state_manager.add_isolate(add_isolate_request).await;
+    isolate_state_manager.update_state(isolate_id, IsolateState::Ready).await.unwrap();
+
+    assert!(isolate_junction
+        .connect_isolate(isolate_id, format!("{}{}", DEFAULT_ISOLATE_UNIX_SOCKET, isolate_id))
+        .await
+        .is_ok());
+
+    let mut client_junction_channels = isolate_junction.stream_invoke_isolate(None, false).await;
+
+    let mut req1 = create_random_request(&isolate_service_info);
+    req1.control_plane_metadata.as_mut().unwrap().destination_method_name =
+        "deadlock_method".to_string();
+
+    // Create second request using the empty service info logic like other streaming tests
+    let empty_isolate_info =
+        IsolateServiceInfo { operator_domain: "".to_string(), service_name: "".to_string() };
+    let req2 = create_random_request(&empty_isolate_info);
+
+    // Send the first request (which initiates the gRPC stream)
+    client_junction_channels.client_to_junction.send(req1).await.unwrap();
+
+    // Give it a tiny bit of time to reach the junction and initiate the connection
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Send the second request
+    client_junction_channels.client_to_junction.send(req2).await.unwrap();
+
+    // Use timeout to ensure it doesn't deadlock. Without the fix, this times out.
+    let res1 = timeout(Duration::from_secs(2), client_junction_channels.junction_to_client.recv())
+        .await
+        .expect("Test deadlocked!")
+        .unwrap()
+        .unwrap();
+
+    let res2 = timeout(Duration::from_secs(2), client_junction_channels.junction_to_client.recv())
+        .await
+        .expect("Test deadlocked!")
+        .unwrap()
+        .unwrap();
+
+    assert!(res1.isolate_output.is_some());
+    assert!(res2.isolate_output.is_some());
+
+    let _ = isolate_server_shutdown_tx.send(());
+}

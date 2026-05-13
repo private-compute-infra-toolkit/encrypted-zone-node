@@ -171,6 +171,7 @@ genrule(
         ":enforcer_debug.tar",
         ":enforcer_rootfs.tar",
         ":enforcer_rootfs_debug.tar",
+        ":enforcer_rootfs_perf.tar",
         ":enforcer_rootfs_test.tar",
         "//enforcer/v1:enforcer_descriptor_set",
         "//enforcer/v1:ez_service_descriptor_set",
@@ -185,8 +186,7 @@ cp -f $(execpath :enforcer_debug) {dir}/enforcer_debug
 cp -f $(execpath :enforcer_debug.tar) {dir}/enforcer_oci_debug.tar
 cp -f $(execpath :enforcer_rootfs.tar) {dir}/enforcer_rootfs.tar
 cp -f $(execpath :enforcer_rootfs_debug.tar) {dir}/enforcer_rootfs_debug.tar
-# TODO: b/478233839 - Update what is copied for the perf and test variants.
-cp -f $(execpath :enforcer_rootfs.tar) {dir}/enforcer_rootfs_perf.tar
+cp -f $(execpath :enforcer_rootfs_perf.tar) {dir}/enforcer_rootfs_perf.tar
 cp -f $(execpath :enforcer_rootfs_test.tar) {dir}/enforcer_rootfs_test.tar
 cp -f $(execpath //enforcer/v1:ez_service_descriptor_set) \
       $(execpath //enforcer/v1:enforcer_descriptor_set) \

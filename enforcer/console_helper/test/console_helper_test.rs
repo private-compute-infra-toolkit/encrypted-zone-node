@@ -33,7 +33,7 @@ async fn test_console_helper_fetches_task_statistics() {
     let console_endpoint = format!("http://[{}]:{}", std::net::Ipv6Addr::LOCALHOST, port);
 
     // 2. Start the tokio-console publisher internally using our traces module
-    let _provider = setup_telemetry(traces::ENFORCER_SERVICE_NAME, &None, &Some(port))
+    let _provider = setup_telemetry(traces::ENFORCER_SERVICE_NAME, &None, &Some(port), 1.0)
         .await
         .expect("Failed to setup telemetry");
 

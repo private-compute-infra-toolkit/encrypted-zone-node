@@ -184,6 +184,13 @@ struct EnforcerInputs {
         help = "If true, the container will run as an unprivileged user (UID 1000)."
     )]
     run_isolate_as_unprivileged: bool,
+
+    #[arg(
+        long,
+        default_value_t = 1.0 / ((1_u32 << 17) as f64),
+        help = "Sampler probability for traces."
+    )]
+    pub sampler_probability: f64,
 }
 
 enum Endpoint {
@@ -208,6 +215,7 @@ fn main() -> anyhow::Result<()> {
             traces::ENFORCER_SERVICE_NAME,
             &enforcer_inputs.otel_traces_endpoint,
             &enforcer_inputs.console_subscriber_port,
+            enforcer_inputs.sampler_probability,
         )
         .await?;
 

@@ -290,13 +290,39 @@ impl Junction for IsolateJunction {
                 .await;
             // Using TonicClient, create a new streaming rpc to Isolate
             // and send initial request to Isolate
+            let (isolate_tx_channel, junction_to_isolate_rx) =
+                channel::<InvokeIsolateRequest>(CHANNEL_SIZE);
+            let outbound_stream = ReceiverStream::new(junction_to_isolate_rx);
+            if let Err(_e) = isolate_tx_channel.send(initial_invoke_request).await {
+                let _ = junction_to_client_tx
+                    .send(Err(IsolateStatusCode::DestinationChannelClosed.to_ez_error()))
+                    .await;
+                return;
+            }
+
+            // Spawn proxy task before connecting, to avoid deadlock when
+            // server waits for subsequent requests before sending headers.
+            let isolate_tx_channel_clone = isolate_tx_channel.clone();
+            let junction_to_client_tx_clone = junction_to_client_tx.clone();
+            let isolate_junction_clone_2 = isolate_junction_clone.clone();
+            let metric_attr_clone = metric_attr.clone();
+            tokio::spawn(async move {
+                isolate_junction_clone_2
+                    .proxy_streaming_isolate_requests(
+                        client_to_junction_rx,
+                        isolate_tx_channel_clone,
+                        junction_to_client_tx_clone,
+                        destination_isolate_info.id,
+                        stream_id,
+                        metric_attr_clone,
+                    )
+                    .await;
+            });
+
             let connect_result = isolate_junction_clone
-                .establish_isolate_streaming_rpc(
-                    destination_isolate_info.id,
-                    initial_invoke_request,
-                )
+                .establish_isolate_streaming_rpc(destination_isolate_info.id, outbound_stream)
                 .await;
-            let Ok((isolate_tx_channel, invoke_isolate_response_stream)) = connect_result else {
+            let Ok(invoke_isolate_response_stream) = connect_result else {
                 let connect_error = connect_result.unwrap_err();
                 let connect_ez_error =
                     EzError::Status(match connect_error.downcast_ref::<Status>() {
@@ -333,20 +359,6 @@ impl Junction for IsolateJunction {
                     )
                     .await;
             });
-
-            // Proxy subsequent requests
-            tokio::spawn(async move {
-                isolate_junction_clone
-                    .proxy_streaming_isolate_requests(
-                        client_to_junction_rx,
-                        isolate_tx_channel,
-                        junction_to_client_tx,
-                        destination_isolate_info.id,
-                        stream_id,
-                        metric_attr,
-                    )
-                    .await;
-            });
         });
 
         junction_channel
@@ -378,8 +390,8 @@ impl IsolateJunction {
     async fn establish_isolate_streaming_rpc(
         &self,
         isolate_id: IsolateId,
-        initial_request: InvokeIsolateRequest,
-    ) -> anyhow::Result<(Sender<InvokeIsolateRequest>, Streaming<InvokeIsolateResponse>)> {
+        outbound_stream: ReceiverStream<InvokeIsolateRequest>,
+    ) -> anyhow::Result<Streaming<InvokeIsolateResponse>> {
         let Some(isolate_channel_pool_ref) = self.isolate_channel_pool_map.get(&isolate_id) else {
             log::info!("Missing isolate connection from connection map for isolate {}", isolate_id);
             return Err(IsolateStatusCode::InternalError.into());
@@ -390,16 +402,10 @@ impl IsolateJunction {
 
         let mut client = EzIsolateBridgeClient::new(isolate_channel_pool.next_channel());
 
-        let (junction_to_isolate_tx, junction_to_isolate_rx) =
-            channel::<InvokeIsolateRequest>(CHANNEL_SIZE);
-        let outbound_stream = ReceiverStream::new(junction_to_isolate_rx);
-
-        junction_to_isolate_tx.send(initial_request).await?;
-
         let inbound = client.stream_invoke_isolate(outbound_stream).await?;
         let invoke_isolate_response_stream = inbound.into_inner();
 
-        Ok((junction_to_isolate_tx, invoke_isolate_response_stream))
+        Ok(invoke_isolate_response_stream)
     }
 
     pub fn new(

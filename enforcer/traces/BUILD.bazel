@@ -35,14 +35,16 @@ rust_library(
 )
 
 rust_test(
-    name = "traces_test",
+    name = "traces_export_test",
     size = "small",
     srcs = ["test/traces_test.rs"],
     deps = [
         ":traces",
         "@crates//:fake-opentelemetry-collector",
+        "@crates//:opentelemetry",
         "@crates//:tokio",
         "@crates//:tracing",
+        "@crates//:tracing-opentelemetry",
     ],
 )
 
@@ -53,9 +55,11 @@ rust_test(
     deps = [
         ":traces",
         "@crates//:fake-opentelemetry-collector",
+        "@crates//:opentelemetry",
         "@crates//:tempfile",
         "@crates//:tokio",
         "@crates//:tracing",
+        "@crates//:tracing-opentelemetry",
     ],
 )
 

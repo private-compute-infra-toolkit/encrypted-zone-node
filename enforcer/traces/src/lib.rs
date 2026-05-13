@@ -30,6 +30,7 @@ pub const ENFORCER_SERVICE_NAME: &str = "enforcer";
 async fn init_tracer(
     service_name: &str,
     endpoint: &str,
+    sampler_probability: f64,
 ) -> Result<trace::SdkTracerProvider, trace::TraceError> {
     let mut exporter_builder = SpanExporter::builder().with_tonic();
 
@@ -55,9 +56,12 @@ async fn init_tracer(
         .with_attributes(vec![KeyValue::new("service.name", service_name.to_string())])
         .build();
 
+    let sampler = opentelemetry_sdk::trace::Sampler::TraceIdRatioBased(sampler_probability);
+
     let provider = trace::SdkTracerProvider::builder()
         .with_batch_exporter(exporter)
         .with_resource(resource)
+        .with_sampler(opentelemetry_sdk::trace::Sampler::ParentBased(Box::new(sampler)))
         .build();
 
     global::set_text_map_propagator(TraceContextPropagator::new());
@@ -70,10 +74,11 @@ pub async fn setup_telemetry(
     service_name: &str,
     endpoint: &Option<String>,
     console_subscriber_port: &Option<u16>,
+    sampler_probability: f64,
 ) -> anyhow::Result<trace::SdkTracerProvider> {
     // 1. Initialize OpenTelemetry tracing IF an endpoint is provided.
     let (telemetry_layer, tracer_provider) = if let Some(endpoint) = endpoint {
-        let tracer_provider = init_tracer(service_name, endpoint).await?;
+        let tracer_provider = init_tracer(service_name, endpoint, sampler_probability).await?;
         let tracer = tracer_provider.tracer(service_name.to_string());
         let filter = EnvFilter::new("debug,h2=info");
         let layer = tracing_opentelemetry::layer().with_tracer(tracer).with_filter(filter);

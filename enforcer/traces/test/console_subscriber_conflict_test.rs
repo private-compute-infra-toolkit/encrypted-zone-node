@@ -25,7 +25,8 @@ async fn test_console_subscriber_bind_conflict() {
 
     // 2. Setup telemetry with the same port.
     // This should NOT panic and should return Ok, even though it will log an error in the background.
-    let setup_result = setup_telemetry(traces::ENFORCER_SERVICE_NAME, &None, &Some(port)).await;
+    let setup_result =
+        setup_telemetry(traces::ENFORCER_SERVICE_NAME, &None, &Some(port), 1.0).await;
 
     assert!(setup_result.is_ok(), "setup_telemetry should return Ok even if port is in use");
 
