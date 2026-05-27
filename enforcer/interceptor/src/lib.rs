@@ -40,6 +40,10 @@ pub trait TargetableRequest {
     fn service_name(&self) -> String;
     fn set_service_name(&mut self, name: String);
     fn set_method_name(&mut self, name: String);
+    fn isolate_name(&self) -> String;
+    fn set_isolate_name(&mut self, name: String);
+    fn publisher_id(&self) -> String;
+    fn set_publisher_id(&mut self, id: String);
 }
 
 impl TargetableRequest for CallRequest {
@@ -61,6 +65,22 @@ impl TargetableRequest for CallRequest {
 
     fn set_method_name(&mut self, name: String) {
         self.method_name = name;
+    }
+
+    fn isolate_name(&self) -> String {
+        self.isolate_name.clone()
+    }
+
+    fn set_isolate_name(&mut self, name: String) {
+        self.isolate_name = name;
+    }
+
+    fn publisher_id(&self) -> String {
+        self.publisher_id.clone()
+    }
+
+    fn set_publisher_id(&mut self, id: String) {
+        self.publisher_id = id;
     }
 }
 
@@ -114,6 +134,44 @@ impl TargetableRequest for InvokeEzRequest {
                 });
         }
     }
+
+    fn isolate_name(&self) -> String {
+        self.control_plane_metadata
+            .as_ref()
+            .map(|m| m.destination_isolate_name.clone())
+            .unwrap_or_default()
+    }
+
+    fn set_isolate_name(&mut self, name: String) {
+        if let Some(m) = self.control_plane_metadata.as_mut() {
+            m.destination_isolate_name = name;
+        } else {
+            self.control_plane_metadata =
+                Some(enforcer_proto::enforcer::v1::ControlPlaneMetadata {
+                    destination_isolate_name: name,
+                    ..Default::default()
+                });
+        }
+    }
+
+    fn publisher_id(&self) -> String {
+        self.control_plane_metadata
+            .as_ref()
+            .map(|m| m.destination_publisher_id.clone())
+            .unwrap_or_default()
+    }
+
+    fn set_publisher_id(&mut self, id: String) {
+        if let Some(m) = self.control_plane_metadata.as_mut() {
+            m.destination_publisher_id = id;
+        } else {
+            self.control_plane_metadata =
+                Some(enforcer_proto::enforcer::v1::ControlPlaneMetadata {
+                    destination_publisher_id: id,
+                    ..Default::default()
+                });
+        }
+    }
 }
 
 /// Public API grpc request type
@@ -126,6 +184,8 @@ pub enum RequestType {
 struct RatifiedInterceptorServiceInfo {
     interceptor_operator_domain: String,
     interceptor_service_name: String,
+    interceptor_isolate_name: String,
+    interceptor_publisher_id: String,
     interceptor_method_for_unary: String,
     interceptor_method_for_streaming: String,
 }
@@ -145,10 +205,14 @@ impl Interceptor {
         let opaque_service_info = IsolateServiceInfo {
             operator_domain: interceptor_info.intercepting_operator_domain.clone(),
             service_name: interceptor_info.intercepting_service_name.clone(),
+            isolate_name: interceptor_info.intercepting_isolate_name.clone(),
+            publisher_id: interceptor_info.intercepting_publisher_id.clone(),
         };
         let ratified_interceptor_service_info = RatifiedInterceptorServiceInfo {
             interceptor_operator_domain: interceptor_info.interceptor_operator_domain,
             interceptor_service_name: interceptor_info.interceptor_service_name,
+            interceptor_isolate_name: interceptor_info.interceptor_isolate_name,
+            interceptor_publisher_id: interceptor_info.interceptor_publisher_id,
             interceptor_method_for_unary: interceptor_info.interceptor_method_for_unary,
             interceptor_method_for_streaming: interceptor_info.interceptor_method_for_streaming,
         };
@@ -170,17 +234,42 @@ impl Interceptor {
         let target_service_info = IsolateServiceInfo {
             operator_domain: request.operator_domain(),
             service_name: request.service_name(),
+            isolate_name: request.isolate_name(),
+            publisher_id: request.publisher_id(),
         };
 
         let interceptor_info_reader = self.interceptor_info.read().await;
-        let Some(interceptor_info) = interceptor_info_reader.get(&target_service_info).cloned()
-        else {
+        let interceptor_info = if let Some(info) = interceptor_info_reader.get(&target_service_info)
+        {
+            Some(info.clone())
+        } else if target_service_info.isolate_name.is_empty()
+            && target_service_info.publisher_id.is_empty()
+        {
+            // TODO: Remove this fallback logic once all services are updated to include
+            // isolate_name and publisher_id. For now we match on service_name and
+            // operator_domain.
+            interceptor_info_reader.iter().find_map(|(key, value)| {
+                if key.service_name == target_service_info.service_name
+                    && key.operator_domain == target_service_info.operator_domain
+                {
+                    Some(value.clone())
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        };
+
+        let Some(interceptor_info) = interceptor_info else {
             // No interceptor configured, nothing to do
             return;
         };
 
         request.set_operator_domain(interceptor_info.interceptor_operator_domain.clone());
         request.set_service_name(interceptor_info.interceptor_service_name.clone());
+        request.set_isolate_name(interceptor_info.interceptor_isolate_name.clone());
+        request.set_publisher_id(interceptor_info.interceptor_publisher_id.clone());
 
         request.set_method_name(match request_type {
             RequestType::Unary => interceptor_info.interceptor_method_for_unary.clone(),
@@ -195,6 +284,8 @@ impl Interceptor {
         let opaque_service_info = IsolateServiceInfo {
             operator_domain: interceptor_info.intercepting_operator_domain,
             service_name: interceptor_info.intercepting_service_name,
+            isolate_name: interceptor_info.intercepting_isolate_name,
+            publisher_id: interceptor_info.intercepting_publisher_id,
         };
         if let Some(opaque_binary_service_index) =
             self.isolate_service_mapper.get_binary_index(&opaque_service_info).await
@@ -207,6 +298,8 @@ impl Interceptor {
         let ratified_service_info = IsolateServiceInfo {
             operator_domain: interceptor_info.interceptor_operator_domain,
             service_name: interceptor_info.interceptor_service_name,
+            isolate_name: interceptor_info.interceptor_isolate_name,
+            publisher_id: interceptor_info.interceptor_publisher_id,
         };
         let Some(ratified_binary_service_index) =
             self.isolate_service_mapper.get_binary_index(&ratified_service_info).await

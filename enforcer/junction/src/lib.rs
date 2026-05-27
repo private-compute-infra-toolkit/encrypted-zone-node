@@ -30,6 +30,7 @@ use fileshare_manager::{FileshareManager, FileshareManagerError};
 use grpc_connector::{GrpcChannelPool, DEFAULT_POOL_SIZE};
 use isolate_info::{BinaryServicesIndex, IsolateId, IsolateServiceInfo};
 use isolate_service_mapper::IsolateServiceMapper;
+use payload_proto::enforcer::v1::{ez_hybrid_payload::DeliveryMethod, EzPayloadData, ShmSlotData};
 use shared_memory_manager::SharedMemManager;
 use std::time::Instant;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
@@ -79,6 +80,7 @@ pub struct IsolateJunction {
     state_manager: IsolateStateManager,
     manifest_validator: ManifestValidator,
     metrics: JunctionMetrics,
+    shm_payload_threshold: u64,
 }
 
 #[tonic::async_trait]
@@ -142,6 +144,31 @@ impl Junction for IsolateJunction {
 
                 let mut client = EzIsolateBridgeClient::new(isolate_channel_pool.next_channel());
 
+                // Attempt to transport any inline data to the pre-allocated shared bounds
+                if let Some(hybrid) = &mut invoke_isolate_request.isolate_input {
+                    if let Some(DeliveryMethod::InlineData(inline)) = &hybrid.delivery_method {
+                        if let Some(first_datagram) = inline.datagrams.first() {
+                            // We only send the payload via shared memory if it's over the threshold
+                            // specified in the enforcer main binary.
+                            if (first_datagram.len() as u64) >= self.shm_payload_threshold {
+                                let payload_bytes = &first_datagram[..];
+                                let slots_result = self
+                                    .shared_mem_manager
+                                    .write_to_isolate(destination_isolate_info.id, payload_bytes)
+                                    .await;
+                                // Here we're overwriting the mutable reference to the HybridPayload
+                                // with the ShmSlotData received from writing the payload to the
+                                // ShmSlabPool, instead of sending the payload directly over gRPC
+                                // using EzPayloadData.
+                                if let Ok(slots) = slots_result {
+                                    hybrid.delivery_method =
+                                        Some(DeliveryMethod::ShmData(ShmSlotData { slots }));
+                                }
+                            }
+                        }
+                    }
+                }
+
                 self.state_manager.increment_inflight_counter(destination_isolate_info.id).await;
                 let isolate_rpc_start_time = Instant::now();
                 let mut request = Request::new(invoke_isolate_request);
@@ -160,6 +187,28 @@ impl Junction for IsolateJunction {
                     return Err(EzError::Status(invoke_isolate_result.unwrap_err()));
                 };
                 let mut invoke_isolate_response = invoke_isolate_response.into_inner();
+
+                // Read response payload from shared memory if applicable
+                if let Some(hybrid) = &mut invoke_isolate_response.isolate_output {
+                    if let Some(DeliveryMethod::ShmData(shm_data)) = &hybrid.delivery_method {
+                        match self
+                            .shared_mem_manager
+                            .read_from_isolate(destination_isolate_id, &shm_data.slots)
+                        {
+                            Ok(data) => {
+                                hybrid.delivery_method =
+                                    Some(DeliveryMethod::InlineData(EzPayloadData {
+                                        datagrams: vec![data],
+                                    }));
+                            }
+                            Err(e) => {
+                                log::error!("Failed to read from SHM pool: {:?}", e);
+                                return Err(IsolateStatusCode::InternalError.to_ez_error());
+                            }
+                        }
+                    }
+                }
+
                 match invoke_isolate_response.control_plane_metadata.as_mut() {
                     Some(control_plane_metadata) => {
                         control_plane_metadata.ipc_message_id = original_msg_id;
@@ -415,6 +464,7 @@ impl IsolateJunction {
         fileshare_manager: FileshareManager,
         state_manager: IsolateStateManager,
         manifest_validator: ManifestValidator,
+        shm_payload_threshold: u64,
     ) -> Self {
         let metrics = JunctionMetrics::default();
         Self {
@@ -426,6 +476,7 @@ impl IsolateJunction {
             state_manager,
             manifest_validator,
             metrics,
+            shm_payload_threshold,
         }
     }
 
@@ -764,6 +815,8 @@ fn create_isolate_service_info(
     IsolateServiceInfo {
         operator_domain: control_plane_metadata.destination_operator_domain.clone(),
         service_name: control_plane_metadata.destination_service_name.clone(),
+        isolate_name: control_plane_metadata.destination_isolate_name.clone(),
+        publisher_id: control_plane_metadata.destination_publisher_id.clone(),
     }
 }
 

@@ -120,8 +120,8 @@ pub async fn setup_otel_metrics(
 
 /// Records an initialization metric to the safe OTel collector.
 pub fn record_initialization_metric(provider: &SdkMeterProvider) {
-    let meter = provider.meter("enforcer.initialization");
-    let counter = meter.u64_counter("enforcer_init_metric").build();
+    let meter = provider.meter(crate::meter_name!());
+    let counter = meter.u64_counter(crate::metric_name!("init_metric")).build();
     counter.add(1, &[]);
 
     // Force flush to ensure the metric is sent immediately

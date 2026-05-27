@@ -71,6 +71,15 @@ const OTEL_TRACES_UDS: &str = "traces-otlp.sock";
 const DEV_SHM_PATH: &str = "/dev/shm";
 const RATIFIED_ISOLATE_DOMAIN: &str = "EZ_Trusted";
 
+/// Arguments that describe the shape of shared memory to be used between
+/// the Enforcer and Isolate.
+#[derive(Clone)]
+struct ShmIPCArgs {
+    shm_num_slots: u64,
+    shm_slot_size: u64,
+    shm_payload_threshold: u64,
+}
+
 #[derive(Debug, Derivative)]
 #[derivative(Clone(bound = ""))]
 pub struct ContainerManager<ContainerT: Container> {
@@ -109,6 +118,20 @@ pub struct ContainerManagerArgs {
     pub isolate_runtime_configs: IsolateRuntimeConfigs,
     pub otel_traces_endpoint: Option<String>,
     pub run_isolate_as_unprivileged: bool,
+    pub shm_num_slots: u64,
+    pub shm_slot_size: u64,
+    pub shm_payload_threshold: u64,
+}
+
+struct ProcessBinaryManifestArgs {
+    binary_manifest: BinaryManifest,
+    common_bind_mounts: Vec<String>,
+    max_decoding_message_size: usize,
+    isolate_runtime_configs: IsolateRuntimeConfigs,
+    publisher_id: String,
+    isolate_name: String,
+    package_filename: String,
+    shm_ipc_args: ShmIPCArgs,
 }
 
 // Internal struct to store Container and it's related properties.
@@ -161,6 +184,11 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
                 args.common_bind_mounts,
                 args.max_decoding_message_size,
                 args.isolate_runtime_configs,
+                ShmIPCArgs {
+                    shm_num_slots: args.shm_num_slots,
+                    shm_slot_size: args.shm_slot_size,
+                    shm_payload_threshold: args.shm_payload_threshold,
+                },
             )
             .await
             .context("Failed to process manifest")?;
@@ -195,6 +223,7 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
         common_bind_mounts: Vec<String>,
         max_decoding_message_size: usize,
         isolate_runtime_configs: IsolateRuntimeConfigs,
+        shm_ipc_args: ShmIPCArgs,
     ) -> Result<()> {
         let manifest_type =
             ez_manifest.manifest_type.context("manifest_type can't be empty in EzManifest")?;
@@ -208,19 +237,22 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
                         common_bind_mounts.clone(),
                         max_decoding_message_size,
                         isolate_runtime_configs.clone(),
+                        shm_ipc_args.clone(),
                     ))
                     .await?;
                 }
             }
             ManifestType::BinaryManifest(binary_manifest) => {
-                self.process_binary_manifest(
+                self.process_binary_manifest(ProcessBinaryManifestArgs {
                     binary_manifest,
                     common_bind_mounts,
                     max_decoding_message_size,
                     isolate_runtime_configs,
-                    ez_manifest.publisher_id,
-                    ez_manifest.package_filename,
-                )
+                    publisher_id: ez_manifest.publisher_id,
+                    isolate_name: ez_manifest.isolate_name,
+                    package_filename: ez_manifest.package_filename,
+                    shm_ipc_args,
+                })
                 .await?;
             }
             _ => {
@@ -231,50 +263,43 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
         Ok(())
     }
 
-    async fn process_binary_manifest(
-        &self,
-        binary_manifest: BinaryManifest,
-        common_bind_mounts: Vec<String>,
-        max_decoding_message_size: usize,
-        isolate_runtime_configs: IsolateRuntimeConfigs,
-        publisher_id: String,
-        package_filename: String,
-    ) -> Result<()> {
+    async fn process_binary_manifest(&self, args: ProcessBinaryManifestArgs) -> Result<()> {
         let (strictest_scope, binary_services_index) = self
             .process_binary_scope(
-                publisher_id.clone(),
-                binary_manifest.service_specs,
-                binary_manifest.is_ratified_isolate,
+                args.publisher_id.clone(),
+                args.isolate_name.clone(),
+                args.binary_manifest.service_specs,
+                args.binary_manifest.is_ratified_isolate,
             )
             .await
             .context("Failed to process scope of binary")?;
 
-        let config = isolate_runtime_configs.configs.iter().find(|config| {
-            config.publisher_id == publisher_id
-                && config.binary_filename == binary_manifest.binary_filename
+        let config = args.isolate_runtime_configs.configs.iter().find(|config| {
+            config.publisher_id == args.publisher_id
+                && config.binary_filename == args.binary_manifest.binary_filename
         });
         let command_line_args = if let Some(config) = config {
             &config.command_line_arguments
         } else {
-            &binary_manifest.command_line_arguments
+            &args.binary_manifest.command_line_arguments
         };
         let base_env_vars = if let Some(config) = config {
             &config.environment_variables
         } else {
-            &binary_manifest.environment_variables
+            &args.binary_manifest.environment_variables
         };
 
         let etc_hosts = if let Some(config) = config { &config.etc_hosts } else { "" };
-        let mut bind_mounts = common_bind_mounts.clone();
+        let mut bind_mounts = args.common_bind_mounts.clone();
         if !etc_hosts.is_empty() {
             let etc_hosts_path =
-                get_etc_hosts_path(&publisher_id, &binary_manifest.binary_filename);
+                get_etc_hosts_path(&args.publisher_id, &args.binary_manifest.binary_filename);
             let etc_hosts_parent_dir =
                 etc_hosts_path.parent().context("etc_hosts_path has no parent")?;
             fs::create_dir_all(etc_hosts_parent_dir)
                 .context(format!("Failed to create directory {etc_hosts_parent_dir:?}"))?;
 
-            let key = (publisher_id.clone(), binary_manifest.binary_filename.clone());
+            let key = (args.publisher_id.clone(), args.binary_manifest.binary_filename.clone());
             if self.etc_hosts_written.insert(key, ()).is_none() {
                 match OpenOptions::new().write(true).create_new(true).open(&etc_hosts_path) {
                     Ok(mut file) => {
@@ -298,32 +323,45 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
 
         // Copy is required because of the mutation statement.
         let mut env_vars = base_env_vars.clone();
-        env_vars.push(format!("EZ_MAX_DECODING_MESSAGE_SIZE={max_decoding_message_size:#?}"));
+        env_vars
+            .push(format!("EZ_MAX_DECODING_MESSAGE_SIZE={:#?}", args.max_decoding_message_size));
+        env_vars.push(format!("EZ_SHM_NUM_SLOTS={:#?}", args.shm_ipc_args.shm_num_slots));
+        env_vars.push(format!("EZ_SHM_SLOT_SIZE={:#?}", args.shm_ipc_args.shm_slot_size));
+        env_vars.push(format!(
+            "EZ_SHM_PAYLOAD_THRESHOLD={:#?}",
+            args.shm_ipc_args.shm_payload_threshold
+        ));
+        if !args.binary_manifest.ez_backend_dependencies.is_empty() {
+            let serialized_deps = manifest_parser::serialize_backend_dependencies(
+                args.binary_manifest.ez_backend_dependencies.clone(),
+            )?;
+            env_vars.push(format!("EZ_BACKEND_DEPENDENCIES={}", serialized_deps));
+        }
         let container_startup_args = ContainerStartupArgs {
-            binary_filename: binary_manifest.binary_filename.clone(),
+            binary_filename: args.binary_manifest.binary_filename.clone(),
             // Copy is required because command_line_args is now owned by container_startup_args.
             command_line_args: command_line_args.clone(),
             strictest_scope,
             shared_root: Arc::new(
-                utils::unpack_file_system(&package_filename)
+                utils::unpack_file_system(&args.package_filename)
                     .context("Failed to unpack file system")?,
             ),
             bind_mounts,
             env_vars,
-            publisher_id: publisher_id.clone(),
+            publisher_id: args.publisher_id.clone(),
             // Use an empty metrics policy if nothing is specified
-            metrics_policy: binary_manifest.metrics_policy.unwrap_or_default(),
+            metrics_policy: args.binary_manifest.metrics_policy.unwrap_or_default(),
             run_isolate_as_unprivileged: self.run_isolate_as_unprivileged,
         };
 
         self.container_startup_args_map
             .insert(binary_services_index, container_startup_args.clone());
 
-        let number_of_isolates = binary_manifest.number_of_isolates;
+        let number_of_isolates = args.binary_manifest.number_of_isolates;
         if number_of_isolates == 0 {
             log::warn!(
                 "number_of_isolates is 0 for package {:#?}, no isolates will be launched.",
-                publisher_id
+                args.publisher_id
             );
         } else {
             for _ in 0..number_of_isolates {
@@ -341,6 +379,7 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
     async fn process_binary_scope(
         &self,
         publisher_id: String,
+        isolate_name: String,
         service_specs: Vec<EzServiceSpec>,
         is_ratified_binary: bool,
     ) -> Result<(DataScopeType, BinaryServicesIndex)> {
@@ -354,6 +393,8 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             isolate_service_infos.push(IsolateServiceInfo {
                 operator_domain: publisher_id.clone(),
                 service_name: "".to_string(),
+                isolate_name: isolate_name.clone(),
+                publisher_id: publisher_id.clone(),
             });
         } else {
             for service_spec in service_specs.iter() {
@@ -364,6 +405,8 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
                 isolate_service_infos.push(IsolateServiceInfo {
                     operator_domain: publisher_id.clone(),
                     service_name: service_spec.service_name.clone(),
+                    isolate_name: isolate_name.clone(),
+                    publisher_id: publisher_id.clone(),
                 });
             }
         }
@@ -408,6 +451,7 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             ManifestType::BinaryManifest(binary_manifest) => {
                 self.process_binary_backend_dependencies(
                     ez_manifest.publisher_id,
+                    ez_manifest.isolate_name,
                     binary_manifest.service_specs,
                     binary_manifest.ez_backend_dependencies,
                 )
@@ -433,12 +477,14 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
     async fn process_binary_backend_dependencies(
         &self,
         publisher_id: String,
+        isolate_name: String,
         service_specs: Vec<EzServiceSpec>,
         backend_dependencies: Vec<EzBackendDependency>,
     ) -> Result<()> {
         let binary_services_index = self
             .get_binary_services_index_from_first_isolate_info(
                 publisher_id.to_string(),
+                isolate_name,
                 service_specs,
             )
             .await
@@ -455,6 +501,8 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
                     &IsolateServiceInfo {
                         operator_domain: backend_dependency.operator_domain.clone(),
                         service_name: backend_dependency.service_name.clone(),
+                        isolate_name: backend_dependency.isolate_name.clone(),
+                        publisher_id: backend_dependency.publisher_id.clone(),
                     },
                     route_type,
                 )
@@ -474,14 +522,22 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
     async fn get_binary_services_index_from_first_isolate_info(
         &self,
         publisher_id: String,
+        isolate_name: String,
         service_specs: Vec<EzServiceSpec>,
     ) -> Result<BinaryServicesIndex> {
         let first_isolate_info = if service_specs.is_empty() {
-            IsolateServiceInfo { operator_domain: publisher_id, service_name: "".to_string() }
+            IsolateServiceInfo {
+                operator_domain: publisher_id.clone(),
+                service_name: "".to_string(),
+                isolate_name: isolate_name.clone(),
+                publisher_id: publisher_id.clone(),
+            }
         } else {
             IsolateServiceInfo {
-                operator_domain: publisher_id,
+                operator_domain: publisher_id.clone(),
                 service_name: service_specs[0].service_name.clone(),
+                isolate_name: isolate_name.clone(),
+                publisher_id: publisher_id.clone(),
             }
         };
         self.isolate_service_mapper
@@ -581,6 +637,11 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
 
         // Create a fifo that the Isolate will block on until the EZ server is ready.
         mkfifo(isolate_ez_bridge_ready_enforcer_side_fifo_path.as_str(), Mode::S_IRWXU)?;
+        let sharing_dir_name =
+            sharing_dir.path().to_str().context("sharing_dir path is not valid UTF-8")?.to_string();
+        self.shared_mem_manager
+            .setup_bridge_communication_buffers(isolate_id, &sharing_dir_name)
+            .await?;
 
         let opts = ContainerOptions {
             name: isolate_id.to_string(),

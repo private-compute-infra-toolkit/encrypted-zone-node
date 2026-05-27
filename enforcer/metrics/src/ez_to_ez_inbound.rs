@@ -29,43 +29,43 @@ pub struct EzToEzInboundMetrics {
 impl EzToEzInboundMetrics {
     pub fn new() -> Self {
         Self::from_meters(
-            global::safe_meter("enforcer.ez_to_ez_inbound"),
-            global::unsafe_meter("enforcer.ez_to_ez_inbound"),
+            global::safe_meter(crate::meter_name!()),
+            global::unsafe_meter(crate::meter_name!()),
         )
     }
 
     pub fn from_meters(safe_meter: Meter, unsafe_meter: Meter) -> Self {
         // Safe Metrics
         let requests = safe_meter
-            .u64_counter("enforcer.ez_to_ez.inbound.request")
+            .u64_counter(crate::metric_name!("ez_to_ez.inbound.request"))
             .with_description("Total number of inbound EZ-to-EZ requests.")
             .build();
 
         let errors = safe_meter
-            .u64_counter("enforcer.ez_to_ez.inbound.error")
+            .u64_counter(crate::metric_name!("ez_to_ez.inbound.error"))
             .with_description("Total number of failed inbound EZ-to-EZ requests.")
             .build();
 
         let active_requests = safe_meter
-            .i64_up_down_counter("enforcer.ez_to_ez.inbound.active_requests")
+            .i64_up_down_counter(crate::metric_name!("ez_to_ez.inbound.active_requests"))
             .with_description("Monitor concurrent request load (unary and streaming).")
             .build();
 
         let duration_sec = unsafe_meter
-            .f64_histogram("enforcer.ez_to_ez.inbound.request.duration")
+            .f64_histogram(crate::metric_name!("ez_to_ez.inbound.request.duration"))
             .with_boundaries(common::default_latency_boundaries())
             .with_description("Duration of unary and streaming inbound EZ-to-EZ requests.")
             .with_unit("s")
             .build();
 
         let message_size_bytes = unsafe_meter
-            .u64_histogram("enforcer.ez_to_ez.inbound.message_size")
+            .u64_histogram(crate::metric_name!("ez_to_ez.inbound.message_size"))
             .with_description("Size of individual messages.")
             .with_unit("By")
             .build();
 
         let message_processing_duration = unsafe_meter
-            .f64_histogram("enforcer.ez_to_ez.inbound.message.processing_duration")
+            .f64_histogram(crate::metric_name!("ez_to_ez.inbound.message.processing_duration"))
             .with_boundaries(common::default_latency_boundaries())
             .with_description("Time spent processing stream message.")
             .with_unit("s")

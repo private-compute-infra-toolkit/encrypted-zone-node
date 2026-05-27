@@ -95,16 +95,23 @@ async fn test_external_proxy_metrics() {
 
     let verifier = metrics_test_utils::MetricsVerifier::new(exported);
 
-    let requests = verifier.get_counter_points("enforcer.external.request");
-    assert!(!requests.is_empty(), "enforcer.external.request metric is missing");
+    let requests = verifier.get_counter_points("encrypted_zone.enforcer.external.request");
+    assert!(!requests.is_empty(), "encrypted_zone.enforcer.external.request metric is missing");
     let request_count = max_cumulative_sum_u64(&requests);
     assert_eq!(request_count, 2, "Expected 2 total external proxy request executions");
 
-    let active_requests = verifier.get_counter_points("enforcer.external.active_requests");
-    assert!(!active_requests.is_empty(), "enforcer.external.active_requests metric is missing");
+    let active_requests =
+        verifier.get_counter_points("encrypted_zone.enforcer.external.active_requests");
+    assert!(
+        !active_requests.is_empty(),
+        "encrypted_zone.enforcer.external.active_requests metric is missing"
+    );
 
-    let msg_sizes = verifier.get_histogram_points("enforcer.external.message_size");
-    assert!(!msg_sizes.is_empty(), "enforcer.external.message_size metric is missing");
+    let msg_sizes = verifier.get_histogram_points("encrypted_zone.enforcer.external.message_size");
+    assert!(
+        !msg_sizes.is_empty(),
+        "encrypted_zone.enforcer.external.message_size metric is missing"
+    );
 
     let req_msg_sizes: Vec<_> = msg_sizes
         .iter()
@@ -122,8 +129,9 @@ async fn test_external_proxy_metrics() {
     assert_eq!(req_size_count, 3, "Expected exactly 3 external request size observations");
     assert_eq!(resp_size_count, 3, "Expected exactly 3 external response size observations");
 
-    let durations = verifier.get_histogram_points("enforcer.external.request.duration");
-    assert!(!durations.is_empty(), "enforcer.external.request.duration is missing");
+    let durations =
+        verifier.get_histogram_points("encrypted_zone.enforcer.external.request.duration");
+    assert!(!durations.is_empty(), "encrypted_zone.enforcer.external.request.duration is missing");
     // Histograms are usually exported as Delta, but just in case we need the sum of the maximum occurrences over each export
     // Wait, get_histogram_points gets the COUNT of items in the histogram, not the sum of values.
     // If it's cumulative, we need max count. If delta, we need sum.
@@ -134,11 +142,11 @@ async fn test_external_proxy_metrics() {
     let duration_count = max_cumulative_sum_u64(&durations);
     assert_eq!(duration_count, 2, "Expected exactly 2 duration observations (1 stream, 1 unary)");
 
-    let processing_durations =
-        verifier.get_histogram_points("enforcer.external.message.processing_duration");
+    let processing_durations = verifier
+        .get_histogram_points("encrypted_zone.enforcer.external.message.processing_duration");
     assert!(
         !processing_durations.is_empty(),
-        "enforcer.external.message.processing_duration is missing"
+        "encrypted_zone.enforcer.external.message.processing_duration is missing"
     );
     let proc_duration_count = max_cumulative_sum_u64(&processing_durations);
     assert!(proc_duration_count >= 3, "Expected at least 3 processing duration observations");

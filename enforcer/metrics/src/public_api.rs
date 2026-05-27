@@ -29,43 +29,43 @@ pub struct PublicApiMetrics {
 impl PublicApiMetrics {
     pub fn new() -> Self {
         Self::from_meters(
-            global::safe_meter("enforcer.public_api"),
-            global::unsafe_meter("enforcer.public_api"),
+            global::safe_meter(crate::meter_name!()),
+            global::unsafe_meter(crate::meter_name!()),
         )
     }
 
     pub fn from_meters(safe_meter: Meter, _unsafe_meter: Meter) -> Self {
         // Safe Metrics
         let requests = safe_meter
-            .u64_counter("enforcer.public_api.request")
+            .u64_counter(crate::metric_name!("public_api.request"))
             .with_description("Total number of public api requests.")
             .build();
 
         let errors = safe_meter
-            .u64_counter("enforcer.public_api.error")
+            .u64_counter(crate::metric_name!("public_api.error"))
             .with_description("Total number of failed public API requests.")
             .build();
 
         let active_requests = safe_meter
-            .i64_up_down_counter("enforcer.public_api.active_requests")
+            .i64_up_down_counter(crate::metric_name!("public_api.active_requests"))
             .with_description("Monitor concurrent request load (unary and streaming).")
             .build();
 
         let duration_sec = safe_meter
-            .f64_histogram("enforcer.public_api.request.duration")
+            .f64_histogram(crate::metric_name!("public_api.request.duration"))
             .with_boundaries(common::default_latency_boundaries())
             .with_description("Duration of unary and streaming requests to the public API.")
             .with_unit("s")
             .build();
 
         let message_size_bytes = safe_meter
-            .u64_histogram("enforcer.public_api.message_size")
+            .u64_histogram(crate::metric_name!("public_api.message_size"))
             .with_description("Size of individual messages.")
             .with_unit("By")
             .build();
 
         let message_processing_duration = safe_meter
-            .f64_histogram("enforcer.public_api.message.processing_duration")
+            .f64_histogram(crate::metric_name!("public_api.message.processing_duration"))
             .with_boundaries(common::default_latency_boundaries())
             .with_description("Time spent processing stream message.")
             .with_unit("s")

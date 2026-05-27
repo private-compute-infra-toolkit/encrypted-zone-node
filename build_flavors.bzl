@@ -38,6 +38,8 @@ debug = struct(
     ],
     ubuntu = "_debug",
 )
+
+# perf binary is built with prod optimizations + debug logging.
 perf = struct(
     suffix = "_perf",
     features = ["debug"],
@@ -45,11 +47,9 @@ perf = struct(
         "-C",
         "opt-level=3",
         "-C",
-        "debuginfo=2",
-        "-C",
-        "strip=none",
+        "strip=symbols",
     ],
-    ubuntu = "_debug",
+    ubuntu = "",
 )
 test = struct(
     suffix = "_test",

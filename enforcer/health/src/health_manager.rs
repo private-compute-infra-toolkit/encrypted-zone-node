@@ -164,6 +164,8 @@ impl HealthManager {
                         .map(|s| IsolateServiceInfo {
                             operator_domain: s.operator_domain,
                             service_name: s.service_name,
+                            isolate_name: s.isolate_name,
+                            publisher_id: s.publisher_id,
                         })
                         .collect();
                 }

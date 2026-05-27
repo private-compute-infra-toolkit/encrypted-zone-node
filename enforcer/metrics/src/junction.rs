@@ -30,38 +30,38 @@ pub struct JunctionMetrics {
 impl JunctionMetrics {
     pub fn new() -> Self {
         Self::from_meters(
-            global::safe_meter("enforcer.junction"),
-            global::unsafe_meter("enforcer.junction"),
+            global::safe_meter(crate::meter_name!()),
+            global::unsafe_meter(crate::meter_name!()),
         )
     }
 
     pub fn from_meters(safe_meter: Meter, unsafe_meter: Meter) -> Self {
         let requests = safe_meter
-            .u64_counter("enforcer.junction.request")
+            .u64_counter(crate::metric_name!("junction.request"))
             .with_description("Total number of requests to the junction.")
             .build();
         let duration_sec = unsafe_meter
-            .f64_histogram("enforcer.junction.request.duration")
+            .f64_histogram(crate::metric_name!("junction.request.duration"))
             .with_boundaries(common::default_latency_boundaries())
             .with_description("Latency of invoke_isolate and streaming_invoke_isolate calls.")
             .with_unit("s")
             .build();
         let isolate_rpc_duration_sec = unsafe_meter
-            .f64_histogram("enforcer.junction.isolate_rpc.duration")
+            .f64_histogram(crate::metric_name!("junction.isolate_rpc.duration"))
             .with_boundaries(common::default_latency_boundaries())
             .with_description("Latency of underlying unary rpc call to isolate.")
             .with_unit("s")
             .build();
         let request_error = safe_meter
-            .u64_counter("enforcer.junction.request.error")
+            .u64_counter(crate::metric_name!("junction.request.error"))
             .with_description("Total number of errors from IsolateJunction.")
             .build();
         let active_requests = unsafe_meter
-            .i64_up_down_counter("enforcer.junction.active_requests")
+            .i64_up_down_counter(crate::metric_name!("junction.active_requests"))
             .with_description("Monitor concurrent request load (unary and streaming).")
             .build();
         let message_processing_duration = unsafe_meter
-            .f64_histogram("enforcer.junction.message.processing_duration")
+            .f64_histogram(crate::metric_name!("junction.message.processing_duration"))
             .with_boundaries(common::default_latency_boundaries())
             .with_description("Time spent processing stream message.")
             .with_unit("s")

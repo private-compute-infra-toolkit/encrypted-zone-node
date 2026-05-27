@@ -35,6 +35,7 @@ async fn setup_interceptor_with_populated_mapper() -> Result<Interceptor> {
             vec![IsolateServiceInfo {
                 operator_domain: OPAQUE_DOMAIN.to_string(),
                 service_name: OPAQUE_SERVICE.to_string(),
+                ..Default::default()
             }],
             false, // is_ratified
         )
@@ -44,6 +45,7 @@ async fn setup_interceptor_with_populated_mapper() -> Result<Interceptor> {
             vec![IsolateServiceInfo {
                 operator_domain: RATIFIED_INTERCEPTOR_DOMAIN.to_string(),
                 service_name: RATIFIED_INTERCEPTOR_SERVICE.to_string(),
+                ..Default::default()
             }],
             true, // is_ratified
         )
@@ -53,6 +55,29 @@ async fn setup_interceptor_with_populated_mapper() -> Result<Interceptor> {
             vec![IsolateServiceInfo {
                 operator_domain: ANOTHER_RATIFIED_DOMAIN.to_string(),
                 service_name: ANOTHER_RATIFIED_SERVICE.to_string(),
+                ..Default::default()
+            }],
+            true, // is_ratified
+        )
+        .await?;
+    mapper
+        .new_binary_index(
+            vec![IsolateServiceInfo {
+                operator_domain: "qualified.opaque.domain".to_string(),
+                service_name: "QualifiedOpaqueService".to_string(),
+                isolate_name: "opaque_iso".to_string(),
+                publisher_id: "opaque_pub".to_string(),
+            }],
+            false, // is_ratified
+        )
+        .await?;
+    mapper
+        .new_binary_index(
+            vec![IsolateServiceInfo {
+                operator_domain: "qualified.ratified.domain".to_string(),
+                service_name: "QualifiedRatifiedService".to_string(),
+                isolate_name: "ratified_iso".to_string(),
+                publisher_id: "ratified_pub".to_string(),
             }],
             true, // is_ratified
         )
@@ -270,5 +295,39 @@ async fn test_add_interceptor_external_service_success() {
     interceptor.replace_with_interceptor(&mut call_request, RequestType::Unary).await;
     assert_eq!(call_request.operator_domain, RATIFIED_INTERCEPTOR_DOMAIN);
     assert_eq!(call_request.service_name, RATIFIED_INTERCEPTOR_SERVICE);
+    assert_eq!(call_request.method_name, UNARY);
+}
+
+#[tokio::test]
+async fn test_replace_with_interceptor_with_qualifiers() {
+    let interceptor =
+        setup_interceptor_with_populated_mapper().await.expect("Failed to setup Interceptor");
+    let intercepting_services = InterceptingServices {
+        intercepting_operator_domain: "qualified.opaque.domain".to_string(),
+        intercepting_service_name: "QualifiedOpaqueService".to_string(),
+        intercepting_isolate_name: "opaque_iso".to_string(),
+        intercepting_publisher_id: "opaque_pub".to_string(),
+        interceptor_operator_domain: "qualified.ratified.domain".to_string(),
+        interceptor_service_name: "QualifiedRatifiedService".to_string(),
+        interceptor_isolate_name: "ratified_iso".to_string(),
+        interceptor_publisher_id: "ratified_pub".to_string(),
+        interceptor_method_for_unary: UNARY.to_string(),
+        interceptor_method_for_streaming: STREAMING.to_string(),
+    };
+    interceptor.add_interceptor(intercepting_services).await.unwrap();
+    let mut call_request = CallRequest {
+        operator_domain: "qualified.opaque.domain".to_string(),
+        service_name: "QualifiedOpaqueService".to_string(),
+        isolate_name: "opaque_iso".to_string(),
+        publisher_id: "opaque_pub".to_string(),
+        method_name: "OriginalUnaryMethod".to_string(),
+        ..Default::default()
+    };
+
+    interceptor.replace_with_interceptor(&mut call_request, RequestType::Unary).await;
+    assert_eq!(call_request.operator_domain, "qualified.ratified.domain");
+    assert_eq!(call_request.service_name, "QualifiedRatifiedService");
+    assert_eq!(call_request.isolate_name, "ratified_iso");
+    assert_eq!(call_request.publisher_id, "ratified_pub");
     assert_eq!(call_request.method_name, UNARY);
 }

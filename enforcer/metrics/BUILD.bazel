@@ -57,10 +57,7 @@ rust_library(
 rust_test(
     name = "metrics_test",
     size = "small",
-    srcs = [
-        "test/metrics_test.rs",
-        "test/receiver_test.rs",
-    ],
+    srcs = ["test/metrics_test.rs"],
     deps = [
         ":metrics",
         ":metrics_test_utils",
@@ -76,5 +73,19 @@ rust_test(
         "@crates//:tokio",
         "@crates//:tokio-stream",
         "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "receiver_test",
+    size = "small",
+    srcs = ["test/receiver_test.rs"],
+    deps = [
+        ":metrics",
+        ":metrics_test_utils",
+        "//enforcer/v1:manifest_rust",
+        "@crates//:opentelemetry",
+        "@crates//:opentelemetry-proto",
+        "@crates//:tokio",
     ],
 )

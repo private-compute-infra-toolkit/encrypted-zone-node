@@ -14,7 +14,10 @@
 
 use anyhow::{Context, Result};
 use data_scope_proto::enforcer::v1::DataScopeType;
-use manifest_proto::enforcer::v1::{EzManifest, EzMethodSpec, IsolateRuntimeConfigs};
+use manifest_proto::enforcer::v1::{
+    EzBackendDependencies, EzBackendDependency, EzManifest, EzMethodSpec, IsolateRuntimeConfigs,
+};
+use prost_reflect::prost::Message;
 use prost_reflect::{DescriptorPool, DynamicMessage};
 use serde_json::de::Deserializer;
 
@@ -124,4 +127,25 @@ pub fn get_strictest_scope(method_specs: Vec<EzMethodSpec>) -> (DataScopeType, D
         DataScopeType::try_from(strictest_input_scope).unwrap_or(DataScopeType::Unspecified),
         DataScopeType::try_from(strictest_output_scope).unwrap_or(DataScopeType::Unspecified),
     )
+}
+
+/// Serializes a vector of `EzBackendDependency` into a textproto string.
+///
+/// This function wraps the dependencies in an `EzBackendDependencies` proto message,
+/// serializes it to binary, decodes it into a `DynamicMessage` using the pre-compiled
+/// descriptors, and then formats it as a textproto string.
+pub fn serialize_backend_dependencies(deps: Vec<EzBackendDependency>) -> Result<String> {
+    let wrapped = EzBackendDependencies { ez_backend_dependencies: deps };
+    let bytes = wrapped.encode_to_vec();
+
+    let pool = DescriptorPool::decode(PROTO_DESCRIPTOR_BYTES)
+        .context("failed to decode proto descriptor set")?;
+    let descriptor = pool
+        .get_message_by_name("enforcer.v1.EzBackendDependencies")
+        .context("Couldn't find message descriptor for enforcer.v1.EzBackendDependencies")?;
+
+    let dynamic_message = DynamicMessage::decode(descriptor, &bytes[..])
+        .context("failed to decode into DynamicMessage")?;
+
+    Ok(dynamic_message.to_string())
 }

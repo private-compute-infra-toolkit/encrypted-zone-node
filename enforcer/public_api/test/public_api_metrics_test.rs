@@ -168,7 +168,7 @@ async fn test_stream_call_metrics() {
     for batch in exported {
         for metric in batch.metrics {
             match metric.name.as_str() {
-                "enforcer.public_api.message_size" => {
+                "encrypted_zone.enforcer.public_api.message_size" => {
                     let json = serde_json::to_value(&metric).unwrap();
 
                     if let Some(data_points) =
@@ -205,7 +205,7 @@ async fn test_stream_call_metrics() {
                         }
                     }
                 }
-                "enforcer.public_api.message.processing_duration" => {
+                "encrypted_zone.enforcer.public_api.message.processing_duration" => {
                     let json = serde_json::to_value(&metric).unwrap();
                     if let Some(data_points) =
                         json.pointer("/data/Histogram/data_points").and_then(|v| v.as_array())
@@ -220,7 +220,7 @@ async fn test_stream_call_metrics() {
                         }
                     }
                 }
-                "enforcer.public_api.request.duration" => {
+                "encrypted_zone.enforcer.public_api.request.duration" => {
                     let json = serde_json::to_value(&metric).unwrap();
                     if let Some(data_points) =
                         json.pointer("/data/Histogram/data_points").and_then(|v| v.as_array())
@@ -235,7 +235,7 @@ async fn test_stream_call_metrics() {
                         }
                     }
                 }
-                "enforcer.public_api.active_requests" => {
+                "encrypted_zone.enforcer.public_api.active_requests" => {
                     let json = serde_json::to_value(&metric).unwrap();
                     if let Some(data_points) =
                         json.pointer("/data/Sum/data_points").and_then(|v| v.as_array())
@@ -342,6 +342,7 @@ async fn setup_interceptor() -> Interceptor {
             vec![IsolateServiceInfo {
                 operator_domain: OPAQUE_DOMAIN.to_string(),
                 service_name: OPAQUE_SERVICE.to_string(),
+                ..Default::default()
             }],
             false, // is_ratified
         )
@@ -352,6 +353,7 @@ async fn setup_interceptor() -> Interceptor {
             vec![IsolateServiceInfo {
                 operator_domain: RATIFIED_INTERCEPTOR_DOMAIN.to_string(),
                 service_name: RATIFIED_INTERCEPTOR_SERVICE.to_string(),
+                ..Default::default()
             }],
             true, // is_ratified
         )

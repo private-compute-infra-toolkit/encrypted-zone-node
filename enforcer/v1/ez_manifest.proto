@@ -121,6 +121,10 @@ message AllowedMetric {
   // The type of the metric being defined.
   MetricType type = 2;
   reserved 3;
+
+  // The list of attributes that are allowed for this metric.
+  // If this list is empty, then all attributes are filtered out.
+  repeated string allowed_attributes = 4;
 }
 
 // Describes a service implemented in the binary, to run as an EZ Isolate.
@@ -171,6 +175,13 @@ message EzBackendDependency {
   // TODO: Add additional metadata describing the expected interaction types,
   // e.g., load balancing strategies, streaming or not, chaffing related
   // knobs, etc.
+}
+
+// EzBackendDependencies wraps a list of backend dependencies.
+// This is used to serialize the dependencies as a top-level textproto.
+message EzBackendDependencies {
+  // The list of backend dependencies.
+  repeated EzBackendDependency ez_backend_dependencies = 1;
 }
 
 // TODO: Implement this manifest type

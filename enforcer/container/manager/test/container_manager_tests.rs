@@ -60,6 +60,9 @@ use tower::service_fn;
 
 const CHANNEL_SIZE: usize = 64;
 const MAX_DECODING_SIZE: usize = 4 * 1024 * 1024;
+const SHM_NUM_SLOTS: u64 = 10;
+const SHM_SLOT_SIZE: u64 = 64;
+const SHM_PAYLOAD_THRESHOLD: u64 = 100 * 1024 * 1024;
 const JSON_MANIFEST_PATH_ONE_ISOLATE: &str =
     "enforcer/container/manager/test/testdata/test_manifest_one_isolate.json";
 const JSON_MANIFEST_PATH_MULTIPLE_ISOLATE: &str =
@@ -130,7 +133,11 @@ impl TestHarness {
         );
         let isolate_service_mapper = IsolateServiceMapper::default();
         let manifest_validator = ManifestValidator::default();
-        let shared_memory_manager = SharedMemManager::new(container_manager_requester.clone());
+        let shared_memory_manager = SharedMemManager::new(
+            container_manager_requester.clone(),
+            SHM_NUM_SLOTS,
+            SHM_SLOT_SIZE,
+        );
         let fileshare_manager = FileshareManager::new(container_manager_requester.clone());
         let isolate_junction = FakeJunction::default();
         let interceptor = Interceptor::new(isolate_service_mapper.clone());
@@ -150,6 +157,7 @@ impl TestHarness {
                 interceptor: interceptor.clone(),
                 otel_endpoint: otel_endpoint.clone(),
                 disable_metrics_filtering: false,
+                shm_payload_threshold: SHM_PAYLOAD_THRESHOLD,
             });
 
         let container_manager_args = ContainerManagerArgs {
@@ -168,6 +176,9 @@ impl TestHarness {
             interceptor: interceptor.clone(),
             otel_traces_endpoint: None,
             run_isolate_as_unprivileged: false,
+            shm_num_slots: SHM_NUM_SLOTS,
+            shm_slot_size: SHM_SLOT_SIZE,
+            shm_payload_threshold: SHM_PAYLOAD_THRESHOLD,
         };
 
         let container_manager = ContainerManager::<FakeContainer>::start(container_manager_args)
@@ -296,6 +307,7 @@ async fn test_start_one_isolate() {
     let invoke_ez_request = create_random_request(&IsolateServiceInfo {
         operator_domain: HELLOWORLD_DOMAIN.to_string(),
         service_name: GREETER_SERVICE.to_string(),
+        ..Default::default()
     });
     let expected_response = create_echo_invoke_ez_response(invoke_ez_request.clone());
     let response =
@@ -581,7 +593,14 @@ async fn test_start_one_isolate_with_override() {
         assert_eq!(tracked_container.value().command_line_arguments, vec!["--new_arg".to_string()]);
         assert_eq!(
             tracked_container.value().env,
-            vec!["NEW_ENV=1".to_string(), "EZ_MAX_DECODING_MESSAGE_SIZE=4194304".to_string()]
+            vec![
+                "NEW_ENV=1".to_string(),
+                "EZ_MAX_DECODING_MESSAGE_SIZE=4194304".to_string(),
+                "EZ_SHM_NUM_SLOTS=10".to_string(),
+                "EZ_SHM_SLOT_SIZE=64".to_string(),
+                "EZ_SHM_PAYLOAD_THRESHOLD=104857600".to_string(),
+                "EZ_BACKEND_DEPENDENCIES=ez_backend_dependencies:[{operator_domain:\"helloworld_domain\",service_name:\"Greeter\",method_name:\"SayHello\"}]".to_string()
+            ]
         );
         let etc_hosts_mount = tracked_container
             .value()
@@ -685,6 +704,7 @@ async fn test_ratified_isolate() {
     let invoke_ez_request = create_random_request(&IsolateServiceInfo {
         operator_domain: RATIFIED_ISOLATE_DOMAIN.to_string(),
         service_name: GREETER_SERVICE.to_string(),
+        ..Default::default()
     });
     let expected_response = create_echo_invoke_ez_response(invoke_ez_request.clone());
     let response =
@@ -764,6 +784,7 @@ async fn test_backend_dependencies() {
         .get_service_index(&IsolateServiceInfo {
             operator_domain: PLAYGROUND_EXAMPLE_DOMAIN.to_string(),
             service_name: PRECOMPUTED_BACKEND_SERVICE.to_string(),
+            ..Default::default()
         })
         .await
         .expect("Should get isolate index for backend service");
@@ -1050,7 +1071,11 @@ async fn get_binary_service_index(
     // Assert that Isolate is added in Isolate Service Mapper
     harness
         .isolate_service_mapper
-        .get_binary_index(&IsolateServiceInfo { operator_domain, service_name })
+        .get_binary_index(&IsolateServiceInfo {
+            operator_domain,
+            service_name,
+            ..Default::default()
+        })
         .await
         .context("Should be valid binary index")
 }
@@ -1210,4 +1235,100 @@ async fn test_otel_endpoint_unix_variant(endpoint_val: &str) {
 
     harness.stop().await;
     ensure_isolate_stopped(fake_container_id).await.expect("Container should stop");
+}
+
+#[tokio::test]
+async fn test_backend_dependencies_env_var() {
+    let mut harness = TestHarness::new(
+        JSON_MANIFEST_PATH_ONE_ISOLATE,
+        &IsolateRuntimeConfigs::default(),
+        /* otel_endpoint= */ None,
+    )
+    .await
+    .expect("TestHarness::new should succeed");
+
+    let isolate_and_uds_vec =
+        check_container_started(vec![HELLOWORLD_BINARY]).await.expect("Container should start");
+    assert_eq!(isolate_and_uds_vec.len(), 1);
+    let fake_container_id = isolate_and_uds_vec[0].0;
+
+    let tracker = FakeContainer::get_tracker();
+    let tracked_container = tracker.get(&fake_container_id).unwrap();
+
+    // Verify that the EZ_BACKEND_DEPENDENCIES environment variable is set and matches the textproto
+    let expected_env = "EZ_BACKEND_DEPENDENCIES=ez_backend_dependencies:[{operator_domain:\"helloworld_domain\",service_name:\"Greeter\",method_name:\"SayHello\"}]";
+    assert!(
+        tracked_container.env.iter().any(|e| e == expected_env),
+        "EZ_BACKEND_DEPENDENCIES env var not found or incorrect. Actual env: {:?}",
+        tracked_container.env
+    );
+
+    drop(tracked_container);
+    drop(tracker);
+    harness.stop().await;
+    ensure_isolate_stopped(fake_container_id).await.expect("Container should stop");
+}
+
+#[tokio::test]
+async fn test_multiple_isolates_backend_dependencies_env_vars() {
+    let mut harness = TestHarness::new(
+        JSON_MANIFEST_PATH_MULTIPLE_ISOLATE,
+        &IsolateRuntimeConfigs::default(),
+        /* otel_endpoint= */ None,
+    )
+    .await
+    .expect("TestHarness::new should succeed");
+
+    let isolate_and_uds_vec =
+        check_container_started(vec![SUMMATION_BINARY, PRECOMPUTED_BACKEND_BINARY])
+            .await
+            .expect("Container should start");
+    assert_eq!(isolate_and_uds_vec.len(), 2);
+
+    for (_, uds_path) in &isolate_and_uds_vec {
+        let _client =
+            notify_isolate_ready(uds_path.clone()).await.expect("Isolate should be ready");
+    }
+
+    let tracker = FakeContainer::get_tracker();
+
+    // Find the summation container env vars (clone and drop lock)
+    let summation_env = {
+        let summation_container = tracker
+            .iter()
+            .find(|c| c.value().binary_filename.as_deref() == Some(SUMMATION_BINARY))
+            .expect("Summation container not found");
+        summation_container.value().env.clone()
+    };
+
+    // Verify summation has the 2 dependencies
+    let expected_summation_env = "EZ_BACKEND_DEPENDENCIES=ez_backend_dependencies:[{operator_domain:\"playground_example\",service_name:\"PrecomputedBackend\",method_name:\"FetchTable\"},{operator_domain:\"playground_example\",service_name:\"PrecomputedBackend\",method_name:\"StreamingFetchTable\"}]";
+    assert!(
+        summation_env.iter().any(|e| e == expected_summation_env),
+        "EZ_BACKEND_DEPENDENCIES env var not found or incorrect for summation. Actual env: {:?}",
+        summation_env
+    );
+
+    // Find the precomputed backend container env vars (clone and drop lock)
+    let backend_env = {
+        let backend_container = tracker
+            .iter()
+            .find(|c| c.value().binary_filename.as_deref() == Some(PRECOMPUTED_BACKEND_BINARY))
+            .expect("Backend container not found");
+        backend_container.value().env.clone()
+    };
+
+    // Verify backend does NOT have EZ_BACKEND_DEPENDENCIES
+    assert!(
+        !backend_env.iter().any(|e| e.starts_with("EZ_BACKEND_DEPENDENCIES")),
+        "Precomputed backend container should not have EZ_BACKEND_DEPENDENCIES env var. Actual env: {:?}",
+        backend_env
+    );
+
+    drop(tracker);
+
+    harness.stop().await;
+    for (fake_container_id, _) in isolate_and_uds_vec {
+        ensure_isolate_stopped(fake_container_id).await.expect("Container should stop");
+    }
 }

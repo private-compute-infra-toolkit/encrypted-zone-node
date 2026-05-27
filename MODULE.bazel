@@ -433,7 +433,11 @@ crate.annotation(
 )
 crate.spec(
     package = "boring",
-    version = "5.0.2",
+    version = "=5.0.2",
+)
+crate.spec(
+    package = "boring-sys",
+    version = "=5.0.2",
 )
 crate.spec(
     package = "tokio-boring",

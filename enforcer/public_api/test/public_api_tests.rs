@@ -403,6 +403,79 @@ async fn test_interceptor_streaming() {
     assert_eq!(cpm.destination_method_name, RATIFIED_INTERCEPTOR_STREAMING);
 }
 
+#[tokio::test]
+async fn test_interceptor_unary_with_qualifiers() {
+    let (port, shutdown_tx, fake_junction) = start_api_server().await;
+    let session_metadata = SessionMetadata { session_id: port as u64, ..Default::default() };
+    let call_request = CallRequest {
+        operator_domain: OPAQUE_DOMAIN.to_string(),
+        service_name: "QualifiedOpaqueService".to_string(),
+        isolate_name: "opaque_iso".to_string(),
+        publisher_id: "opaque_pub".to_string(),
+        method_name: "OriginalUnaryMethod".to_string(),
+        session_metadata: Some(session_metadata.clone()),
+        input_params: Some(CallParameters::default()),
+    };
+    let _ = tokio::spawn(async move {
+        let mut client = EzPublicApiClient::connect(format!("http://localhost:{}", port))
+            .await
+            .expect("failed to connect to EzPublicApi");
+        client.call(call_request).await.unwrap().into_inner()
+    })
+    .await
+    .unwrap();
+
+    let invoke_isolate_req = fake_junction.invoked_isolate_requests.lock().unwrap()[0].clone();
+    let cpm = invoke_isolate_req.control_plane_metadata.unwrap();
+
+    let _ = shutdown_tx.send(());
+    assert_eq!(cpm.destination_operator_domain, RATIFIED_INTERCEPTOR_DOMAIN);
+    assert_eq!(cpm.destination_service_name, "QualifiedRatifiedService");
+    assert_eq!(cpm.destination_isolate_name, "ratified_iso");
+    assert_eq!(cpm.destination_publisher_id, "ratified_pub");
+    assert_eq!(cpm.destination_method_name, RATIFIED_INTERCEPTOR_UNARY);
+}
+
+#[tokio::test]
+async fn test_interceptor_streaming_with_qualifiers() {
+    let (port, shutdown_tx, fake_junction) = start_api_server().await;
+    let valid_first_request = CallRequest {
+        operator_domain: OPAQUE_DOMAIN.to_string(),
+        service_name: "QualifiedOpaqueService".to_string(),
+        isolate_name: "opaque_iso".to_string(),
+        publisher_id: "opaque_pub".to_string(),
+        method_name: "OriginalStreamingMethod".to_string(),
+        session_metadata: Some(SessionMetadata { session_id: port as u64, ..Default::default() }),
+        input_params: Some(CallParameters { public_input: vec![1], ..Default::default() }),
+    };
+
+    let (client_tx, client_rx) =
+        tokio::sync::mpsc::channel(EZ_PUBLIC_API_RESPONSE_TEST_CHANNEL_SIZE);
+    let mut response_stream = tokio::spawn(async move {
+        let mut client = EzPublicApiClient::connect(format!("http://localhost:{}", port))
+            .await
+            .expect("failed to connect to EzPublicApi");
+        let request_stream = tokio_stream::wrappers::ReceiverStream::new(client_rx);
+        let response_stream = client.stream_call(request_stream).await.unwrap().into_inner();
+        let _ = client_tx.send(valid_first_request).await;
+        drop(client_tx);
+        response_stream
+    })
+    .await
+    .unwrap();
+    let _ = response_stream.message().await.unwrap();
+
+    let invoke_isolate_req = fake_junction.invoked_isolate_requests.lock().unwrap()[0].clone();
+    let cpm = invoke_isolate_req.control_plane_metadata.unwrap();
+
+    let _ = shutdown_tx.send(());
+    assert_eq!(cpm.destination_operator_domain, RATIFIED_INTERCEPTOR_DOMAIN);
+    assert_eq!(cpm.destination_service_name, "QualifiedRatifiedService");
+    assert_eq!(cpm.destination_isolate_name, "ratified_iso");
+    assert_eq!(cpm.destination_publisher_id, "ratified_pub");
+    assert_eq!(cpm.destination_method_name, RATIFIED_INTERCEPTOR_STREAMING);
+}
+
 fn verify_missing_field_error(status: tonic::Status, field_name: &str) {
     assert_eq!(status.code(), Code::InvalidArgument);
     assert_eq!(status.message(), format!("Request missing required field {}", field_name));
@@ -488,6 +561,7 @@ async fn setup_interceptor() -> Interceptor {
             vec![IsolateServiceInfo {
                 operator_domain: OPAQUE_DOMAIN.to_string(),
                 service_name: OPAQUE_SERVICE.to_string(),
+                ..Default::default()
             }],
             false, // is_ratified
         )
@@ -498,8 +572,33 @@ async fn setup_interceptor() -> Interceptor {
             vec![IsolateServiceInfo {
                 operator_domain: RATIFIED_INTERCEPTOR_DOMAIN.to_string(),
                 service_name: RATIFIED_INTERCEPTOR_SERVICE.to_string(),
+                ..Default::default()
             }],
             true, // is_ratified
+        )
+        .await
+        .unwrap();
+    mapper
+        .new_binary_index(
+            vec![IsolateServiceInfo {
+                operator_domain: OPAQUE_DOMAIN.to_string(),
+                service_name: "QualifiedOpaqueService".to_string(),
+                isolate_name: "opaque_iso".to_string(),
+                publisher_id: "opaque_pub".to_string(),
+            }],
+            false,
+        )
+        .await
+        .unwrap();
+    mapper
+        .new_binary_index(
+            vec![IsolateServiceInfo {
+                operator_domain: RATIFIED_INTERCEPTOR_DOMAIN.to_string(),
+                service_name: "QualifiedRatifiedService".to_string(),
+                isolate_name: "ratified_iso".to_string(),
+                publisher_id: "ratified_pub".to_string(),
+            }],
+            true,
         )
         .await
         .unwrap();
@@ -514,6 +613,19 @@ async fn setup_interceptor() -> Interceptor {
         ..Default::default()
     };
     interceptor.add_interceptor(intercepting_services).await.unwrap();
+    let qualified_intercepting_services = InterceptingServices {
+        intercepting_operator_domain: OPAQUE_DOMAIN.to_string(),
+        intercepting_service_name: "QualifiedOpaqueService".to_string(),
+        intercepting_isolate_name: "opaque_iso".to_string(),
+        intercepting_publisher_id: "opaque_pub".to_string(),
+        interceptor_operator_domain: RATIFIED_INTERCEPTOR_DOMAIN.to_string(),
+        interceptor_service_name: "QualifiedRatifiedService".to_string(),
+        interceptor_isolate_name: "ratified_iso".to_string(),
+        interceptor_publisher_id: "ratified_pub".to_string(),
+        interceptor_method_for_unary: RATIFIED_INTERCEPTOR_UNARY.to_string(),
+        interceptor_method_for_streaming: RATIFIED_INTERCEPTOR_STREAMING.to_string(),
+    };
+    interceptor.add_interceptor(qualified_intercepting_services).await.unwrap();
     interceptor
 }
 

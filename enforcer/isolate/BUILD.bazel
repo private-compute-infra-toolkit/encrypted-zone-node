@@ -50,6 +50,7 @@ rust_library(
         ":isolate_info",
         ":isolate_service_mapper",
         ":shared_memory_manager",
+        ":shm_slab_pool",
         "//enforcer/data_scope",
         "//enforcer/error:ez_error",
         "//enforcer/error:ez_error_trait",
@@ -62,6 +63,7 @@ rust_library(
         "//enforcer/state:state_manager",
         "//enforcer/v1:data_scope_rust",
         "//enforcer/v1:enforcer_rust",
+        "//enforcer/v1:payload_rust",
         "//simple_tonic_stream",
         "@crates//:anyhow",
         "@crates//:dashmap",
@@ -106,15 +108,32 @@ rust_library(
 )
 
 rust_library(
+    name = "shm_slab_pool",
+    srcs = ["src/shm_slab_pool.rs"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//enforcer/v1:payload_rust",
+        "@crates//:anyhow",
+        "@crates//:log",
+        "@crates//:memmap2",
+        "@crates//:thiserror",
+        "@crates//:tokio",
+        "@crates//:tokio-retry",
+    ],
+)
+
+rust_library(
     name = "shared_memory_manager",
     srcs = ["src/shared_mem_manager.rs"],
     visibility = ["//visibility:public"],
     deps = [
         ":isolate_info",
+        ":shm_slab_pool",
         "//enforcer/container/manager:container_manager_request",
         "//enforcer/container/manager:container_manager_requester",
         "//enforcer/interceptor",
         "//enforcer/v1:enforcer_rust",
+        "//enforcer/v1:payload_rust",
         "@crates//:anyhow",
         "@crates//:dashmap",
         "@crates//:rand",
@@ -143,6 +162,21 @@ rust_library(
         "@crates//:thiserror",
         "@crates//:tokio",
         "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "shm_slab_pool_test",
+    size = "small",
+    srcs = ["test/shm_slab_pool_test.rs"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":shm_slab_pool",
+        "//enforcer/v1:payload_rust",
+        "@crates//:anyhow",
+        "@crates//:rand",
+        "@crates//:tempfile",
+        "@crates//:tokio",
     ],
 )
 
@@ -192,6 +226,7 @@ rust_test(
         ":isolate_info",
         ":isolate_service_mapper",
         ":shared_memory_manager",
+        ":shm_slab_pool",
         "//enforcer/container/manager:container_manager_request",
         "//enforcer/container/manager:container_manager_requester",
         "//enforcer/data_scope",
@@ -209,6 +244,7 @@ rust_test(
         "@crates//:anyhow",
         "@crates//:hyper-util",
         "@crates//:log",
+        "@crates//:tempfile",
         "@crates//:tokio",
         "@crates//:tokio-stream",
         "@crates//:tonic",

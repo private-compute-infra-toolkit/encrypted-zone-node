@@ -46,6 +46,7 @@ use metrics::common::{MetricAttributes, ServiceMetrics};
 use metrics::isolate_ez_service::IsolateEzServiceMetrics;
 use metrics::observed_stream;
 use outbound_ez_to_ez_client::OutboundEzToEzClient;
+use payload_proto::enforcer::v1::{ez_hybrid_payload::DeliveryMethod, EzPayloadData, ShmSlotData};
 use shared_memory_manager::SharedMemManager;
 use simple_tonic_stream::SimpleStreamingWrapper;
 use state_manager::IsolateStateManager;
@@ -70,6 +71,7 @@ pub struct IsolateEzBridgeDependencies {
     pub data_scope_requester: DataScopeRequester,
     pub ez_to_ez_outbound_handler: Option<Box<dyn OutboundEzToEzClient>>,
     pub interceptor: Interceptor,
+    pub shm_payload_threshold: u64,
 }
 /// Service Impl for IsolateEzBridge.
 #[derive(Debug)]
@@ -86,6 +88,7 @@ pub struct IsolateEzBridgeService {
     ez_to_ez_outbound_handler: Option<Box<dyn OutboundEzToEzClient>>,
     interceptor: Interceptor,
     metrics: IsolateEzServiceMetrics,
+    shm_payload_threshold: u64,
 }
 
 impl IsolateEzBridgeService {
@@ -104,6 +107,7 @@ impl IsolateEzBridgeService {
             ez_to_ez_outbound_handler: deps.ez_to_ez_outbound_handler,
             interceptor: deps.interceptor,
             metrics,
+            shm_payload_threshold: deps.shm_payload_threshold,
         }
     }
 }
@@ -138,6 +142,18 @@ impl IsolateEzBridge for IsolateEzBridgeService {
         let timeout = try_parse_grpc_timeout(request.metadata()).unwrap_or(None);
         let mut req = request.into_inner();
 
+        if let Some(hybrid) = &mut req.isolate_request_payload {
+            if let Some(DeliveryMethod::ShmData(shm_data)) = &hybrid.delivery_method {
+                let data = self
+                    .shared_memory_manager
+                    .read_from_isolate(self.isolate_id, &shm_data.slots)
+                    .map_err(|e| Status::internal(format!("Failed to read from SHM: {}", e)))?;
+
+                hybrid.delivery_method =
+                    Some(DeliveryMethod::InlineData(EzPayloadData { datagrams: vec![data] }));
+            }
+        }
+
         if !self.isolate_id.is_ratified_isolate() {
             self.interceptor.replace_with_interceptor(&mut req, RequestType::Unary).await;
         }
@@ -160,7 +176,7 @@ impl IsolateEzBridge for IsolateEzBridgeService {
 
         let _call_tracker = self.metrics.track_call(metric_attr.base());
 
-        let result = match route_result {
+        let mut result = match route_result {
             Ok(route) => {
                 let mut result: InvokeEzResult = match route {
                     Route::External => {
@@ -193,6 +209,11 @@ impl IsolateEzBridge for IsolateEzBridgeService {
                 Err(status)
             }
         };
+
+        // If response payload is > threshold, convert to shared memory payload
+        if let Ok(ref mut response) = result {
+            self.maybe_convert_to_shm(response.get_mut()).await;
+        }
 
         result
     }
@@ -415,6 +436,30 @@ impl IsolateEzBridgeService {
             };
             status.clone()
         })
+    }
+    /// Attempts to convert the response payload to a shared memory payload if its size is greater
+    /// than or equal to the `shm_payload_threshold`.
+    ///
+    /// If writing to shared memory fails, the system logs an error and falls back to sending the
+    /// payload over inline data (i.e., gRPC over UDS).
+    async fn maybe_convert_to_shm(&self, invoke_ez_response: &mut InvokeEzResponse) {
+        let Some(hybrid) = &mut invoke_ez_response.ez_response_payload else { return };
+        let Some(DeliveryMethod::InlineData(inline)) = &mut hybrid.delivery_method else { return };
+        let Some(first_datagram) = inline.datagrams.first() else { return };
+
+        let payload_bytes = &first_datagram[..];
+        if (payload_bytes.len() as u64) < self.shm_payload_threshold {
+            return;
+        }
+
+        match self.shared_memory_manager.write_to_isolate(self.isolate_id, payload_bytes).await {
+            Ok(slots) => {
+                hybrid.delivery_method = Some(DeliveryMethod::ShmData(ShmSlotData { slots }));
+            }
+            Err(e) => {
+                log::error!("Failed to write to SHM, falling back to sending payload over inline data: {:?}", e);
+            }
+        }
     }
 }
 
@@ -826,6 +871,8 @@ impl RestrictionsEnforcer {
             .get_service_index(&IsolateServiceInfo {
                 operator_domain: metadata.destination_operator_domain.clone(),
                 service_name: metadata.destination_service_name.clone(),
+                isolate_name: metadata.destination_isolate_name.clone(),
+                publisher_id: metadata.destination_publisher_id.clone(),
             })
             .await
         {
@@ -866,6 +913,7 @@ impl RestrictionsEnforcer {
     }
 
     async fn stream_validate_invoke_ez_req(&self, req: &mut InvokeEzRequest) -> Result<Route, ()> {
+        // TODO: b/509551958 - add support for shared mem payloads in streaming path
         let Some(ref response_tx) = self.response_tx else {
             log::error!("Streaming enforcer invoked without response transmitter");
             return Err(());

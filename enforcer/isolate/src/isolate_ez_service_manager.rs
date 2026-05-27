@@ -49,6 +49,7 @@ pub struct IsolateEzServiceManagerDependencies {
     pub interceptor: interceptor::Interceptor,
     pub otel_endpoint: Option<String>,
     pub disable_metrics_filtering: bool,
+    pub shm_payload_threshold: u64,
 }
 
 #[derive(Debug)]
@@ -83,17 +84,20 @@ impl IsolateEzServiceManager {
     /// Start a new IsolateEzService on the provided UDS address.
     pub async fn start_isolate_ez_server(&self, args: StartIsolateEzServerArgs) {
         let service_mngr_clone = self.clone();
+        let shm_payload_threshold = self.deps.shm_payload_threshold;
         let isolate_ez_handle = tokio::spawn(async move {
             service_mngr_clone
                 .create_isolate_ez_server(
                     args.isolate_id,
                     args.isolate_address,
                     args.isolate_fifo_path,
+                    shm_payload_threshold,
                 )
                 .await;
         });
 
         let service_mngr_clone = self.clone();
+        let is_ratified = args.isolate_id.is_ratified_isolate();
         let otel_metrics_handle = tokio::spawn(async move {
             service_mngr_clone
                 .create_otel_metrics_server(
@@ -101,6 +105,7 @@ impl IsolateEzServiceManager {
                     args.metrics_policy,
                     args.isolate_name,
                     args.publisher_id,
+                    is_ratified,
                 )
                 .await;
         });
@@ -126,6 +131,7 @@ impl IsolateEzServiceManager {
         isolate_id: IsolateId,
         isolate_address: String,
         isolate_fifo_path: String,
+        shm_payload_threshold: u64,
     ) {
         let uds_result = UnixListener::bind(&isolate_address);
         let uds = uds_result
@@ -153,6 +159,7 @@ impl IsolateEzServiceManager {
             data_scope_requester: self.deps.data_scope_requester.clone(),
             ez_to_ez_outbound_handler: self.deps.ez_to_ez_outbound_handler.clone(),
             interceptor: self.deps.interceptor.clone(),
+            shm_payload_threshold,
         };
 
         let isolate_ez_service = IsolateEzBridgeService::new(bridge_deps);
@@ -174,6 +181,7 @@ impl IsolateEzServiceManager {
         policy: IsolateMetricsPolicy,
         isolate_name: String,
         publisher_id: String,
+        is_ratified: bool,
     ) {
         let uds_result = UnixListener::bind(&address);
         let uds = uds_result.expect("Failed to bind to OTel metrics UDS");
@@ -183,6 +191,7 @@ impl IsolateEzServiceManager {
             policy,
             isolate_name,
             publisher_id,
+            is_ratified,
             self.deps.otel_endpoint.clone(),
             self.deps.max_decoding_message_size,
             self.deps.disable_metrics_filtering,

@@ -78,7 +78,7 @@ struct EnforcerInputs {
     #[arg(long)]
     otel_traces_endpoint: Option<String>,
     /// Disable metrics filtering for debugging
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = true)]
     disable_metrics_filtering: bool,
     /// Port for tokio-console to listen on.
     #[arg(long)]
@@ -191,6 +191,16 @@ struct EnforcerInputs {
         help = "Sampler probability for traces."
     )]
     pub sampler_probability: f64,
+    #[arg(long, default_value_t = 0, help = "Number of SHM slots for the slab pool.")]
+    shm_num_slots: u64,
+    #[arg(long, default_value_t = 0, help = "Size of each SHM slot in bytes.")]
+    shm_slot_size: u64,
+    #[arg(
+        long,
+        default_value_t = 100 * 1024 * 1024,
+        help = "Payload threshold (bytes), below which messages will be sent via standard gRPC instead of SHM"
+    )]
+    shm_payload_threshold: u64,
 }
 
 enum Endpoint {
@@ -234,7 +244,11 @@ fn main() -> anyhow::Result<()> {
             data_scope_requester.clone(),
             container_manager_requester.clone(),
         );
-        let shared_memory_manager = SharedMemManager::new(container_manager_requester.clone());
+        let shared_memory_manager = SharedMemManager::new(
+            container_manager_requester.clone(),
+            enforcer_inputs.shm_num_slots,
+            enforcer_inputs.shm_slot_size,
+        );
         let fileshare_manager = FileshareManager::new(container_manager_requester.clone());
         let health_manager = HealthManager::new(
             isolate_state_manager.clone(),
@@ -255,6 +269,7 @@ fn main() -> anyhow::Result<()> {
             fileshare_manager.clone(),
             isolate_state_manager.clone(),
             manifest_validator.clone(),
+            enforcer_inputs.shm_payload_threshold,
         );
         let max_decoding_message_size = enforcer_inputs.max_decoding_message_size;
 
@@ -387,6 +402,7 @@ fn main() -> anyhow::Result<()> {
             interceptor: interceptor.clone(),
             otel_endpoint: enforcer_inputs.otel_safe_endpoint.clone(),
             disable_metrics_filtering: enforcer_inputs.disable_metrics_filtering,
+            shm_payload_threshold: enforcer_inputs.shm_payload_threshold,
         };
 
         let isolate_ez_service_mngr = IsolateEzServiceManager::new(manager_deps);
@@ -410,6 +426,9 @@ fn main() -> anyhow::Result<()> {
             interceptor,
             otel_traces_endpoint: enforcer_inputs.otel_traces_endpoint.clone(),
             run_isolate_as_unprivileged: enforcer_inputs.run_isolate_as_unprivileged,
+            shm_num_slots: enforcer_inputs.shm_num_slots,
+            shm_slot_size: enforcer_inputs.shm_slot_size,
+            shm_payload_threshold: enforcer_inputs.shm_payload_threshold,
         };
 
         let mut container_manager =

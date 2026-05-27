@@ -151,6 +151,7 @@ async fn test_health_manager_exposes_services() {
     let service_info = IsolateServiceInfo {
         operator_domain: "example.com".to_string(),
         service_name: "myservice".to_string(),
+        ..Default::default()
     };
     let binary_index = mapper.new_binary_index(vec![service_info], false).await.unwrap();
     let isolate_id = IsolateId::new(binary_index);

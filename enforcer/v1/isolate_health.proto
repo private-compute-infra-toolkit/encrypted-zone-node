@@ -70,4 +70,8 @@ message EzIsolateHealth {
 message IsolateServiceInfo {
   string operator_domain = 1;
   string service_name = 2;
+  // The isolate name defining the template for the service.
+  string isolate_name = 3;
+  // The publisher id owning this service package.
+  string publisher_id = 4;
 }

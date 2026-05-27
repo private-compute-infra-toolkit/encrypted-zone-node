@@ -91,7 +91,8 @@ impl TestHarness {
             data_scope_requester.clone(),
             container_manager_requester.clone(),
         );
-        let shared_memory_manager = SharedMemManager::new(container_manager_requester.clone());
+        let shared_memory_manager =
+            SharedMemManager::new(container_manager_requester.clone(), 0, 0);
         let fileshare_manager = FileshareManager::new(container_manager_requester);
 
         let deps = IsolateEzBridgeDependencies {
@@ -106,6 +107,7 @@ impl TestHarness {
             manifest_validator: manifest_validator.clone(),
             ez_to_ez_outbound_handler: None,
             interceptor: Interceptor::new(service_mapper.clone()),
+            shm_payload_threshold: 100 * 1024 * 1024, // 100MiB
         };
         let isolate_ez_bridge_service = IsolateEzBridgeService::new(deps);
 
@@ -233,7 +235,7 @@ async fn test_metrics_server_reception() {
             data_scope_requester.clone(),
             container_manager_requester.clone(),
         ),
-        shared_memory_manager: SharedMemManager::new(container_manager_requester.clone()),
+        shared_memory_manager: SharedMemManager::new(container_manager_requester.clone(), 0, 0),
         fileshare_manager: FileshareManager::new(container_manager_requester),
         external_proxy_connector: None,
         isolate_service_mapper: service_mapper.clone(),
@@ -244,6 +246,7 @@ async fn test_metrics_server_reception() {
         interceptor: Interceptor::new(service_mapper),
         otel_endpoint: None,
         disable_metrics_filtering: false,
+        shm_payload_threshold: 100 * 1024 * 1024, // 100MiB
     };
 
     let manager = isolate_ez_service_manager::IsolateEzServiceManager::new(deps);
@@ -259,6 +262,7 @@ async fn test_metrics_server_reception() {
                 allowed_metrics: vec![AllowedMetric {
                     name: "test_metric".to_string(),
                     r#type: 1, // Gauge
+                    allowed_attributes: vec![],
                 }],
             },
             isolate_name: TEST_ISOLATE_NAME.to_string(),
@@ -354,6 +358,7 @@ async fn test_isolate_ez_service_stream_metrics() {
     let service_info = IsolateServiceInfo {
         operator_domain: TEST_INTERNAL_OPERATOR_DOMAIN.to_string(),
         service_name: "service".into(),
+        ..Default::default()
     };
 
     harness
@@ -410,9 +415,9 @@ async fn test_isolate_ez_service_stream_metrics() {
 
     let verifier = MetricsVerifier::new(exported);
 
-    // Verify Message Count (enforcer.isolate_ez_service.message_size)
+    // Verify Message Count (encrypted_zone.enforcer.isolate_ez_service.message_size)
     let message_size_points =
-        verifier.get_histogram_points("enforcer.isolate_ez_service.message_size");
+        verifier.get_histogram_points("encrypted_zone.enforcer.isolate_ez_service.message_size");
     let mut request_message_count: u64 = 0;
     let mut response_message_count: u64 = 0;
     let mut found_route_type = false;
@@ -436,9 +441,10 @@ async fn test_isolate_ez_service_stream_metrics() {
     assert_eq!(response_message_count, 2, "Expected 2 response messages");
     assert!(found_route_type, "Should have found route_type=internal attribute");
 
-    // Verify Processing Duration (enforcer.isolate_ez_service.message.processing_duration)
-    let processing_points =
-        verifier.get_histogram_points("enforcer.isolate_ez_service.message.processing_duration");
+    // Verify Processing Duration (encrypted_zone.enforcer.isolate_ez_service.message.processing_duration)
+    let processing_points = verifier.get_histogram_points(
+        "encrypted_zone.enforcer.isolate_ez_service.message.processing_duration",
+    );
     let processing_count: u64 = processing_points.iter().map(|(c, _)| *c).max().unwrap_or(0);
 
     assert!(
@@ -447,9 +453,9 @@ async fn test_isolate_ez_service_stream_metrics() {
         processing_count
     );
 
-    // Verify Request Duration (enforcer.isolate_ez_service.request.duration)
-    let duration_points =
-        verifier.get_histogram_points("enforcer.isolate_ez_service.request.duration");
+    // Verify Request Duration (encrypted_zone.enforcer.isolate_ez_service.request.duration)
+    let duration_points = verifier
+        .get_histogram_points("encrypted_zone.enforcer.isolate_ez_service.request.duration");
     let duration_count: u64 = duration_points.iter().map(|(c, _)| *c).max().unwrap_or(0);
 
     assert_eq!(duration_count, 1, "Expected 1 stream duration");

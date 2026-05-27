@@ -35,7 +35,7 @@ pub fn default_latency_boundaries() -> Vec<f64> {
 /// Returns the enforcer.reset counter metric.
 pub fn build_reset_counter(meter: &opentelemetry::metrics::Meter) -> Counter<u64> {
     meter
-        .u64_counter("enforcer.reset")
+        .u64_counter(crate::metric_name!("reset"))
         .with_description("Records the number of Isolate resets.")
         .build()
 }

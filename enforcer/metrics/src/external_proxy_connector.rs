@@ -29,42 +29,42 @@ pub struct ExternalProxyConnectorMetrics {
 impl ExternalProxyConnectorMetrics {
     pub fn new() -> Self {
         Self::from_meters(
-            global::safe_meter("enforcer.external"),
-            global::unsafe_meter("enforcer.external"),
+            global::safe_meter(crate::meter_name!()),
+            global::unsafe_meter(crate::meter_name!()),
         )
     }
 
     pub fn from_meters(safe_meter: Meter, unsafe_meter: Meter) -> Self {
         let requests = safe_meter
-            .u64_counter("enforcer.external.request")
+            .u64_counter(crate::metric_name!("external.request"))
             .with_description("Total requests forwarded to external proxy categorized by status")
             .build();
 
         let errors = safe_meter
-            .u64_counter("enforcer.external.error")
+            .u64_counter(crate::metric_name!("external.error"))
             .with_description("Total errors encountered by proxy connector")
             .build();
 
         let active_requests = safe_meter
-            .i64_up_down_counter("enforcer.external.active_requests")
+            .i64_up_down_counter(crate::metric_name!("external.active_requests"))
             .with_description("Monitor concurrent external request load")
             .build();
 
         let duration_sec = unsafe_meter
-            .f64_histogram("enforcer.external.request.duration")
+            .f64_histogram(crate::metric_name!("external.request.duration"))
             .with_boundaries(common::default_latency_boundaries())
             .with_description("Latency of round-trip call to external proxy for unary requests")
             .with_unit("s")
             .build();
 
         let message_size_bytes = unsafe_meter
-            .u64_histogram("enforcer.external.message_size")
+            .u64_histogram(crate::metric_name!("external.message_size"))
             .with_description("Size of individual messages")
             .with_unit("By")
             .build();
 
         let message_processing_duration = unsafe_meter
-            .f64_histogram("enforcer.external.message.processing_duration")
+            .f64_histogram(crate::metric_name!("external.message.processing_duration"))
             .with_boundaries(common::default_latency_boundaries())
             .with_description("Time spent processing external stream message")
             .with_unit("s")

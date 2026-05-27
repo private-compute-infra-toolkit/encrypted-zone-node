@@ -366,10 +366,8 @@ fn create_invoke_isolate_request(
             requester_is_local: false,
             responder_is_local: true,
             destination_operator_domain: call_request.operator_domain,
-            // TODO: Add publisher_id when available.
-            destination_publisher_id: String::new(),
-            // TODO: Add isolate_name when available.
-            destination_isolate_name: String::new(),
+            destination_publisher_id: call_request.publisher_id,
+            destination_isolate_name: call_request.isolate_name,
             destination_service_name: call_request.service_name,
             destination_method_name: call_request.method_name,
             // Call into EzInstance with public API shouldn't specify the ez_instance_id.

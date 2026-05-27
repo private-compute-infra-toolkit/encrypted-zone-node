@@ -30,44 +30,44 @@ pub struct DataScopeMetrics {
 
 impl DataScopeMetrics {
     pub fn new() -> Self {
-        let meter = safe_meter("enforcer.data_scope");
+        let meter = safe_meter(crate::meter_name!());
 
         let request = meter
-            .u64_counter("enforcer.data_scope.request")
+            .u64_counter(crate::metric_name!("data_scope.request"))
             .with_description("Total number of requests to the DSM.")
             .build();
 
         let request_duration = meter
-            .f64_histogram("enforcer.data_scope.request.duration")
+            .f64_histogram(crate::metric_name!("data_scope.request.duration"))
             .with_description("Latency for DSM operations.")
             .with_boundaries(default_latency_boundaries())
             .build();
 
         let validation_duration = meter
-            .f64_histogram("enforcer.data_scope.validation.request.duration")
+            .f64_histogram(crate::metric_name!("data_scope.validation.request.duration"))
             .with_description("Latency for data scope validation checks.")
             .with_boundaries(default_latency_boundaries())
             .build();
 
         let request_error = meter
-            .u64_counter("enforcer.data_scope.request.error")
+            .u64_counter(crate::metric_name!("data_scope.request.error"))
             .with_description("Total number of errors from DSM.")
             .build();
 
         let sensitive = meter
-            .u64_counter("enforcer.data_scope.sensitive")
+            .u64_counter(crate::metric_name!("data_scope.sensitive"))
             .with_description("Count of sensitive sessions handled.")
             .build();
 
         let reset = build_reset_counter(&meter);
 
         let denial = meter
-            .u64_counter("enforcer.data_scope.denial")
+            .u64_counter(crate::metric_name!("data_scope.denial"))
             .with_description("Count of requests denied by DSM.")
             .build();
 
         let scopes_dragged = meter
-            .u64_counter("enforcer.data_scope.scopes_dragged")
+            .u64_counter(crate::metric_name!("data_scope.scopes_dragged"))
             .with_description("Count of data scopes dynamically dragged up.")
             .build();
 

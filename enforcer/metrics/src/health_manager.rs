@@ -28,36 +28,36 @@ pub struct HealthManagerMetrics {
 
 impl HealthManagerMetrics {
     pub fn new() -> Self {
-        Self::from_meter(global::safe_meter("enforcer.health"))
+        Self::from_meter(global::safe_meter(crate::meter_name!()))
     }
 
     pub fn from_meter(meter: Meter) -> Self {
         let state = meter
-            .i64_gauge("enforcer.health.isolate.state")
+            .i64_gauge(crate::metric_name!("health.isolate.state"))
             .with_description("The state should be one of the IsolateState values (e.g. READY).")
             .build();
 
         let reset = common::build_reset_counter(&meter);
 
         let system_fd_count = meter
-            .i64_gauge("enforcer.health.system.file_descriptors")
+            .i64_gauge(crate::metric_name!("health.system.file_descriptors"))
             .with_description("Number of file descriptors currently open by the enforcer process.")
             .build();
 
         let system_memory_rss = meter
-            .i64_gauge("enforcer.health.system.memory_rss")
+            .i64_gauge(crate::metric_name!("health.system.memory_rss"))
             .with_description(
                 "Resident Set Size (RSS) memory currently used by the enforcer process.",
             )
             .build();
 
         let system_cpu_percent = meter
-            .f64_gauge("enforcer.health.system.cpu.usage")
+            .f64_gauge(crate::metric_name!("health.system.cpu.usage"))
             .with_description("CPU usage of the enforcer process.")
             .build();
 
         let container_run_status = meter
-            .i64_gauge("enforcer.health.isolate.container_run_status")
+            .i64_gauge(crate::metric_name!("health.isolate.container_run_status"))
             .with_description("The container run status (e.g. RUNNING, EXITED, etc).")
             .build();
 

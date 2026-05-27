@@ -26,5 +26,3 @@ docker-buildx*
 coverage.log
 # Manual testing files
 manual_testing/**
-# Rules/Skills created for Agents
-.agents/

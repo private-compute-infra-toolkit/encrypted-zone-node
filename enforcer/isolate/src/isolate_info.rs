@@ -69,6 +69,10 @@ pub struct IsolateServiceInfo {
     pub operator_domain: String,
     /// The name of the service.
     pub service_name: String,
+    /// The isolate name qualifying the service.
+    pub isolate_name: String,
+    /// The publisher ID qualifying the service.
+    pub publisher_id: String,
 }
 
 /// `IsolateServiceIndex` provides a compact, indexed representation of an `IsolateServiceInfo`.
@@ -180,7 +184,11 @@ impl BinaryServicesIndex {
 
 impl fmt::Display for IsolateServiceInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "IsolateServiceInfo[{}/{}]", self.operator_domain, self.service_name)
+        write!(
+            f,
+            "IsolateServiceInfo[operator_domain={},service_name={},isolate_name={},publisher_id={}]",
+            self.operator_domain, self.service_name, self.isolate_name, self.publisher_id
+        )
     }
 }
 

@@ -25,6 +25,7 @@ async fn test_new_binary_index_and_get_service_index_successful() {
     let test_isolate_service_info = IsolateServiceInfo {
         operator_domain: TEST_OPERATOR_DOMAIN.to_string(),
         service_name: TEST_SERVICE_NAME.to_string(),
+        ..Default::default()
     };
     let binary_index = isolate_service_mapper
         .new_binary_index(vec![test_isolate_service_info.clone()], false)
@@ -57,6 +58,7 @@ async fn test_new_binary_index_fails_on_duplicate_service() {
     let test_isolate_service_info = IsolateServiceInfo {
         operator_domain: TEST_OPERATOR_DOMAIN.to_string(),
         service_name: TEST_SERVICE_NAME.to_string(),
+        ..Default::default()
     };
     let _binary_index = isolate_service_mapper
         .new_binary_index(vec![test_isolate_service_info.clone()], false)
@@ -79,6 +81,7 @@ async fn test_unregistered_service_returns_none() {
     let test_isolate_service_info = IsolateServiceInfo {
         operator_domain: TEST_OPERATOR_DOMAIN.to_string(),
         service_name: TEST_SERVICE_NAME.to_string(),
+        ..Default::default()
     };
     assert!(isolate_service_mapper.get_service_index(&test_isolate_service_info).await.is_none())
 }
@@ -89,10 +92,12 @@ async fn test_multiple_services_binary_mapping_successful() {
     let test_info = IsolateServiceInfo {
         operator_domain: "domain1".to_string(),
         service_name: "service1".to_string(),
+        ..Default::default()
     };
     let secondary_test_info = IsolateServiceInfo {
         operator_domain: "domain2".to_string(),
         service_name: "service2".to_string(),
+        ..Default::default()
     };
     let services_vec = vec![test_info.clone(), secondary_test_info.clone()];
     let binary_index = isolate_service_mapper
@@ -122,11 +127,13 @@ async fn test_multiple_binary_mapping_successful() {
     let test_info = IsolateServiceInfo {
         operator_domain: "domain1".to_string(),
         service_name: "service1".to_string(),
+        ..Default::default()
     };
     let services_vec = vec![test_info.clone()];
     let secondary_test_info = IsolateServiceInfo {
         operator_domain: "domain2".to_string(),
         service_name: "service2".to_string(),
+        ..Default::default()
     };
     let secondary_services_vec = vec![secondary_test_info.clone()];
     let binary_index = isolate_service_mapper
@@ -168,6 +175,7 @@ async fn test_add_backend_dependency_service_passes_on_duplicate() {
     let service_info = IsolateServiceInfo {
         operator_domain: "some.service".to_string(),
         service_name: "TestService".to_string(),
+        ..Default::default()
     };
     mapper
         .add_backend_dependency_service(&service_info, RouteType::Remote)
@@ -191,6 +199,7 @@ async fn test_add_backend_dependency_service_passes_if_service_in_binary_index()
     let service_info = IsolateServiceInfo {
         operator_domain: "some.service".to_string(),
         service_name: "TestService".to_string(),
+        ..Default::default()
     };
     mapper
         .new_binary_index(vec![service_info.clone()], false)
@@ -214,6 +223,7 @@ async fn test_new_binary_index_fails_if_service_is_backend_dependency() {
     let service_info = IsolateServiceInfo {
         operator_domain: "some.service".to_string(),
         service_name: "TestService".to_string(),
+        ..Default::default()
     };
     mapper
         .add_backend_dependency_service(&service_info, RouteType::Remote)
@@ -231,10 +241,12 @@ async fn test_get_isolate_service_infos_successful() {
     let info1 = IsolateServiceInfo {
         operator_domain: "domain1".to_string(),
         service_name: "service1".to_string(),
+        ..Default::default()
     };
     let info2 = IsolateServiceInfo {
         operator_domain: "domain2".to_string(),
         service_name: "service2".to_string(),
+        ..Default::default()
     };
     let services_vec = vec![info1.clone(), info2.clone()];
     let binary_index = isolate_service_mapper
@@ -248,4 +260,124 @@ async fn test_get_isolate_service_infos_successful() {
     assert_eq!(retrieved_services.len(), 2);
     assert!(retrieved_services.contains(&info1));
     assert!(retrieved_services.contains(&info2));
+}
+
+#[tokio::test]
+async fn test_get_service_index_with_new_qualifiers_and_fallback() {
+    let isolate_service_mapper = IsolateServiceMapper::default();
+    let full_info = IsolateServiceInfo {
+        operator_domain: TEST_OPERATOR_DOMAIN.to_string(),
+        service_name: TEST_SERVICE_NAME.to_string(),
+        isolate_name: "iso1".to_string(),
+        publisher_id: "pub1".to_string(),
+    };
+    let _binary_index = isolate_service_mapper
+        .new_binary_index(vec![full_info.clone()], false)
+        .await
+        .expect("new_binary_index should succeed");
+
+    // Exact match should succeed
+    assert!(isolate_service_mapper.get_service_index(&full_info).await.is_some());
+
+    // Query with a different isolate_name should return None (no fallback when query fields are non-empty but mismatch)
+    let mismatch_info = IsolateServiceInfo {
+        operator_domain: TEST_OPERATOR_DOMAIN.to_string(),
+        service_name: TEST_SERVICE_NAME.to_string(),
+        isolate_name: "iso2".to_string(),
+        publisher_id: "pub1".to_string(),
+    };
+    assert!(isolate_service_mapper.get_service_index(&mismatch_info).await.is_none());
+
+    // TODO: Remove this behavior once SDK is fully updated.
+    // Query with empty isolate_name and publisher_id should trigger fallback and succeed
+    let fallback_query = IsolateServiceInfo {
+        operator_domain: TEST_OPERATOR_DOMAIN.to_string(),
+        service_name: TEST_SERVICE_NAME.to_string(),
+        ..Default::default()
+    };
+    assert!(isolate_service_mapper.get_service_index(&fallback_query).await.is_some());
+}
+
+#[tokio::test]
+async fn test_new_binary_index_and_get_service_index_successful_with_qualifiers() {
+    let isolate_service_mapper = IsolateServiceMapper::default();
+    let test_isolate_service_info = IsolateServiceInfo {
+        operator_domain: TEST_OPERATOR_DOMAIN.to_string(),
+        service_name: TEST_SERVICE_NAME.to_string(),
+        isolate_name: "test_iso".to_string(),
+        publisher_id: "test_pub".to_string(),
+    };
+    let binary_index = isolate_service_mapper
+        .new_binary_index(vec![test_isolate_service_info.clone()], false)
+        .await
+        .expect("new_binary_index should succeed");
+    let mapped_isolate_service_index = isolate_service_mapper
+        .get_service_index(&test_isolate_service_info)
+        .await
+        .expect("get_service_index should succeed");
+    assert_eq!(
+        isolate_service_mapper
+            .get_service_index(&test_isolate_service_info)
+            .await
+            .expect("get_service_index should succeed"),
+        mapped_isolate_service_index,
+        "get_service_index should return the same index for the same service info"
+    );
+    assert_eq!(
+        mapped_isolate_service_index
+            .get_binary_services_index()
+            .expect("Should be a valid binary index"),
+        binary_index
+    );
+    assert_eq!(mapped_isolate_service_index.get_request_route(), Route::Internal);
+}
+
+#[tokio::test]
+async fn test_add_backend_dependency_service_passes_on_duplicate_with_qualifiers() {
+    let mapper = IsolateServiceMapper::default();
+    let service_info = IsolateServiceInfo {
+        operator_domain: "some.service".to_string(),
+        service_name: "TestService".to_string(),
+        isolate_name: "test_iso".to_string(),
+        publisher_id: "test_pub".to_string(),
+    };
+    mapper
+        .add_backend_dependency_service(&service_info, RouteType::Remote)
+        .await
+        .expect("first add_backend_dependency_service should succeed");
+    let backend_dependency_index =
+        mapper.get_service_index(&service_info).await.expect("get_service_index should succeed");
+    assert_eq!(
+        mapper
+            .add_backend_dependency_service(&service_info, RouteType::Remote)
+            .await
+            .expect("Should be a valid isolate service index"),
+        backend_dependency_index
+    );
+    assert!(backend_dependency_index.get_binary_services_index().is_none())
+}
+
+#[tokio::test]
+async fn test_add_backend_dependency_service_passes_if_service_in_binary_index_with_qualifiers() {
+    let mapper = IsolateServiceMapper::default();
+    let service_info = IsolateServiceInfo {
+        operator_domain: "some.service".to_string(),
+        service_name: "TestService".to_string(),
+        isolate_name: "test_iso".to_string(),
+        publisher_id: "test_pub".to_string(),
+    };
+    mapper
+        .new_binary_index(vec![service_info.clone()], false)
+        .await
+        .expect("new_binary_index should succeed");
+    let backend_dependency_index =
+        mapper.get_service_index(&service_info).await.expect("get_service_index should succeed");
+    assert_eq!(
+        mapper
+            .add_backend_dependency_service(&service_info, RouteType::Remote)
+            .await
+            .expect("Should be a valid isolate service index"),
+        backend_dependency_index
+    );
+    assert!(backend_dependency_index.get_binary_services_index().is_some())
 }

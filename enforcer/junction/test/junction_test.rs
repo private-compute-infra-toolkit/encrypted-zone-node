@@ -36,7 +36,7 @@ use isolate_test_utils::{
 use junction::IsolateJunction;
 use junction_test_utils::{
     create_add_isolate_request, TestHarness, CLONE_ECHO_ISOLATE_SERVICE_NAME,
-    JUNCTION_TEST_CHANNEL_SIZE,
+    JUNCTION_TEST_CHANNEL_SIZE, QUALIFIED_ECHO_ISOLATE_SERVICE_NAME,
 };
 use junction_trait::Junction;
 use payload_proto::enforcer::v1::EzPayloadData;
@@ -123,7 +123,7 @@ async fn test_metadata_propagation_to_isolate() {
     let (container_manager_request_tx, _container_manager_request_rx) =
         tokio::sync::mpsc::channel(JUNCTION_TEST_CHANNEL_SIZE);
     let container_manager_requester = ContainerManagerRequester::new(container_manager_request_tx);
-    let shared_memory_manager = SharedMemManager::new(container_manager_requester.clone());
+    let shared_memory_manager = SharedMemManager::new(container_manager_requester.clone(), 0, 0);
     let fileshare_manager = FileshareManager::new(container_manager_requester.clone());
     let data_scope_requester = DataScopeRequester::new(u64::MAX);
     let manifest_validator = ManifestValidator::default();
@@ -136,11 +136,13 @@ async fn test_metadata_propagation_to_isolate() {
         fileshare_manager.clone(),
         isolate_state_manager.clone(),
         manifest_validator.clone(),
+        100 * 1024 * 1024, // 100MiB
     );
 
     let isolate_service_info = IsolateServiceInfo {
         operator_domain: ECHO_ISOLATE_OPERATOR_DOMAIN.to_string(),
         service_name: ECHO_ISOLATE_SERVICE_NAME.to_string(),
+        ..Default::default()
     };
 
     let binary_services_index = isolate_service_mapper
@@ -295,8 +297,11 @@ async fn test_validate_streaming_request_scope_failure() {
     assert_eq!(invoke_isolate_response_result.unwrap(), expected_invoke_isolate_response);
 
     // for subsequent requests don't populate Isolate targeting fields
-    let empty_isolate_info =
-        IsolateServiceInfo { operator_domain: "".to_string(), service_name: "".to_string() };
+    let empty_isolate_info = IsolateServiceInfo {
+        operator_domain: "".to_string(),
+        service_name: "".to_string(),
+        ..Default::default()
+    };
 
     let mut invoke_isolate_request = create_random_request(&empty_isolate_info);
     // Change DataScopeType to Sealed which is more private than strictest (UserPrivate)
@@ -342,8 +347,11 @@ async fn test_streaming_subsequent_request_manifest_validation_failure() {
     // Receive the successful response for the first request.
     assert!(client_junction_channels.junction_to_client.recv().await.unwrap().is_ok());
 
-    let empty_isolate_info =
-        IsolateServiceInfo { operator_domain: "".to_string(), service_name: "".to_string() };
+    let empty_isolate_info = IsolateServiceInfo {
+        operator_domain: "".to_string(),
+        service_name: "".to_string(),
+        ..Default::default()
+    };
 
     // This request should fail because even though Validate Isolate can scope-drag to USER_PRIVATE scope
     // manifest validation will block this request.
@@ -386,8 +394,11 @@ async fn test_validate_streaming_request_scope_success() {
     assert_eq!(invoke_isolate_response_result.unwrap(), expected_invoke_isolate_response);
 
     // for subsequent requests don't populate Isolate targeting fields
-    let empty_isolate_info =
-        IsolateServiceInfo { operator_domain: "".to_string(), service_name: "".to_string() };
+    let empty_isolate_info = IsolateServiceInfo {
+        operator_domain: "".to_string(),
+        service_name: "".to_string(),
+        ..Default::default()
+    };
 
     let invoke_isolate_request = create_random_request(&empty_isolate_info);
     let mut expected_invoke_isolate_response_2 =
@@ -498,8 +509,11 @@ async fn test_junction_streaming_flow() {
     assert_eq!(invoke_isolate_response_result.unwrap(), expected_invoke_isolate_response);
 
     // for subsequent requests don't populate Isolate targeting fields
-    let empty_isolate_info =
-        IsolateServiceInfo { operator_domain: "".to_string(), service_name: "".to_string() };
+    let empty_isolate_info = IsolateServiceInfo {
+        operator_domain: "".to_string(),
+        service_name: "".to_string(),
+        ..Default::default()
+    };
 
     let mut response_set = HashSet::new();
     // spawn 20 requests concurrently and save the random data in a vec
@@ -664,6 +678,30 @@ async fn test_junction_supports_multiple_services() {
     let _ = test_harness.isolate_server_shutdown_tx.send(());
 
     assert_eq!(clone_invoke_isolate_response, expected_clone_invoke_isolate_response);
+}
+
+#[tokio::test]
+async fn test_junction_supports_qualified_services() {
+    // Create IsolateJunction w/ fake echo Isolate
+    let test_harness = TestHarness::new().await;
+
+    // Create InvokeIsolateRequest and expected response
+    let invoke_isolate_request = create_random_request(
+        test_harness.isolate_service_info_map.get(QUALIFIED_ECHO_ISOLATE_SERVICE_NAME).unwrap(),
+    );
+    let invoke_isolate_response = test_harness
+        .isolate_junction
+        .invoke_isolate(None, invoke_isolate_request.clone(), false, None)
+        .await
+        .unwrap();
+
+    let expected_invoke_isolate_response =
+        create_echo_invoke_isolate_response(invoke_isolate_request);
+
+    // Shutdown fake Isolate server
+    let _ = test_harness.isolate_server_shutdown_tx.send(());
+
+    assert_eq!(invoke_isolate_response, expected_invoke_isolate_response);
 }
 
 // TODO: Support scope retrieval for retiring Isolates.
@@ -1110,6 +1148,8 @@ fn create_random_request(isolate_service_info: &IsolateServiceInfo) -> InvokeIso
             responder_is_local: true,
             destination_operator_domain: isolate_service_info.operator_domain.clone(),
             destination_service_name: isolate_service_info.service_name.clone(),
+            destination_isolate_name: isolate_service_info.isolate_name.clone(),
+            destination_publisher_id: isolate_service_info.publisher_id.clone(),
             destination_method_name: ECHO_ISOLATE_METHOD_NAME.to_string(),
             shared_memory_handles: Vec::new(),
             fileshare_handles: Vec::new(),
@@ -1276,7 +1316,7 @@ async fn test_junction_streaming_deadlock_fix() {
     let (container_manager_request_tx, _container_manager_request_rx) =
         tokio::sync::mpsc::channel(JUNCTION_TEST_CHANNEL_SIZE);
     let container_manager_requester = ContainerManagerRequester::new(container_manager_request_tx);
-    let shared_memory_manager = SharedMemManager::new(container_manager_requester.clone());
+    let shared_memory_manager = SharedMemManager::new(container_manager_requester.clone(), 0, 0);
     let fileshare_manager = FileshareManager::new(container_manager_requester.clone());
     let data_scope_requester = DataScopeRequester::new(u64::MAX);
     let manifest_validator = ManifestValidator::default();
@@ -1289,11 +1329,13 @@ async fn test_junction_streaming_deadlock_fix() {
         fileshare_manager.clone(),
         isolate_state_manager.clone(),
         manifest_validator.clone(),
+        100 * 1024 * 1024,
     );
 
     let isolate_service_info = IsolateServiceInfo {
         operator_domain: "deadlock_domain".to_string(),
         service_name: "deadlock_service".to_string(),
+        ..Default::default()
     };
 
     let binary_services_index = isolate_service_mapper
@@ -1330,8 +1372,11 @@ async fn test_junction_streaming_deadlock_fix() {
         "deadlock_method".to_string();
 
     // Create second request using the empty service info logic like other streaming tests
-    let empty_isolate_info =
-        IsolateServiceInfo { operator_domain: "".to_string(), service_name: "".to_string() };
+    let empty_isolate_info = IsolateServiceInfo {
+        operator_domain: "".to_string(),
+        service_name: "".to_string(),
+        ..Default::default()
+    };
     let req2 = create_random_request(&empty_isolate_info);
 
     // Send the first request (which initiates the gRPC stream)
@@ -1360,4 +1405,114 @@ async fn test_junction_streaming_deadlock_fix() {
     assert!(res2.isolate_output.is_some());
 
     let _ = isolate_server_shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn test_junction_unary_flow_shm_response_to_inline_data() {
+    let isolate_service_mapper = IsolateServiceMapper::default();
+    let (container_manager_request_tx, _container_manager_request_rx) =
+        tokio::sync::mpsc::channel(JUNCTION_TEST_CHANNEL_SIZE);
+    let container_manager_requester = ContainerManagerRequester::new(container_manager_request_tx);
+    let shared_memory_manager = SharedMemManager::new(container_manager_requester.clone(), 64, 4);
+    let fileshare_manager = FileshareManager::new(container_manager_requester.clone());
+    let data_scope_requester = DataScopeRequester::new(u64::MAX);
+    let manifest_validator = ManifestValidator::default();
+    let isolate_state_manager =
+        IsolateStateManager::new(data_scope_requester.clone(), container_manager_requester.clone());
+    let isolate_junction = IsolateJunction::new(
+        data_scope_requester.clone(),
+        isolate_service_mapper.clone(),
+        shared_memory_manager.clone(),
+        fileshare_manager.clone(),
+        isolate_state_manager.clone(),
+        manifest_validator.clone(),
+        100 * 1024 * 1024, // 100MiB
+    );
+
+    let isolate_service_info = IsolateServiceInfo {
+        operator_domain: ECHO_ISOLATE_OPERATOR_DOMAIN.to_string(),
+        service_name: ECHO_ISOLATE_SERVICE_NAME.to_string(),
+        ..Default::default()
+    };
+
+    let binary_services_index = isolate_service_mapper
+        .new_binary_index(vec![isolate_service_info.clone()], false)
+        .await
+        .expect("Should be a valid binary services index");
+
+    manifest_validator
+        .add_scope_info(AddManifestScopeRequest {
+            binary_services_index,
+            max_input_scope: DataScopeType::UserPrivate,
+            max_output_scope: DataScopeType::UserPrivate,
+        })
+        .await
+        .expect("Should succeed to add input output scopes in manifest validator");
+
+    let isolate_id = IsolateId::new(binary_services_index);
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_string_lossy().to_string();
+
+    // Setup bridge communication buffers in the shared memory manager
+    shared_memory_manager
+        .setup_bridge_communication_buffers(isolate_id, &path)
+        .await
+        .expect("Failed to setup bridge communication buffers");
+
+    // Create the isolate writer pool
+    let isolate_pool = shm_slab_pool::ShmSlabPool::new(shm_slab_pool::ShmSlabPoolOptions {
+        file_name: format!("{path}/isolate-writes"),
+        number_of_slots: 64,
+        slot_size: 4,
+        writer: true,
+    })
+    .expect("Failed to create isolate writer pool");
+
+    let test_payload = b"hello shm world";
+    let slot_refs =
+        isolate_pool.write_to_pool(test_payload).await.expect("Failed to write to pool");
+
+    // Start fake Isolate server
+    let isolate_server_shutdown_tx = isolate_test_utils::start_fake_isolate_server(
+        isolate_id,
+        ScopeDragInstruction::KeepSame,
+        None,
+    )
+    .await;
+
+    let add_isolate_request = create_add_isolate_request(isolate_id);
+    isolate_state_manager.add_isolate(add_isolate_request).await;
+    isolate_state_manager.update_state(isolate_id, IsolateState::Ready).await.unwrap();
+
+    assert!(isolate_junction
+        .connect_isolate(isolate_id, format!("{}{}", DEFAULT_ISOLATE_UNIX_SOCKET, isolate_id),)
+        .await
+        .is_ok());
+
+    let mut invoke_isolate_request = create_random_request(&isolate_service_info);
+    invoke_isolate_request.isolate_input = Some(payload_proto::enforcer::v1::EzHybridPayload {
+        delivery_method: Some(
+            payload_proto::enforcer::v1::ez_hybrid_payload::DeliveryMethod::ShmData(
+                payload_proto::enforcer::v1::ShmSlotData { slots: slot_refs },
+            ),
+        ),
+    });
+
+    let response = isolate_junction
+        .invoke_isolate(None, invoke_isolate_request, false, None)
+        .await
+        .expect("Invoke isolate should succeed");
+
+    let _ = isolate_server_shutdown_tx.send(());
+
+    let payload = response.isolate_output.expect("Should have payload");
+    let delivery = payload.delivery_method.expect("Should have delivery method");
+    match delivery {
+        payload_proto::enforcer::v1::ez_hybrid_payload::DeliveryMethod::InlineData(data) => {
+            assert_eq!(data.datagrams.len(), 1);
+            assert_eq!(data.datagrams[0], test_payload);
+        }
+        _ => panic!("Expected InlineData delivery method"),
+    }
 }

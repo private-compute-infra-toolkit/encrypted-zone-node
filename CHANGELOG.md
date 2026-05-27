@@ -2,6 +2,50 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## 0.11.0 (2026-05-27)
+
+
+### Dependencies
+
+* **deps:** Lock boring and boring-sys versions
+* **deps:** Update DevKit to release-3.6.0
+* **deps:** Update DevKit to release-3.7.0
+
+
+### EZ Policy Enforcer
+
+* **enforcer:** add allowed_attributes to proto
+* **enforcer:** filter metric attributes
+* **enforcer:** Implement file-based ShmSlabPool
+* **enforcer:** Utilize /enforcer-writes for InvokeEzResponse
+* **enforcer:** Utilize /isolate-writes for InvokeIsolateResponse
+
+
+### mTLS
+
+* **mtls:** Add extra unit tests for routing
+* **mtls:** add EzBackendDependencies wrapper
+* **mtls:** add fields to IsolateServiceInfo
+* **mtls:** pass backend deps to Isolate
+* **mtls:** qualify mTLS interceptor routing
+* **mtls:** update service mapping logic
+
+
+### Features
+
+* Add support for ShmSlabPool env vars
+* Enable wildcards in metrics allowlist
+* **metrics:** Enrich isolate metrics
+* optimize enforcer binary used in perf-mpm
+* Process payloads received via shared memory in InvokeEzRequest
+* Setup enforcer isolate shm slab buffers
+* utilize ShmSlabPool for InvokeIsolateRequest payloads
+
+
+### Bug Fixes
+
+* Update OTel namespace from enforcer to encrypted_zone.enforcer
+
 ## 0.10.0 (2026-05-13)
 
 

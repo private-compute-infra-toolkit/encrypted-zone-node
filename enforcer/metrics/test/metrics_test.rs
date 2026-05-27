@@ -93,8 +93,8 @@ async fn setup_test() -> (FakeCollectorServer, PublicApiMetrics, SdkMeterProvide
     let safe_provider = providers.safe.expect("Safe provider missing");
     let unsafe_provider = providers.unsafe_metrics.expect("Unsafe provider missing");
 
-    let safe_meter = safe_provider.meter("enforcer.public_api");
-    let unsafe_meter = unsafe_provider.meter("enforcer.public_api");
+    let safe_meter = safe_provider.meter("encrypted_zone.enforcer");
+    let unsafe_meter = unsafe_provider.meter("encrypted_zone.enforcer");
 
     let metrics = PublicApiMetrics::from_meters(safe_meter, unsafe_meter);
 
@@ -270,7 +270,7 @@ async fn test_public_api_metrics_record_message_size_bytes() {
     assert_eq!(exported_metrics[0].metrics.len(), 1);
 
     let metric = &exported_metrics[0].metrics[0];
-    assert_eq!(metric.name, "enforcer.public_api.message_size");
+    assert_eq!(metric.name, "encrypted_zone.enforcer.public_api.message_size");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

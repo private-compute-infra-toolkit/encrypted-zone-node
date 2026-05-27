@@ -61,7 +61,7 @@ impl TestHarness {
             data_scope_requester.clone(),
             container_manager_requester.clone(),
         );
-        let shared_memory_manager = SharedMemManager::new(container_manager_requester);
+        let shared_memory_manager = SharedMemManager::new(container_manager_requester, 0, 0);
         let interceptor_instance = interceptor::Interceptor::new(service_mapper.clone());
 
         let deps = IsolateEzBridgeDependencies {
@@ -76,6 +76,7 @@ impl TestHarness {
             manifest_validator,
             ez_to_ez_outbound_handler: None,
             interceptor: interceptor_instance,
+            shm_payload_threshold: 100 * 1024 * 1024, // 100MiB
         };
         let isolate_ez_bridge_service = IsolateEzBridgeService::new(deps);
         let client = spawn_test_server(isolate_ez_bridge_service).await;

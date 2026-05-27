@@ -56,6 +56,7 @@ use tonic::Status;
 pub const JUNCTION_TEST_CHANNEL_SIZE: usize = 128;
 pub const UNKNOWN_ISOLATE_DOMAIN: &str = "unknown_isolate";
 pub const CLONE_ECHO_ISOLATE_SERVICE_NAME: &str = "clone_echo_isolate_service";
+pub const QUALIFIED_ECHO_ISOLATE_SERVICE_NAME: &str = "qualified_echo_isolate_service";
 
 // FakeJunction, by default uses DefaultEchoIsolate as the FakeIsolate
 #[derive(Debug, Clone, Derivative)]
@@ -181,7 +182,8 @@ impl TestHarness {
             tokio::sync::mpsc::channel(JUNCTION_TEST_CHANNEL_SIZE);
         let container_manager_requester =
             ContainerManagerRequester::new(container_manager_request_tx);
-        let shared_memory_manager = SharedMemManager::new(container_manager_requester.clone());
+        let shared_memory_manager =
+            SharedMemManager::new(container_manager_requester.clone(), 0, 0);
         let fileshare_manager = FileshareManager::new(container_manager_requester.clone());
         let data_scope_requester = DataScopeRequester::new(retirement_threshold);
         let manifest_validator = ManifestValidator::default();
@@ -196,20 +198,30 @@ impl TestHarness {
             fileshare_manager.clone(),
             isolate_state_manager.clone(),
             manifest_validator.clone(),
+            100 * 1024 * 1024, // 100 MiB to force inline
         );
 
         // Start fake Isolate server
         let isolate_service_info = IsolateServiceInfo {
             operator_domain: ECHO_ISOLATE_OPERATOR_DOMAIN.to_string(),
             service_name: ECHO_ISOLATE_SERVICE_NAME.to_string(),
+            ..Default::default()
         };
         let clone_isolate_service_info = IsolateServiceInfo {
             operator_domain: ECHO_ISOLATE_OPERATOR_DOMAIN.to_string(),
             service_name: CLONE_ECHO_ISOLATE_SERVICE_NAME.to_string(),
+            ..Default::default()
         };
         let error_isolate_service_info = IsolateServiceInfo {
             operator_domain: ECHO_ISOLATE_OPERATOR_DOMAIN.to_string(),
             service_name: ERROR_ISOLATE_SERVICE_NAME.to_string(),
+            ..Default::default()
+        };
+        let qualified_isolate_service_info = IsolateServiceInfo {
+            operator_domain: ECHO_ISOLATE_OPERATOR_DOMAIN.to_string(),
+            service_name: QUALIFIED_ECHO_ISOLATE_SERVICE_NAME.to_string(),
+            isolate_name: "echo_iso".to_string(),
+            publisher_id: "echo_pub".to_string(),
         };
 
         // Add fake Isolate to IsolateServiceMapper and save the mapped IsolateServiceIndex
@@ -218,6 +230,7 @@ impl TestHarness {
             isolate_service_info.clone(),
             clone_isolate_service_info.clone(),
             error_isolate_service_info.clone(),
+            qualified_isolate_service_info.clone(),
         ];
         let binary_services_index = isolate_service_mapper
             .new_binary_index(isolate_services_vec, is_ratified)
@@ -257,6 +270,10 @@ impl TestHarness {
             .insert(CLONE_ECHO_ISOLATE_SERVICE_NAME.to_string(), clone_isolate_service_info);
         isolate_service_info_map
             .insert(ERROR_ISOLATE_SERVICE_NAME.to_string(), error_isolate_service_info);
+        isolate_service_info_map.insert(
+            QUALIFIED_ECHO_ISOLATE_SERVICE_NAME.to_string(),
+            qualified_isolate_service_info,
+        );
 
         Self {
             isolate_junction,

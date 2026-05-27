@@ -18,6 +18,8 @@ use container_manager_requester::ContainerManagerRequester;
 use dashmap::DashMap;
 use enforcer_proto::enforcer::v1::{CreateMemshareRequest, CreateMemshareResponse};
 use isolate_info::IsolateId;
+use payload_proto::enforcer::v1::ShmSlotReference;
+use shm_slab_pool::{ShmSlabPool, ShmSlabPoolOptions};
 use std::{collections::HashMap, sync::Arc};
 use thiserror::Error;
 use tonic::Status;
@@ -25,6 +27,20 @@ use tonic::Status;
 // We internally represent all FileHandles as u64. But we send them as Strings to Isolates.
 type FileHandle = u64;
 
+// Buffer name is relevant to the current enforcer-isolate shared
+// directory setup at boot and used for UDS communication.
+//
+// For additional context see: go/ez-memshare
+// enforcer: /dev/shm/isolateXXXX/enforcer-writes
+// isolate: /enforcer-isolate-shared/enforcer-writes
+const ENFORCER_WRITES_BUFFER_NAME: &str = "/enforcer-writes";
+const ISOLATE_WRITES_BUFFER_NAME: &str = "/isolate-writes";
+
+#[derive(Debug)]
+pub struct BridgeCommunicationBuffers {
+    pub enforcer_writes_buffer: ShmSlabPool,
+    pub isolate_writes_buffer: ShmSlabPool,
+}
 /// Central place to maintain state for all the SharedMemory b/w Isolates. It calls
 /// ContainerManager to perform the file mounting for shared memory.
 #[derive(Clone, Debug)]
@@ -36,6 +52,14 @@ pub struct SharedMemManager {
     // Map: {Isolate recognized FileHandle, IsolateId of owner of the File}
     file_owner_index: Arc<DashMap<FileHandle, IsolateId>>,
     container_mngr_requester: ContainerManagerRequester,
+    // Map: {IsolateId, BridgeCommunicationBuffers}.
+    // BridgeCommunicationBuffers contain the ShmSlabPool(s) for IPC communication
+    // b/w isolate container and enforcer.
+    isolate_enforcer_shared_dir_index: Arc<DashMap<IsolateId, BridgeCommunicationBuffers>>,
+    // Number of slots for IPC communication b/w isolate container and enforcer.
+    shm_num_slots: u64,
+    // Slab size for IPC communication b/w isolate container and enforcer.
+    shm_slot_size: u64,
 }
 
 #[derive(Copy, Clone, Debug, Error)]
@@ -47,11 +71,18 @@ pub enum SharedMemManagerError {
 }
 
 impl SharedMemManager {
-    pub fn new(container_mngr_requester: ContainerManagerRequester) -> Self {
+    pub fn new(
+        container_mngr_requester: ContainerManagerRequester,
+        shm_num_slots: u64,
+        shm_slot_size: u64,
+    ) -> Self {
         Self {
             isolate_enforcer_file_handle_index: Arc::new(DashMap::new()),
             file_owner_index: Arc::new(DashMap::new()),
             container_mngr_requester,
+            isolate_enforcer_shared_dir_index: Arc::new(DashMap::new()),
+            shm_num_slots,
+            shm_slot_size,
         }
     }
 
@@ -143,5 +174,58 @@ impl SharedMemManager {
             self.file_owner_index.remove(&container_file_handle);
         }
         Ok(())
+    }
+
+    /// Sets up the shared memory buffers for bridge communication with the Isolate
+    /// corresponding to the given [sharing_dir].
+    pub async fn setup_bridge_communication_buffers(
+        &self,
+        isolate_id: IsolateId,
+        sharing_dir: &str,
+    ) -> Result<()> {
+        let buf_name = format!("{sharing_dir}{ENFORCER_WRITES_BUFFER_NAME}");
+        let buf_name_isolate = format!("{sharing_dir}{ISOLATE_WRITES_BUFFER_NAME}");
+        let bridge_communication_buffers = BridgeCommunicationBuffers {
+            enforcer_writes_buffer: ShmSlabPool::new(ShmSlabPoolOptions {
+                file_name: buf_name,
+                number_of_slots: self.shm_num_slots,
+                slot_size: self.shm_slot_size,
+                writer: true,
+            })?,
+            isolate_writes_buffer: ShmSlabPool::new(ShmSlabPoolOptions {
+                file_name: buf_name_isolate,
+                number_of_slots: self.shm_num_slots,
+                slot_size: self.shm_slot_size,
+                writer: false,
+            })?,
+        };
+        self.isolate_enforcer_shared_dir_index.insert(isolate_id, bridge_communication_buffers);
+        Ok(())
+    }
+
+    /// Writes the payload to the `enforcer_writes_buffer` for the given `isolate_id`.
+    pub async fn write_to_isolate(
+        &self,
+        isolate_id: IsolateId,
+        payload: &[u8],
+    ) -> Result<Vec<ShmSlotReference>> {
+        let buffers_ref = self
+            .isolate_enforcer_shared_dir_index
+            .get(&isolate_id)
+            .context("Shared memory buffers not initialized for isolate")?;
+        Ok(buffers_ref.enforcer_writes_buffer.write_to_pool(payload).await?)
+    }
+
+    /// Reads the payload from the `isolate_writes_buffer` for the given `isolate_id`.
+    pub fn read_from_isolate(
+        &self,
+        isolate_id: IsolateId,
+        slot_references: &[ShmSlotReference],
+    ) -> Result<Vec<u8>> {
+        let buffers_ref = self
+            .isolate_enforcer_shared_dir_index
+            .get(&isolate_id)
+            .context("Shared memory buffers not initialized for isolate")?;
+        Ok(buffers_ref.isolate_writes_buffer.read_from_pool(slot_references)?)
     }
 }

@@ -65,12 +65,37 @@ impl IsolateServiceMapper {
         Ok(new_binary_services_index)
     }
 
+    fn find_fallback_match(
+        index: &HashMap<IsolateServiceInfo, IsolateServiceIndex>,
+        isolate_service_info: &IsolateServiceInfo,
+    ) -> Option<IsolateServiceIndex> {
+        // TODO: Remove this fallback logic once all services are updated to include
+        // isolate_name and publisher_id. For now we match on service_name and
+        // operator_domain.
+        if isolate_service_info.isolate_name.is_empty()
+            && isolate_service_info.publisher_id.is_empty()
+        {
+            for (key, idx) in index.iter() {
+                if key.service_name == isolate_service_info.service_name
+                    && key.operator_domain == isolate_service_info.operator_domain
+                {
+                    return Some(*idx);
+                }
+            }
+        }
+        None
+    }
+
     /// Retrieves the [IsolateServiceIndex] for a given [IsolateServiceInfo].
     pub async fn get_service_index(
         &self,
         isolate_service_info: &IsolateServiceInfo,
     ) -> Option<IsolateServiceIndex> {
-        self.isolate_service_info_index.read().await.get(isolate_service_info).cloned()
+        let guard = self.isolate_service_info_index.read().await;
+        if let Some(index) = guard.get(isolate_service_info) {
+            return Some(*index);
+        }
+        Self::find_fallback_match(&guard, isolate_service_info)
     }
 
     /// Retrieves the [BinaryServicesIndex] for a given [IsolateServiceInfo].
@@ -105,23 +130,24 @@ impl IsolateServiceMapper {
         // Acquire a write lock to safely modify the index.
         let mut isolate_service_info_index = self.isolate_service_info_index.write().await;
 
-        match isolate_service_info_index.entry(isolate_service_info.clone()) {
-            Entry::Occupied(entry) => Ok(*entry.get()),
-            Entry::Vacant(entry) => {
-                let is_force_external = route_type == RouteType::External;
-
-                let new_index = IsolateServiceIndex::new(
-                    None,
-                    &isolate_service_info.operator_domain,
-                    is_force_external,
-                )
-                .context(format!(
-                    "Failed to create Isolate Service Index for {}",
-                    isolate_service_info
-                ))?;
-                entry.insert(new_index);
-                Ok(new_index)
-            }
+        if let Some(index) = isolate_service_info_index.get(isolate_service_info) {
+            return Ok(*index);
         }
+        if let Some(index) =
+            Self::find_fallback_match(&isolate_service_info_index, isolate_service_info)
+        {
+            return Ok(index);
+        }
+
+        let is_force_external = route_type == RouteType::External;
+
+        let new_index = IsolateServiceIndex::new(
+            None,
+            &isolate_service_info.operator_domain,
+            is_force_external,
+        )
+        .context(format!("Failed to create Isolate Service Index for {}", isolate_service_info))?;
+        isolate_service_info_index.insert(isolate_service_info.clone(), new_index);
+        Ok(new_index)
     }
 }

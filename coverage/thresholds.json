@@ -1,0 +1,92 @@
+{
+  "enforcer/console_helper/src/lib.rs": {
+    "lines": 30
+  },
+  "enforcer/container/manager/src/manager.rs": {
+    "lines": 80
+  },
+  "enforcer/data_scope/src/error.rs": {
+    "lines": 80
+  },
+  "enforcer/data_scope/src/ratified_isolate_manager.rs": {
+    "lines": 80
+  },
+  "enforcer/diagnostics/src/tokio_service.rs": {
+    "lines": 70
+  },
+  "enforcer/ez_to_external/src/external_proxy_connector.rs": {
+    "lines": 80
+  },
+  "enforcer/ez_to_ez/outbound_ez_to_ez_client.rs": {
+    "lines": 0
+  },
+  "enforcer/ez_to_ez/src/mtls.rs": {
+    "lines": 80
+  },
+  "enforcer/health/src/health_ops.rs": {
+    "lines": 80
+  },
+  "enforcer/health/src/system_metrics.rs": {
+    "lines": 80
+  },
+  "enforcer/interceptor/src/lib.rs": {
+    "lines": 80
+  },
+  "enforcer/isolate/src/fileshare_manager.rs": {
+    "lines": 70
+  },
+  "enforcer/isolate/src/isolate_ez_service.rs": {
+    "lines": 80
+  },
+  "enforcer/isolate/src/isolate_ez_service_manager.rs": {
+    "lines": 80
+  },
+  "enforcer/isolate/src/isolate_info.rs": {
+    "lines": 70
+  },
+  "enforcer/isolate/src/shared_mem_manager.rs": {
+    "lines": 70
+  },
+  "enforcer/isolate/test_utils.rs": {
+    "lines": 80
+  },
+  "enforcer/junction/src/error.rs": {
+    "lines": 60
+  },
+  "enforcer/junction/src/lib.rs": {
+    "lines": 70
+  },
+  "enforcer/junction/trait.rs": {
+    "lines": 0
+  },
+  "enforcer/metrics/src/common.rs": {
+    "lines": 80
+  },
+  "enforcer/metrics/src/data_scope.rs": {
+    "lines": 0
+  },
+  "enforcer/metrics/src/global.rs": {
+    "lines": 70
+  },
+  "enforcer/metrics/src/lib.rs": {
+    "lines": 70
+  },
+  "enforcer/metrics/src/observed_proxy_channel.rs": {
+    "lines": 80
+  },
+  "enforcer/metrics/src/receiver.rs": {
+    "lines": 80
+  },
+  "enforcer/metrics/test/test_utils.rs": {
+    "lines": 80
+  },
+  "enforcer/public_api/src/lib.rs": {
+    "lines": 70
+  },
+  "enforcer/state/src/isolate_state_manager.rs": {
+    "lines": 80
+  },
+  "enforcer/trace_context/src/lib.rs": {
+    "lines": 80
+  }
+}

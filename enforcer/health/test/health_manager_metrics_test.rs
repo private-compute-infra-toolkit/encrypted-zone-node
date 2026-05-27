@@ -47,6 +47,7 @@ async fn test_health_manager_metrics_scenarios() {
             vec![IsolateServiceInfo {
                 operator_domain: "test_domain".to_string(),
                 service_name: "test_service".to_string(),
+                ..Default::default()
             }],
             false,
         )
@@ -96,8 +97,12 @@ async fn test_health_manager_metrics_scenarios() {
     let exported = collector.exported_metrics(5, Duration::from_secs(5)).await;
     let verifier = MetricsVerifier::new(exported);
 
-    let state_points = verifier.get_gauge_points("enforcer.health.isolate.state", false);
-    assert!(!state_points.is_empty(), "Expected enforcer.health.isolate.state metric");
+    let state_points =
+        verifier.get_gauge_points("encrypted_zone.enforcer.health.isolate.state", false);
+    assert!(
+        !state_points.is_empty(),
+        "Expected encrypted_zone.enforcer.health.isolate.state metric"
+    );
     assert_eq!(state_points[0].0, 7.0, "State should be 7 (Ready)");
 
     // Start Scenario 2
@@ -115,7 +120,8 @@ async fn test_health_manager_metrics_scenarios() {
         let exported_2 = collector.exported_metrics(10, Duration::from_secs(5)).await;
         let verifier_2 = MetricsVerifier::new(exported_2);
 
-        let cpu_points = verifier_2.get_gauge_points("enforcer.health.system.cpu.usage", true);
+        let cpu_points =
+            verifier_2.get_gauge_points("encrypted_zone.enforcer.health.system.cpu.usage", true);
         if cpu_points.is_empty() {
             continue;
         }
@@ -124,8 +130,8 @@ async fn test_health_manager_metrics_scenarios() {
         let found_cpu = cpu_points.iter().any(|(val, _)| *val >= 0.0);
         assert!(found_cpu, "CPU percent should be >= 0.0. Found: {:?}", cpu_points);
 
-        let container_status_points_2 =
-            verifier_2.get_gauge_points("enforcer.health.isolate.container_run_status", false);
+        let container_status_points_2 = verifier_2
+            .get_gauge_points("encrypted_zone.enforcer.health.isolate.container_run_status", false);
         assert!(
             !container_status_points_2.is_empty(),
             "Expected enforcer.health.isolate.container_run_status metric"
@@ -137,34 +143,48 @@ async fn test_health_manager_metrics_scenarios() {
             container_status_points_2
         );
 
-        let state_points_2 = verifier_2.get_gauge_points("enforcer.health.isolate.state", false);
-        assert!(!state_points_2.is_empty(), "Expected enforcer.health.isolate.state metric");
+        let state_points_2 =
+            verifier_2.get_gauge_points("encrypted_zone.enforcer.health.isolate.state", false);
+        assert!(
+            !state_points_2.is_empty(),
+            "Expected encrypted_zone.enforcer.health.isolate.state metric"
+        );
         // State remains Ready (7) as HealthManager doesn't update IsolateState on container exit.
         let found_state_ready = state_points_2.iter().any(|(val, _)| *val == 7.0);
         assert!(found_state_ready, "State should remain 7 (Ready). Found: {:?}", state_points_2);
 
-        let reset_points = verifier_2.get_counter_points("enforcer.reset");
-        assert!(!reset_points.is_empty(), "Expected enforcer.reset metric");
+        let reset_points = verifier_2.get_counter_points("encrypted_zone.enforcer.reset");
+        assert!(!reset_points.is_empty(), "Expected encrypted_zone.enforcer.reset metric");
         let found_reset = reset_points.iter().any(|(val, _)| *val >= 1);
         assert!(
             found_reset,
             "Reset count should be >= 1 after a container mismatch. Found: {:?}",
             reset_points
         );
-        let fd_points =
-            verifier_2.get_gauge_points("enforcer.health.system.file_descriptors", false);
-        assert!(!fd_points.is_empty(), "Expected enforcer.health.system.file_descriptors metric");
+        let fd_points = verifier_2
+            .get_gauge_points("encrypted_zone.enforcer.health.system.file_descriptors", false);
+        assert!(
+            !fd_points.is_empty(),
+            "Expected encrypted_zone.enforcer.health.system.file_descriptors metric"
+        );
         let found_fd = fd_points.iter().any(|(val, _)| *val > 0.0);
         assert!(found_fd, "FD count should be > 0. Found: {:?}", fd_points);
 
-        let mem_points = verifier_2.get_gauge_points("enforcer.health.system.memory_rss", false);
-        assert!(!mem_points.is_empty(), "Expected enforcer.health.system.memory_rss metric");
+        let mem_points =
+            verifier_2.get_gauge_points("encrypted_zone.enforcer.health.system.memory_rss", false);
+        assert!(
+            !mem_points.is_empty(),
+            "Expected encrypted_zone.enforcer.health.system.memory_rss metric"
+        );
         let found_mem = mem_points.iter().any(|(val, _)| *val > 0.0);
         assert!(found_mem, "Memory RSS should be > 0. Found: {:?}", mem_points);
 
         break;
     }
-    assert!(found_cpu_metric, "Expected enforcer.health.system.cpu.usage metric after retries");
+    assert!(
+        found_cpu_metric,
+        "Expected encrypted_zone.enforcer.health.system.cpu.usage metric after retries"
+    );
 
     if let Some(provider) = providers.safe {
         let _ = provider.shutdown();

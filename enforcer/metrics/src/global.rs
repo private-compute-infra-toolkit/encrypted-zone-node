@@ -19,6 +19,20 @@ use std::sync::{Arc, OnceLock, RwLock};
 
 type DynMeterProvider = Arc<dyn MeterProvider + Send + Sync>;
 
+#[macro_export]
+macro_rules! meter_name {
+    () => {
+        "encrypted_zone.enforcer"
+    };
+}
+
+#[macro_export]
+macro_rules! metric_name {
+    ($name:expr) => {
+        concat!("encrypted_zone.enforcer.", $name)
+    };
+}
+
 struct GlobalProviders {
     safe_provider: DynMeterProvider,
     unsafe_provider: DynMeterProvider,

@@ -37,3 +37,13 @@ These variables configure the behavior when connecting to external proxy or mTLS
     similar setup). This applies globally to all components.
 -   **Type:** String (e.g., `info`, `debug`, `trace`, `warn`, `error`)
 -   **Default:** Not set.
+
+## Workload / Isolate Configuration
+
+### `EZ_BACKEND_DEPENDENCIES`
+
+-   **Description:** Serialized `textproto` representation of the `EzManifest` backend dependencies
+    (`EzBackendDependencies` proto). Used by the SDK inside the Isolate to lookup `isolate_name` and
+    `publisher_id` for `InvokeEZ` calls.
+-   **Type:** String (protobuf text format)
+-   **Default:** Not set (only populated if backend dependencies are defined in the manifest).
