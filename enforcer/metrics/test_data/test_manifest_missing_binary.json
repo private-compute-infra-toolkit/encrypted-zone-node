@@ -1,0 +1,8 @@
+{
+  "isolate_name": "ezpkg://helloworld.com",
+  "publisher_id": "helloworld_domain",
+  "package_filename": "enforcer/container/test_data/test_binary.tar",
+  "bundle_manifest": {
+    "manifests": []
+  }
+}

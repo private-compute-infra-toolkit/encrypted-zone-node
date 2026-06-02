@@ -14,8 +14,9 @@
 
 use anyhow::Context;
 use std::ffi::CStr;
-use std::fs::{self, File, OpenOptions};
-use std::os::fd::AsRawFd;
+use std::fs::File;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use tar::Archive;
 use tempfile::TempDir;
@@ -33,7 +34,67 @@ pub fn unpack_file_system(tar_file_path: &str) -> anyhow::Result<TempDir> {
     Ok(tmp_dir)
 }
 
-/// Create a mount destination for the container.
+/// Helper to open a directory relative to a directory file descriptor.
+fn openat_dir(
+    dirfd: &std::os::fd::OwnedFd,
+    path: &std::ffi::CStr,
+) -> std::io::Result<std::os::fd::OwnedFd> {
+    let fd = unsafe {
+        libc::openat(
+            dirfd.as_raw_fd(),
+            path.as_ptr(),
+            libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        // Note: std::io::Error::last_os_error() reads from thread-local `errno`
+        // so it does not rely on global state across threads and is safe from race conditions.
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
+    }
+}
+
+/// Helper to create a directory relative to a directory file descriptor.
+fn mkdirat(
+    dirfd: &std::os::fd::OwnedFd,
+    path: &std::ffi::CStr,
+    mode: libc::mode_t,
+) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    if unsafe { libc::mkdirat(dirfd.as_raw_fd(), path.as_ptr(), mode) } < 0 {
+        // Note: std::io::Error::last_os_error() reads from thread-local `errno`
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+/// Helper to open or create a file relative to a directory file descriptor.
+fn openat_file(
+    dirfd: &std::os::fd::OwnedFd,
+    path: &std::ffi::CStr,
+    flags: libc::c_int,
+    mode: libc::mode_t,
+) -> std::io::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let fd = unsafe {
+        libc::openat(
+            dirfd.as_raw_fd(),
+            path.as_ptr(),
+            flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            mode,
+        )
+    };
+    if fd < 0 {
+        // Note: std::io::Error::last_os_error() reads from thread-local `errno`
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
+    }
+}
+
+/// Create a mount destination for the container safely, without following symlinks.
 pub fn create_mount_destinaton(
     parent: PathBuf,
     destination: &str,
@@ -42,21 +103,52 @@ pub fn create_mount_destinaton(
     if destination.starts_with('/') {
         anyhow::bail!("destination cannot be an absolute path");
     }
-    let mount_destination = parent.join(destination);
-    if is_directory {
-        fs::create_dir_all(mount_destination)
-            .context("Directory create failed for mount_destination")?;
-    } else {
-        if let Some(parent_dir) = mount_destination.parent() {
-            fs::create_dir_all(parent_dir)
-                .context("Parent directory create failed for mount_destination")?;
+
+    let dest_path = PathBuf::from(destination);
+    let components: Vec<_> = dest_path.components().collect();
+
+    // Open the parent directory securely and maintain a file descriptor to it.
+    // By walking the path using `openat` relative to this descriptor, we ensure that
+    // path resolution is immune to TOCTOU (Time-of-Check to Time-of-Use) race conditions,
+    // where an attacker might swap a directory for a symlink mid-resolution.
+    let parent_c = std::ffi::CString::new(parent.as_os_str().as_bytes())?;
+    let raw_fd = unsafe {
+        libc::open(parent_c.as_ptr(), libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC)
+    };
+    if raw_fd < 0 {
+        anyhow::bail!("Failed to open parent directory: {}", std::io::Error::last_os_error());
+    }
+    let mut current_fd: OwnedFd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+
+    for (i, comp) in components.iter().enumerate() {
+        let is_last = i == components.len() - 1;
+        let comp_c = std::ffi::CString::new(comp.as_os_str().as_bytes())?;
+
+        if is_last && !is_directory {
+            // Create file safely using O_NOFOLLOW to explicitly reject trailing symlinks.
+            // 0o644: read and write access to the file owner, while restricting group members and others to read-only
+            openat_file(&current_fd, &comp_c, libc::O_CREAT | libc::O_WRONLY, 0o644)
+                .context("Failed to create destination file")?;
+            break;
+        } else {
+            // Check if directory exists and is not a symlink. We use O_NOFOLLOW on every
+            // intermediate directory to guarantee we never cross a symlink boundary, fully
+            // neutralizing intermediate symlink traversal attacks.
+            current_fd = match openat_dir(&current_fd, &comp_c) {
+                Ok(fd) => fd,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    // 0o755: read, write, and execute access to the owner, while restricting group members and others to read and execute only
+                    if let Err(mkdir_err) = mkdirat(&current_fd, &comp_c, 0o755) {
+                        if mkdir_err.kind() != std::io::ErrorKind::AlreadyExists {
+                            anyhow::bail!("Failed to create directory: {}", mkdir_err);
+                        }
+                    }
+                    openat_dir(&current_fd, &comp_c)
+                        .context("Failed to open directory after creating it")?
+                }
+                Err(err) => anyhow::bail!("Failed to open directory: {}", err),
+            };
         }
-        OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(mount_destination)
-            .context("File open failed for mount_destination")?;
     }
     Ok(())
 }

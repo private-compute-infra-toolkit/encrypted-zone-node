@@ -145,29 +145,11 @@ impl Junction for IsolateJunction {
                 let mut client = EzIsolateBridgeClient::new(isolate_channel_pool.next_channel());
 
                 // Attempt to transport any inline data to the pre-allocated shared bounds
-                if let Some(hybrid) = &mut invoke_isolate_request.isolate_input {
-                    if let Some(DeliveryMethod::InlineData(inline)) = &hybrid.delivery_method {
-                        if let Some(first_datagram) = inline.datagrams.first() {
-                            // We only send the payload via shared memory if it's over the threshold
-                            // specified in the enforcer main binary.
-                            if (first_datagram.len() as u64) >= self.shm_payload_threshold {
-                                let payload_bytes = &first_datagram[..];
-                                let slots_result = self
-                                    .shared_mem_manager
-                                    .write_to_isolate(destination_isolate_info.id, payload_bytes)
-                                    .await;
-                                // Here we're overwriting the mutable reference to the HybridPayload
-                                // with the ShmSlotData received from writing the payload to the
-                                // ShmSlabPool, instead of sending the payload directly over gRPC
-                                // using EzPayloadData.
-                                if let Ok(slots) = slots_result {
-                                    hybrid.delivery_method =
-                                        Some(DeliveryMethod::ShmData(ShmSlotData { slots }));
-                                }
-                            }
-                        }
-                    }
-                }
+                self.write_request_payload_to_shm(
+                    destination_isolate_id,
+                    &mut invoke_isolate_request,
+                )
+                .await;
 
                 self.state_manager.increment_inflight_counter(destination_isolate_info.id).await;
                 let isolate_rpc_start_time = Instant::now();
@@ -189,25 +171,10 @@ impl Junction for IsolateJunction {
                 let mut invoke_isolate_response = invoke_isolate_response.into_inner();
 
                 // Read response payload from shared memory if applicable
-                if let Some(hybrid) = &mut invoke_isolate_response.isolate_output {
-                    if let Some(DeliveryMethod::ShmData(shm_data)) = &hybrid.delivery_method {
-                        match self
-                            .shared_mem_manager
-                            .read_from_isolate(destination_isolate_id, &shm_data.slots)
-                        {
-                            Ok(data) => {
-                                hybrid.delivery_method =
-                                    Some(DeliveryMethod::InlineData(EzPayloadData {
-                                        datagrams: vec![data],
-                                    }));
-                            }
-                            Err(e) => {
-                                log::error!("Failed to read from SHM pool: {:?}", e);
-                                return Err(IsolateStatusCode::InternalError.to_ez_error());
-                            }
-                        }
-                    }
-                }
+                self.read_response_payload_from_shm(
+                    destination_isolate_id,
+                    &mut invoke_isolate_response,
+                )?;
 
                 match invoke_isolate_response.control_plane_metadata.as_mut() {
                     Some(control_plane_metadata) => {
@@ -322,6 +289,12 @@ impl Junction for IsolateJunction {
 
             // Mask the initial request msg_id
             let stream_id = rand::random::<u64>();
+            isolate_junction_clone
+                .write_request_payload_to_shm(
+                    destination_isolate_info.id,
+                    &mut initial_invoke_request,
+                )
+                .await;
             let original_ipc_message_id =
                 match mask_streaming_msg_id(stream_id, &mut initial_invoke_request) {
                     Ok(ipc_msg_id) => ipc_msg_id,
@@ -500,6 +473,66 @@ impl IsolateJunction {
         }
     }
 
+    async fn write_request_payload_to_shm(
+        &self,
+        isolate_id: IsolateId,
+        req: &mut InvokeIsolateRequest,
+    ) {
+        let Some(hybrid) = &mut req.isolate_input else {
+            return;
+        };
+        let Some(DeliveryMethod::InlineData(inline)) = &hybrid.delivery_method else {
+            return;
+        };
+        let Some(first_datagram) = inline.datagrams.first() else {
+            return;
+        };
+        // We only send the payload via shared memory if it's over the threshold
+        // specified in the enforcer main binary.
+        if (first_datagram.len() as u64) >= self.shm_payload_threshold {
+            let payload_bytes = &first_datagram[..];
+            let slots_result =
+                self.shared_mem_manager.write_to_isolate(isolate_id, payload_bytes).await;
+            // Here we're overwriting the mutable reference to the HybridPayload
+            // with the ShmSlotData received from writing the payload to the
+            // ShmSlabPool, instead of sending the payload directly over gRPC
+            // using EzPayloadData.
+            if let Ok(slots) = slots_result {
+                hybrid.delivery_method = Some(DeliveryMethod::ShmData(ShmSlotData { slots }));
+            }
+        }
+    }
+
+    // Attempts to read shared mem payloads out of the slab pool and back into inline data
+    // Returns early if data is already inline
+    fn read_response_payload_from_shm(
+        &self,
+        isolate_id: IsolateId,
+        resp: &mut InvokeIsolateResponse,
+    ) -> Result<(), EzError> {
+        // No payload or unknown delivery method, nothing to do.
+        let Some(hybrid) = &mut resp.isolate_output else {
+            return Ok(());
+        };
+        // If the delivery method is not shared memory, nothing to do, leave as inline
+        let Some(DeliveryMethod::ShmData(shm_data)) = &mut hybrid.delivery_method else {
+            return Ok(());
+        };
+
+        // Read the payload out of SHM, return an error if the read fails.
+        let data = self.shared_mem_manager.read_from_isolate(isolate_id, &shm_data.slots).map_err(
+            |e| {
+                log::error!("Failed to read from SHM pool: {:?}", e);
+                IsolateStatusCode::InternalError.to_ez_error()
+            },
+        )?;
+
+        // Convert delivery method from shared memory back to inline data to forward to the proxies.
+        hybrid.delivery_method =
+            Some(DeliveryMethod::InlineData(EzPayloadData { datagrams: vec![data] }));
+        Ok(())
+    }
+
     // Proxy InvokeIsolateRequests from client to Isolate for streaming rpc
     async fn validate_streaming_request_scope(
         &self,
@@ -548,6 +581,7 @@ impl IsolateJunction {
                 }
                 continue;
             };
+            self.write_request_payload_to_shm(isolate_id, &mut invoke_isolate_request).await;
             match mask_streaming_msg_id(stream_id, &mut invoke_isolate_request) {
                 Ok(_) => {}
                 Err(e) => {
@@ -621,6 +655,12 @@ impl IsolateJunction {
         attributes: &[KeyValue],
     ) {
         let isolate_id = request_context.isolate_id;
+        if let Err(e) =
+            self.read_response_payload_from_shm(isolate_id, &mut invoke_isolate_response)
+        {
+            let _ = junction_to_client_tx.send(Err(e)).await;
+            return;
+        }
         let original_msg_id = request_context.original_msg_id;
         let request_source_isolate_id_option = request_context.request_source_isolate_id;
         let is_from_public_api = request_context.is_from_public_api;

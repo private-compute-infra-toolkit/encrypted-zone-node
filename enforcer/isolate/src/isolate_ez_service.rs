@@ -164,6 +164,8 @@ impl IsolateEzBridge for IsolateEzBridgeService {
             manifest_validator: self.manifest_validator.clone(),
             data_scope_requester: self.data_scope_requester.clone(),
             response_tx: None,
+            shared_memory_manager: self.shared_memory_manager.clone(),
+            shm_payload_threshold: self.shm_payload_threshold,
         };
 
         let route_result = restrictions_enforcer.validate_invoke_ez_req(&mut req).await;
@@ -473,6 +475,7 @@ struct StreamHandler {
     response_tx: Sender<Result<InvokeEzResponse, Status>>,
     metrics: IsolateEzServiceMetrics,
     interceptor: Interceptor,
+    shared_memory_manager: SharedMemManager,
 }
 
 impl StreamHandler {
@@ -486,6 +489,8 @@ impl StreamHandler {
             manifest_validator: service.manifest_validator.clone(),
             data_scope_requester: service.data_scope_requester.clone(),
             response_tx: Some(response_tx.clone()),
+            shared_memory_manager: service.shared_memory_manager.clone(),
+            shm_payload_threshold: service.shm_payload_threshold,
         };
 
         Self {
@@ -497,7 +502,33 @@ impl StreamHandler {
             response_tx,
             metrics: service.metrics.clone(),
             interceptor: service.interceptor.clone(),
+            shared_memory_manager: service.shared_memory_manager.clone(),
         }
+    }
+
+    // Helper to read payload out of SHM and into the InvokeEzRequest to possibly
+    // forward to the proxies. If a SHM payload is received, but cannot be read, we will
+    // return an error
+    async fn read_request_shm_payload(&self, req: &mut InvokeEzRequest) -> Result<(), Status> {
+        // No payload or unknown delivery method, nothing to do.
+        let Some(hybrid) = &mut req.isolate_request_payload else {
+            return Ok(());
+        };
+        // If the delivery method is not shared memory, nothing to do, leave as inline
+        let Some(DeliveryMethod::ShmData(shm_data)) = &mut hybrid.delivery_method else {
+            return Ok(());
+        };
+
+        // Read the payload out of SHM, return an error if the read fails.
+        let data = self
+            .shared_memory_manager
+            .read_from_isolate(self.isolate_id, &shm_data.slots)
+            .map_err(|e| Status::internal(format!("Failed to read from SHM: {e:#?}")))?;
+
+        // Convert delivery method from shared memory back to inline data to forward to the proxies.
+        hybrid.delivery_method =
+            Some(DeliveryMethod::InlineData(EzPayloadData { datagrams: vec![data] }));
+        Ok(())
     }
 
     async fn process_invoke_ez_requests<S>(
@@ -514,6 +545,16 @@ impl StreamHandler {
             self.metrics.record_error(&[], "missing_initial_request");
             return;
         };
+
+        if let Err(status) = self.read_request_shm_payload(&mut first_req).await {
+            let _ = self.response_tx.send(Err(status)).await.inspect_err(|_| {
+                log::error!(
+                    "Failed to send error to StreamInvokeEz for isolate {}",
+                    self.isolate_id
+                );
+            });
+            return;
+        }
 
         if !self.isolate_id.is_ratified_isolate() {
             self.interceptor.replace_with_interceptor(&mut first_req, RequestType::Streaming).await;
@@ -586,6 +627,7 @@ impl StreamHandler {
         let metric_attr_req = metric_attr.clone();
 
         let first_req_clone = first_req.clone();
+        let stream_handler = self.clone();
         tokio::spawn(async move {
             {
                 // Send the first request that we already consumed.
@@ -599,6 +641,15 @@ impl StreamHandler {
             // Send the rest of the requests from the stream.
             while let Some(mut req) = invoke_req_stream.next().await {
                 let _timer = metrics.track_message_processing(metric_attr_req.request());
+                if let Err(status) = stream_handler.read_request_shm_payload(&mut req).await {
+                    let _ = stream_handler.response_tx.send(Err(status)).await.inspect_err(|_| {
+                        log::error!(
+                            "Failed to send error to StreamInvokeEz for isolate {}",
+                            stream_handler.isolate_id
+                        );
+                    });
+                    return;
+                }
                 if restrictions_enforcer.stream_validate_invoke_ez_req(&mut req).await.is_err() {
                     log::error!("Remote enforcer request channel closed before first message.");
                     return;
@@ -681,6 +732,7 @@ impl StreamHandler {
         let metrics = self.metrics.clone();
         let metric_attr_req = metric_attr.clone();
 
+        let stream_handler = self.clone();
         tokio::spawn(async move {
             {
                 // Send the first request that we already consumed.
@@ -699,6 +751,15 @@ impl StreamHandler {
             // Send the rest of the requests from the stream.
             while let Some(mut req) = invoke_req_stream.next().await {
                 let _timer = metrics.track_message_processing(metric_attr_req.request());
+                if let Err(status) = stream_handler.read_request_shm_payload(&mut req).await {
+                    let _ = stream_handler.response_tx.send(Err(status)).await.inspect_err(|_| {
+                        log::error!(
+                            "Failed to send error to StreamInvokeEz for isolate {}",
+                            stream_handler.isolate_id
+                        );
+                    });
+                    return;
+                }
                 if restrictions_enforcer.stream_validate_invoke_ez_req(&mut req).await.is_err() {
                     log::error!("Error while enforcing scopes InvokeEzRequest");
                     return;
@@ -765,6 +826,7 @@ impl StreamHandler {
         let metrics = self.metrics.clone();
         let metric_attr_req = metric_attr.clone();
 
+        let stream_handler = self.clone();
         tokio::spawn(async move {
             // First handle the initial request.
             {
@@ -778,6 +840,17 @@ impl StreamHandler {
             // Handle the rest of the streaming requests.
             while let Some(mut invoke_ez_req) = invoke_req_stream.next().await {
                 let _timer = metrics.track_message_processing(metric_attr_req.request());
+                if let Err(status) =
+                    stream_handler.read_request_shm_payload(&mut invoke_ez_req).await
+                {
+                    let _ = stream_handler.response_tx.send(Err(status)).await.inspect_err(|_| {
+                        log::error!(
+                            "Failed to send error to StreamInvokeEz for isolate {}",
+                            stream_handler.isolate_id
+                        );
+                    });
+                    return;
+                }
                 if restrictions_enforcer
                     .stream_validate_invoke_ez_req(&mut invoke_ez_req)
                     .await
@@ -826,6 +899,8 @@ struct RestrictionsEnforcer {
     data_scope_requester: DataScopeRequester,
     manifest_validator: ManifestValidator,
     response_tx: Option<Sender<Result<InvokeEzResponse, Status>>>,
+    shared_memory_manager: SharedMemManager,
+    shm_payload_threshold: u64,
 }
 
 impl RestrictionsEnforcer {
@@ -963,6 +1038,31 @@ impl RestrictionsEnforcer {
         Ok(())
     }
 
+    /// Attempts to convert the response payload to a shared memory payload if its size is greater
+    /// than or equal to the `shm_payload_threshold`.
+    ///
+    /// If writing to shared memory fails, the system logs an error and falls back to sending the
+    /// payload over inline data (i.e., gRPC over UDS).
+    async fn maybe_convert_to_shm(&self, invoke_ez_response: &mut InvokeEzResponse) {
+        let Some(hybrid) = &mut invoke_ez_response.ez_response_payload else { return };
+        let Some(DeliveryMethod::InlineData(inline)) = &mut hybrid.delivery_method else { return };
+        let Some(first_datagram) = inline.datagrams.first() else { return };
+
+        let payload_bytes = &first_datagram[..];
+        if (payload_bytes.len() as u64) < self.shm_payload_threshold {
+            return;
+        }
+
+        match self.shared_memory_manager.write_to_isolate(self.isolate_id, payload_bytes).await {
+            Ok(slots) => {
+                hybrid.delivery_method = Some(DeliveryMethod::ShmData(ShmSlotData { slots }));
+            }
+            Err(e) => {
+                log::error!("Failed to write to SHM, falling back to sending payload over inline data: {:?}", e);
+            }
+        }
+    }
+
     async fn stream_validate_invoke_ez_resp(
         &self,
         response: Result<InvokeEzResponse, Status>,
@@ -973,8 +1073,9 @@ impl RestrictionsEnforcer {
         };
 
         let final_response = async move {
-            let resp = response?;
+            let mut resp = response?;
             self.validate_invoke_ez_resp(&resp).await?;
+            self.maybe_convert_to_shm(&mut resp).await;
             Ok(resp)
         }
         .await;

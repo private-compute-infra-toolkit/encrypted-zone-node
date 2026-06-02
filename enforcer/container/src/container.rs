@@ -46,6 +46,8 @@ pub struct MountOptions {
     pub source: PathBuf,
     /// The destination path to mount to inside the container.
     pub destination: PathBuf,
+    /// Apply noexec, nosuid, nodev to the mount.
+    pub apply_restrictive_flags: bool,
 }
 
 /// Options for configuring the network namespace of the container.

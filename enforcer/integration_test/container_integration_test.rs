@@ -95,6 +95,7 @@ async fn verify_write(bundle_path: &str) -> anyhow::Result<(NamedTempFile, Vec<u
         mounts: vec![MountOptions {
             source: uds_dir.path().to_path_buf(),
             destination: PathBuf::from(EZ_IPC_DIR),
+            apply_restrictive_flags: false,
         }],
         network: NetworkOptions::default(),
         env: vec![],
@@ -135,6 +136,7 @@ async fn verify_read(bundle_path: &str, file: &NamedTempFile) -> anyhow::Result<
         mounts: vec![MountOptions {
             source: uds_dir.path().to_path_buf(),
             destination: PathBuf::from(EZ_IPC_DIR),
+            apply_restrictive_flags: false,
         }],
         network: NetworkOptions::default(),
         env: vec![],
@@ -174,6 +176,7 @@ async fn verify_read_only(bundle_path: &str, file: &NamedTempFile) -> anyhow::Re
         mounts: vec![MountOptions {
             source: uds_dir.path().to_path_buf(),
             destination: PathBuf::from(EZ_IPC_DIR),
+            apply_restrictive_flags: false,
         }],
         network: NetworkOptions::default(),
         env: vec![],

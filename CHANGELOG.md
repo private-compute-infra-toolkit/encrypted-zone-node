@@ -2,6 +2,37 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## 0.12.0 (2026-06-02)
+
+
+### Dependencies
+
+* **deps:** Update DevKit to release-3.8.0
+
+
+### EZ Policy Enforcer
+
+* **enforcer:** Create offline metrics simulator skeleton
+* **enforcer:** Enable metric filtering by default
+* **enforcer:** Enable traces in all environments
+* **enforcer:** restrict disable_metrics_filtering to debug mode
+* **enforcer:** tag self-telemetry with component
+
+
+### Features
+
+* EzIsolateBridge support for shared mem payloads (streaming)
+* IsolateEzBridge support for shared mem payloads (streaming)
+* **metrics:** Enrich enforcer metrics
+* **metrics:** Support BundleManifest in metrics_simulator
+
+
+### Bug Fixes
+
+* Apply MS_NOEXEC, MS_NOSUID, MS_NODEV to IPC shared memory mount
+* **container:** Prevent arbitrary file creation via intermediate symlink
+* **container:** Prevent arbitrary file truncation via malicious symlinks
+
 ## 0.11.0 (2026-05-27)
 
 

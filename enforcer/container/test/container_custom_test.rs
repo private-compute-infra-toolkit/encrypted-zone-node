@@ -65,7 +65,13 @@ fn default_container_opts(operation: &str, mount_src: Option<PathBuf>) -> Contai
         binary_filename: BINARY_FILENAME.to_string(),
         command_line_arguments: vec!["--operation".to_string(), operation.to_string()],
         mounts: match mount_src {
-            Some(m) => vec![MountOptions { source: m, destination: PathBuf::from("/ez") }],
+            Some(m) => {
+                vec![MountOptions {
+                    source: m,
+                    destination: PathBuf::from("/ez"),
+                    apply_restrictive_flags: false,
+                }]
+            }
             None => vec![],
         },
         network: NetworkOptions::default(),
@@ -199,11 +205,13 @@ async fn container_fs_mounts() {
             MountOptions {
                 source: uds_dir.path().to_path_buf(),
                 destination: PathBuf::from("/ez"),
+                apply_restrictive_flags: false,
             },
             // Mount a file inside a directory that does not exist.
             MountOptions {
                 source: PathBuf::from("/dev/random"),
                 destination: PathBuf::from("/a/b"),
+                apply_restrictive_flags: false,
             },
         ],
         ..default_container_opts("inspect-fs-root", None)
@@ -352,4 +360,100 @@ async fn container_run_unprivileged() {
 
     let data = String::from_utf8(server_handle.await.unwrap()).unwrap();
     assert_eq!(data, "1000", "Expected UID 1000 inside unprivileged container, got: {}", data);
+}
+
+#[tokio::test]
+async fn container_restrictive_flags_mount() {
+    let (uds_dir, uds_listener) = setup();
+    let server_handle = handle(uds_listener, 100);
+    let mut opts = default_container_opts("verify-ez-mount", Some(uds_dir.path().to_path_buf()));
+    opts.mounts[0].apply_restrictive_flags = true;
+
+    let mut container = default_container();
+    container.start(&opts).await.unwrap();
+    let data = String::from_utf8(server_handle.await.unwrap()).unwrap();
+    assert_ne!(data, "not found", "/ez mount not found");
+    let options: Vec<&str> = data.split(',').collect();
+    assert!(options.contains(&"nosuid"), "missing nosuid: {}", data);
+    assert!(options.contains(&"nodev"), "missing nodev: {}", data);
+    assert!(options.contains(&"noexec"), "missing noexec: {}", data);
+}
+
+#[tokio::test]
+async fn container_prevents_symlink_file_truncation() {
+    // 1. Unpack the default test bundle to use as a base rootfs
+    let root = Arc::new(utils::unpack_file_system(BUNDLE_PATH).unwrap());
+
+    // 2. Create a "host" sensitive file and write some data to it
+    let host_sensitive_file = tempfile::NamedTempFile::new().unwrap();
+    let host_path = host_sensitive_file.path().to_path_buf();
+    std::fs::write(&host_path, "SENSITIVE_DATA_12345").unwrap();
+
+    // 3. Create a malicious symlink in the container's rootfs
+    // The symlink points to the host's sensitive file through /old_root
+    let symlink_dest = root.path().join("rootfs/malicious_link");
+    let old_root_path =
+        PathBuf::from("/old_root").join(host_path.strip_prefix("/").unwrap_or(&host_path));
+    std::os::unix::fs::symlink(old_root_path, &symlink_dest).unwrap();
+
+    // 4. Configure container options to mount something (e.g. /dev/null) to our malicious link
+    let opts = ContainerOptions {
+        mounts: vec![MountOptions {
+            source: PathBuf::from("/dev/null"),
+            destination: PathBuf::from("/malicious_link"),
+            apply_restrictive_flags: false,
+        }],
+        ..default_container_opts("sleep", None)
+    };
+
+    // 5. Start the container, which will fail because O_NOFOLLOW prevents opening the symlink
+    let mut container = ContainerCustom::new(ContainerRoot::ReadOnlyRoot(root)).unwrap();
+    let start_result = container.start(&opts).await;
+    assert!(start_result.is_err(), "Expected container start to fail due to symlink rejection");
+
+    // 6. Verify that the host file was NOT truncated
+    let content = std::fs::read_to_string(&host_path).unwrap();
+    assert_eq!(content, "SENSITIVE_DATA_12345", "The host file should remain unharmed.");
+}
+
+#[tokio::test]
+async fn container_prevents_intermediate_symlink_traversal() {
+    // 1. Unpack the default test bundle to use as a base rootfs
+    let root = Arc::new(utils::unpack_file_system(BUNDLE_PATH).unwrap());
+
+    // 2. Create a "host" sensitive directory
+    let host_sensitive_dir = tempfile::Builder::new().prefix("host_sensitive").tempdir().unwrap();
+    let host_path = host_sensitive_dir.path().to_path_buf();
+
+    // 3. Create a malicious symlink in the container's rootfs
+    // The symlink is a directory that points to the host's sensitive dir through /old_root
+    let symlink_dest = root.path().join("rootfs/malicious_dir");
+    let old_root_path =
+        PathBuf::from("/old_root").join(host_path.strip_prefix("/").unwrap_or(&host_path));
+    std::os::unix::fs::symlink(old_root_path, &symlink_dest).unwrap();
+
+    // 4. Configure container options to mount something to a file *inside* the malicious link
+    // e.g. /malicious_dir/created_by_container
+    let opts = ContainerOptions {
+        mounts: vec![MountOptions {
+            source: PathBuf::from("/dev/null"),
+            destination: PathBuf::from("/malicious_dir/created_by_container"),
+            apply_restrictive_flags: false,
+        }],
+        ..default_container_opts("sleep", None)
+    };
+
+    // 5. Start the container
+    let mut container = ContainerCustom::new(ContainerRoot::ReadOnlyRoot(root)).unwrap();
+    let start_result = container.start(&opts).await;
+
+    // The container should fail to start because the intermediate symlink is detected and rejected
+    assert!(
+        start_result.is_err(),
+        "Container start should fail due to intermediate symlink rejection"
+    );
+
+    // 6. Verify that the file was NOT created on the host
+    let created_file_path = host_path.join("created_by_container");
+    assert!(!created_file_path.exists(), "The host file should not be created!");
 }

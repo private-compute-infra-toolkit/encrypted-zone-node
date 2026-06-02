@@ -179,7 +179,6 @@ impl IsolateMetricsReceiver {
                 attr.key != "ez_isolate_name"
                     && attr.key != "ez_publisher_id"
                     && attr.key != "ez_isolate_type"
-                    && attr.key != "ez_safety_level"
                     && attr.key != "ez_enforcer_version"
                     && attr.key != "ez_component_name"
             });
@@ -202,10 +201,6 @@ impl IsolateMetricsReceiver {
                 "ez_isolate_type".to_string(),
                 isolate_type_str.to_string(),
             ));
-
-            resource
-                .attributes
-                .push(make_string_attribute("ez_safety_level".to_string(), "safe".to_string()));
 
             let enforcer_version = option_env!("CARGO_PKG_VERSION").unwrap_or("unknown");
             resource.attributes.push(make_string_attribute(

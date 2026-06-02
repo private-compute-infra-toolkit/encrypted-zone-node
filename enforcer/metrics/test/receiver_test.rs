@@ -94,8 +94,6 @@ async fn test_enrich_metrics() {
             == Some(Value::StringValue("test-publisher".to_string()))));
     assert!(resource_attrs.iter().any(|kv| kv.key == "ez_isolate_type"
         && kv.value.as_ref().unwrap().value == Some(Value::StringValue("opaque".to_string()))));
-    assert!(resource_attrs.iter().any(|kv| kv.key == "ez_safety_level"
-        && kv.value.as_ref().unwrap().value == Some(Value::StringValue("safe".to_string()))));
     assert!(resource_attrs
         .iter()
         .any(|kv| kv.key == "ez_enforcer_version" && kv.value.as_ref().unwrap().value.is_some()));
@@ -482,8 +480,8 @@ async fn test_filter_metrics_coverage_disable_filtering_and_purging() {
 
     let rm_purged = &request_purged.resource_metrics[0];
     let resource_attrs = &rm_purged.resource.as_ref().unwrap().attributes;
-    // Should have 7 attributes: ez_component_name, ez_isolate_name, ez_publisher_id, ez_isolate_type, ez_safety_level, ez_enforcer_version, and custom_resource_attr
-    assert_eq!(resource_attrs.len(), 7);
+    // Should have 6 attributes: ez_component_name, ez_isolate_name, ez_publisher_id, ez_isolate_type, ez_enforcer_version, and custom_resource_attr
+    assert_eq!(resource_attrs.len(), 6);
 
     // Verify custom_resource_attr was retained
     let custom_attr = resource_attrs.iter().find(|kv| kv.key == "custom_resource_attr").unwrap();

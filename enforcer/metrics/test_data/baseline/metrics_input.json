@@ -1,0 +1,61 @@
+{
+  "resourceMetrics": [
+    {
+      "resource": {
+        "attributes": [],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "scopeMetrics": [
+        {
+          "scope": null,
+          "metrics": [
+            {
+              "name": "allowed_gauge",
+              "description": "",
+              "unit": "",
+              "metadata": [],
+              "gauge": {
+                "dataPoints": [
+                  {
+                    "attributes": [
+                      {
+                        "key": "allowed_attr",
+                        "value": {
+                          "stringValue": "val1"
+                        }
+                      }
+                    ],
+                    "startTimeUnixNano": "0",
+                    "timeUnixNano": "0",
+                    "exemplars": [],
+                    "flags": 0
+                  }
+                ]
+              }
+            },
+            {
+              "name": "forbidden_gauge",
+              "description": "",
+              "unit": "",
+              "metadata": [],
+              "gauge": {
+                "dataPoints": [
+                  {
+                    "attributes": [],
+                    "startTimeUnixNano": "0",
+                    "timeUnixNano": "0",
+                    "exemplars": [],
+                    "flags": 0
+                  }
+                ]
+              }
+            }
+          ],
+          "schemaUrl": ""
+        }
+      ],
+      "schemaUrl": ""
+    }
+  ]
+}

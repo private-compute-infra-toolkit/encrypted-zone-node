@@ -69,14 +69,22 @@ pub async fn setup_otel_metrics(
         }
         .build()?;
 
+        let resource = Resource::builder()
+            .with_attribute(KeyValue::new("service.name", "ez-enforcer"))
+            .with_attribute(KeyValue::new("privacy.scope", provider_type))
+            .with_attribute(KeyValue::new("ez_component_name", "enforcer"))
+            .with_attribute(KeyValue::new("ez_isolate_name", "null_isolate"))
+            .with_attribute(KeyValue::new("ez_publisher_id", "null_publisher"))
+            .with_attribute(KeyValue::new("ez_isolate_type", "null_type"))
+            .with_attribute(KeyValue::new(
+                "ez_enforcer_version",
+                option_env!("CARGO_PKG_VERSION").unwrap_or("unknown"),
+            ))
+            .build();
+
         Ok::<SdkMeterProvider, anyhow::Error>(
             SdkMeterProvider::builder()
-                .with_resource(
-                    Resource::builder()
-                        .with_attribute(KeyValue::new("service.name", "ez-enforcer"))
-                        .with_attribute(KeyValue::new("privacy.scope", provider_type))
-                        .build(),
-                )
+                .with_resource(resource)
                 .with_periodic_exporter(exporter)
                 .build(),
         )

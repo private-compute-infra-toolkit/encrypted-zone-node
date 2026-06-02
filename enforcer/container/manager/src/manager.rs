@@ -66,7 +66,6 @@ const ISOLATE_EZ_BRIDGE_ENFORCER_UDS_READY: &str = "isolate-ez-bridge-uds.ready"
 // UDS name for exporting OTel metrics
 const OTLP_METRICS_UDS: &str = "otlp-metrics.sock";
 // UDS name for OTLP traces. This will exist under [SHARING_DIR_NAME] for Container.
-#[cfg(feature = "debug")]
 const OTEL_TRACES_UDS: &str = "traces-otlp.sock";
 const DEV_SHM_PATH: &str = "/dev/shm";
 const RATIFIED_ISOLATE_DOMAIN: &str = "EZ_Trusted";
@@ -610,6 +609,7 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
         let mut mounts = vec![MountOptions {
             source: sharing_dir.path().to_path_buf(),
             destination: PathBuf::from(SHARING_DIR_NAME),
+            apply_restrictive_flags: true,
         }];
 
         for mount in container_startup_args.bind_mounts {
@@ -617,21 +617,20 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
                 mounts.push(MountOptions {
                     source: PathBuf::from(source),
                     destination: PathBuf::from(destination),
+                    apply_restrictive_flags: false,
                 });
             } else {
                 log::warn!("Malformed bind mount ignored: {mount}");
             }
         }
 
-        #[cfg(feature = "debug")]
-        {
-            if let Some(ref endpoint) = self.otel_traces_endpoint {
-                if let Some(source_path) = extract_unix_path(endpoint) {
-                    mounts.push(MountOptions {
-                        source: source_path,
-                        destination: PathBuf::from(SHARING_DIR_NAME).join(OTEL_TRACES_UDS),
-                    });
-                }
+        if let Some(ref endpoint) = self.otel_traces_endpoint {
+            if let Some(source_path) = extract_unix_path(endpoint) {
+                mounts.push(MountOptions {
+                    source: source_path,
+                    destination: PathBuf::from(SHARING_DIR_NAME).join(OTEL_TRACES_UDS),
+                    apply_restrictive_flags: false,
+                });
             }
         }
 
@@ -896,7 +895,6 @@ fn get_etc_hosts_path(publisher_id: &str, binary_filename: &str) -> PathBuf {
     )))
 }
 
-#[cfg(feature = "debug")]
 fn extract_unix_path(endpoint: &str) -> Option<PathBuf> {
     endpoint.strip_prefix("unix:").map(|mut path| {
         while path.starts_with("//") {

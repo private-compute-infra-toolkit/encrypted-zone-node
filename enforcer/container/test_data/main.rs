@@ -45,6 +45,7 @@ enum Operation {
     ExitFail,
     TryWriteRoot,
     VerifyTmpfsMount,
+    VerifyEzMount,
     GetUid,
 }
 
@@ -189,11 +190,49 @@ fn main() -> anyhow::Result<()> {
         }
         Operation::VerifyTmpfsMount => {
             let mut stream = UnixStream::connect(UDS_PATH)?;
-            let mountinfo = fs::read_to_string("/proc/self/mountinfo")?;
-            for line in mountinfo.lines() {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 6 && parts[4] == "/tmp" {
-                    stream.write_all(parts[5].as_bytes())?;
+            let process = procfs::process::Process::myself()?;
+            for mount in process.mountinfo()? {
+                if mount.mount_point == std::path::Path::new("/tmp") {
+                    let mut options: Vec<String> = mount
+                        .mount_options
+                        .iter()
+                        .map(
+                            |(k, v)| {
+                                if let Some(v) = v {
+                                    format!("{}={}", k, v)
+                                } else {
+                                    k.clone()
+                                }
+                            },
+                        )
+                        .collect();
+                    options.sort();
+                    stream.write_all(options.join(",").as_bytes())?;
+                    return Ok(());
+                }
+            }
+            stream.write_all(b"not found")?;
+        }
+        Operation::VerifyEzMount => {
+            let mut stream = UnixStream::connect(UDS_PATH)?;
+            let process = procfs::process::Process::myself()?;
+            for mount in process.mountinfo()? {
+                if mount.mount_point == std::path::Path::new("/ez") {
+                    let mut options: Vec<String> = mount
+                        .mount_options
+                        .iter()
+                        .map(
+                            |(k, v)| {
+                                if let Some(v) = v {
+                                    format!("{}={}", k, v)
+                                } else {
+                                    k.clone()
+                                }
+                            },
+                        )
+                        .collect();
+                    options.sort();
+                    stream.write_all(options.join(",").as_bytes())?;
                     return Ok(());
                 }
             }

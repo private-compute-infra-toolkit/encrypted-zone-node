@@ -2624,6 +2624,129 @@ async fn unary_routes_shm_payload_read_failure() {
 }
 
 #[tokio::test]
+async fn stream_routes_shm_payload_to_inline_data() {
+    let mut harness = TestHarness::new().await.expect("Harness should start");
+    let junction_calls = harness.mock_junction.call_count.clone();
+    let service_info = IsolateServiceInfo {
+        operator_domain: TEST_INTERNAL_OPERATOR_DOMAIN.to_string(),
+        service_name: TEST_SERVICE_NAME.to_string(),
+        ..Default::default()
+    };
+    add_backend_dependencies(
+        harness.isolate_id,
+        harness.mapper.clone(),
+        harness.manifest_validator.clone(),
+        &service_info,
+        true,
+        TEST_INTERNAL_ROUTE_TYPE,
+    )
+    .await
+    .expect("Failed to add backend dependency");
+    add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
+        .await
+        .expect("Should be able to add to DSM/RIM");
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_string_lossy().to_string();
+
+    // Setup bridge communication buffers in the shared memory manager
+    harness
+        .shared_memory_manager
+        .setup_bridge_communication_buffers(harness.isolate_id, &path)
+        .await
+        .expect("Failed to setup bridge communication buffers");
+
+    // Create the isolate writer pool
+    let isolate_pool = ShmSlabPool::new(ShmSlabPoolOptions {
+        file_name: format!("{path}/isolate-writes"),
+        number_of_slots: 64,
+        slot_size: 4,
+        writer: true,
+    })
+    .expect("Failed to create isolate writer pool");
+
+    let slot_refs =
+        isolate_pool.write_to_pool(TEST_PAYLOAD).await.expect("Failed to write to pool");
+
+    let mut request =
+        create_test_request(&service_info.operator_domain, &service_info.service_name);
+    request.isolate_request_payload = Some(EzHybridPayload {
+        delivery_method: Some(DeliveryMethod::ShmData(payload_proto::enforcer::v1::ShmSlotData {
+            slots: slot_refs,
+        })),
+    });
+
+    let (req_tx, req_rx) = mpsc::channel(CHANNEL_SIZE);
+    req_tx.send(request).await.expect("Should be able to send request");
+
+    let _ = harness
+        .client
+        .stream_invoke_ez(ReceiverStream::new(req_rx))
+        .await
+        .expect("Stream invoke should succeed");
+
+    sleep(Duration::from_millis(20)).await;
+
+    assert_eq!(junction_calls.load(Ordering::SeqCst), 1, "Junction should have been called");
+
+    let received_request =
+        harness.mock_junction.invoked_isolate_requests.lock().unwrap().last().unwrap().clone();
+
+    let payload = received_request.isolate_input.expect("Should have payload");
+    let delivery = payload.delivery_method.expect("Should have delivery method");
+    match delivery {
+        DeliveryMethod::InlineData(data) => {
+            assert_eq!(data.datagrams.len(), 1);
+            assert_eq!(data.datagrams[0], TEST_PAYLOAD);
+        }
+        _ => panic!("Expected InlineData delivery method"),
+    }
+}
+
+#[tokio::test]
+async fn stream_routes_shm_payload_read_failure() {
+    let mut harness = TestHarness::new().await.expect("Harness should start");
+    let service_info = IsolateServiceInfo {
+        operator_domain: TEST_INTERNAL_OPERATOR_DOMAIN.to_string(),
+        service_name: TEST_SERVICE_NAME.to_string(),
+        ..Default::default()
+    };
+    add_backend_dependencies(
+        harness.isolate_id,
+        harness.mapper.clone(),
+        harness.manifest_validator.clone(),
+        &service_info,
+        true,
+        TEST_INTERNAL_ROUTE_TYPE,
+    )
+    .await
+    .expect("Failed to add backend dependency");
+    add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
+        .await
+        .expect("Should be able to add to DSM/RIM");
+
+    let mut request =
+        create_test_request(&service_info.operator_domain, &service_info.service_name);
+    request.isolate_request_payload = Some(EzHybridPayload {
+        delivery_method: Some(DeliveryMethod::ShmData(payload_proto::enforcer::v1::ShmSlotData {
+            slots: vec![payload_proto::enforcer::v1::ShmSlotReference { slot_index: 0, length: 4 }],
+        })),
+    });
+
+    let (req_tx, req_rx) = mpsc::channel(CHANNEL_SIZE);
+    req_tx.send(request).await.expect("Should be able to send request");
+
+    // We did not setup bridge communication buffers, so reading from SHM will fail
+    let response = harness.client.stream_invoke_ez(ReceiverStream::new(req_rx)).await;
+    assert!(response.is_ok());
+    let mut response_stream = response.unwrap().into_inner();
+    let status =
+        response_stream.message().await.expect_err("SHM read failure should fail the stream");
+    assert_eq!(status.code(), tonic::Code::Internal);
+    assert!(status.message().contains("Failed to read from SHM"));
+}
+
+#[tokio::test]
 async fn unary_routes_shm_response_to_shm_data() {
     // Initialize with a low threshold, so b"hello world" always triggers SHM writing
     let mut harness = TestHarness::new_with_arguments(
@@ -2675,6 +2798,75 @@ async fn unary_routes_shm_response_to_shm_data() {
     let response = harness.client.invoke_ez(request).await;
     assert!(response.is_ok());
     let response_msg = response.unwrap().into_inner();
+
+    let payload = response_msg.ez_response_payload.expect("Should have payload");
+    let delivery = payload.delivery_method.expect("Should have delivery method");
+    match delivery {
+        DeliveryMethod::ShmData(shm_data) => {
+            let read_bytes =
+                enforcer_pool.read_from_pool(&shm_data.slots).expect("Failed to read from pool");
+            assert_eq!(read_bytes, TEST_PAYLOAD);
+        }
+        _ => panic!("Expected ShmData delivery method"),
+    }
+}
+
+#[tokio::test]
+async fn stream_routes_shm_response_to_shm_data() {
+    // Initialize with a threshold of 1 byte, so b"hello world" always triggers SHM writing
+    let mut harness = TestHarness::new_with_arguments(false, ScopeDragInstruction::KeepSame, 1)
+        .await
+        .expect("Harness should start");
+    let service_info = IsolateServiceInfo {
+        operator_domain: TEST_INTERNAL_OPERATOR_DOMAIN.to_string(),
+        service_name: TEST_SERVICE_NAME.to_string(),
+        ..Default::default()
+    };
+    add_backend_dependencies(
+        harness.isolate_id,
+        harness.mapper.clone(),
+        harness.manifest_validator.clone(),
+        &service_info,
+        true,
+        TEST_INTERNAL_ROUTE_TYPE,
+    )
+    .await
+    .expect("Failed to add backend dependency");
+    add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
+        .await
+        .expect("Should be able to add to DSM/RIM");
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_string_lossy().to_string();
+
+    // Setup bridge communication buffers in the shared memory manager
+    harness
+        .shared_memory_manager
+        .setup_bridge_communication_buffers(harness.isolate_id, &path)
+        .await
+        .expect("Failed to setup bridge communication buffers");
+
+    // Create the enforcer reader pool to verify written slots
+    let enforcer_pool = ShmSlabPool::new(ShmSlabPoolOptions {
+        file_name: format!("{path}/enforcer-writes"),
+        number_of_slots: 64,
+        slot_size: 4,
+        writer: false,
+    })
+    .expect("Failed to create enforcer reader pool");
+
+    let request = create_test_request(&service_info.operator_domain, &service_info.service_name);
+    let (req_tx, req_rx) = mpsc::channel(CHANNEL_SIZE);
+    req_tx.send(request).await.expect("Should be able to send request");
+
+    let response = harness.client.stream_invoke_ez(ReceiverStream::new(req_rx)).await;
+    assert!(response.is_ok());
+    let mut response_stream = response.unwrap().into_inner();
+    let response_msg = response_stream
+        .message()
+        .await
+        .expect("Should receive response message")
+        .expect("Response message should be present");
 
     let payload = response_msg.ez_response_payload.expect("Should have payload");
     let delivery = payload.delivery_method.expect("Should have delivery method");

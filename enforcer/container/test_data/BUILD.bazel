@@ -28,6 +28,7 @@ rust_binary(
         "@crates//:libc",
         "@crates//:memmap2",
         "@crates//:ping",
+        "@crates//:procfs",
         "@crates//:rand",
         "@crates//:sha2",
         "@crates//:users",

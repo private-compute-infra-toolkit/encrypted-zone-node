@@ -98,6 +98,7 @@ impl ContainerCustom {
                 &mount.destination,
                 None::<&str>,
                 MsFlags::MS_BIND | MsFlags::MS_REC,
+                mount.apply_restrictive_flags,
             )
             .map_err(|e| {
                 anyhow::anyhow!(
@@ -236,6 +237,7 @@ impl ContainerCustom {
                 &PathBuf::from(dev),
                 None::<&str>,
                 MsFlags::MS_BIND,
+                false,
             )
             .map_err(|e| anyhow::anyhow!("Failed to mount device {}: {}", dev, e))?;
         }
@@ -252,6 +254,7 @@ impl ContainerCustom {
             &PathBuf::from(SYS_PATH),
             None::<&str>,
             MsFlags::MS_BIND | MsFlags::MS_REC,
+            false,
         )
         .map_err(|e| anyhow::anyhow!("Failed to bind mount /sys: {}", e))?;
         Ok(())
@@ -312,25 +315,67 @@ impl ContainerCustom {
         dest: &Path,
         fstype: Option<&str>,
         flags: MsFlags,
+        apply_restrictive_flags: bool,
     ) -> anyhow::Result<()> {
         let src = self.path_from_old_root(src)?;
-        if src.is_dir() {
-            fs::create_dir_all(dest).map_err(|e| {
-                anyhow::anyhow!("Failed to create dest directory {}: {}", dest.display(), e)
-            })?;
-        } else {
-            if let Some(parent) = dest.parent() {
-                fs::create_dir_all(parent).map_err(|e| {
-                    anyhow::anyhow!("Failed to create parent directory {}: {}", parent.display(), e)
-                })?;
+        let is_dir = src.is_dir();
+
+        // Walk the destination path component-by-component to safely create the directory
+        // structure. We avoid `fs::create_dir_all` because it follows symlinks by default.
+        // By checking each component with `fs::symlink_metadata`, we prevent attackers from
+        // using intermediate symlinks to traverse back to the host filesystem (e.g., escaping
+        // through the /old_root mount).
+        let mut current = PathBuf::from("/");
+        let mut components = dest.components().skip(1).peekable();
+
+        while let Some(comp) = components.next() {
+            current.push(comp);
+            let is_last = components.peek().is_none();
+
+            // Reject any symlinks encountered during path resolution to prevent TOCTOU
+            // and path traversal vulnerabilities.
+            match fs::symlink_metadata(&current) {
+                Ok(meta) if meta.is_symlink() => {
+                    anyhow::bail!("Symlink detected in mount destination at {}", current.display());
+                }
+                Ok(_) => continue, // Path exists and is not a symlink
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    if is_last && !is_dir {
+                        use std::os::unix::fs::OpenOptionsExt;
+                        OpenOptions::new()
+                            .write(true)
+                            .create(true)
+                            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                            .open(&current)
+                            .with_context(|| {
+                                format!("Failed to create dest file {}", current.display())
+                            })?;
+                    } else {
+                        fs::create_dir(&current).with_context(|| {
+                            format!("Failed to create dest directory {}", current.display())
+                        })?;
+                    }
+                }
+                Err(e) => anyhow::bail!("Failed to read metadata for {}: {}", current.display(), e),
             }
-            OpenOptions::new().write(true).create(true).truncate(true).open(dest).map_err(|e| {
-                anyhow::anyhow!("Failed to create dest file {}: {}", dest.display(), e)
-            })?;
         }
         let src = src.to_str().ok_or(anyhow::anyhow!("Failed to convert src path to string"))?;
         let dest = dest.to_str().ok_or(anyhow::anyhow!("Failed to convert dest path to string"))?;
         mount::mount(Some(src), dest, fstype, flags, None::<&str>)?;
+        if apply_restrictive_flags {
+            mount::mount(
+                None::<&str>,
+                dest,
+                None::<&str>,
+                MsFlags::MS_REMOUNT
+                    | MsFlags::MS_BIND
+                    | MsFlags::MS_REC
+                    | MsFlags::MS_NOEXEC
+                    | MsFlags::MS_NOSUID
+                    | MsFlags::MS_NODEV,
+                None::<&str>,
+            )?;
+        }
         Ok(())
     }
 

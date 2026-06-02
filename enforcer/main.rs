@@ -78,7 +78,7 @@ struct EnforcerInputs {
     #[arg(long)]
     otel_traces_endpoint: Option<String>,
     /// Disable metrics filtering for debugging
-    #[arg(long, default_value_t = true)]
+    #[arg(long, default_value_t = false)]
     disable_metrics_filtering: bool,
     /// Port for tokio-console to listen on.
     #[arg(long)]
@@ -388,6 +388,17 @@ fn main() -> anyhow::Result<()> {
                 None
             };
 
+        #[cfg(not(feature = "debug"))]
+        let disable_metrics_filtering = {
+            if enforcer_inputs.disable_metrics_filtering {
+                tracing::warn!("--disable_metrics_filtering=true is ignored in production optimized builds. Metrics filtering remains strictly enabled.");
+            }
+            false
+        };
+
+        #[cfg(feature = "debug")]
+        let disable_metrics_filtering = enforcer_inputs.disable_metrics_filtering;
+
         let manager_deps = IsolateEzServiceManagerDependencies {
             isolate_junction: Box::new(isolate_junction.clone()),
             isolate_state_manager: isolate_state_manager.clone(),
@@ -401,7 +412,7 @@ fn main() -> anyhow::Result<()> {
             max_decoding_message_size,
             interceptor: interceptor.clone(),
             otel_endpoint: enforcer_inputs.otel_safe_endpoint.clone(),
-            disable_metrics_filtering: enforcer_inputs.disable_metrics_filtering,
+            disable_metrics_filtering,
             shm_payload_threshold: enforcer_inputs.shm_payload_threshold,
         };
 

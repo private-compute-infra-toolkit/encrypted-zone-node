@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
+load("//enforcer/metrics:test/metrics_simulator_test.bzl", "metrics_simulator_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -88,4 +89,36 @@ rust_test(
         "@crates//:opentelemetry-proto",
         "@crates//:tokio",
     ],
+)
+
+rust_binary(
+    name = "ez_metrics_simulator",
+    srcs = ["tools/metrics_simulator.rs"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":metrics",
+        "//enforcer/container/manager:manifest_parser",
+        "//enforcer/v1:manifest_rust",
+        "@crates//:anyhow",
+        "@crates//:clap",
+        "@crates//:opentelemetry-proto",
+        "@crates//:prost",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:tokio",
+    ],
+)
+
+metrics_simulator_test(
+    name = "simulator_integration_test",
+    expected = "test_data/baseline/expected_output.json",
+    input = "test_data/baseline/metrics_input.json",
+    manifest = "test_data/baseline/manifest.json",
+)
+
+metrics_simulator_test(
+    name = "simulator_missing_policy_test",
+    expected = "test_data/missing_policy/expected_output.json",
+    input = "test_data/missing_policy/metrics_input.json",
+    manifest = "test_data/missing_policy/manifest.json",
 )

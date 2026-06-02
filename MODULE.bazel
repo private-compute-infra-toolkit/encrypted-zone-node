@@ -20,6 +20,7 @@ module(
 )
 
 bazel_dep(name = "aspect_bazel_lib", version = "2.21.0")
+bazel_dep(name = "bazel_skylib", version = "1.7.1")
 bazel_dep(name = "protobuf", version = "31.1", repo_name = "com_google_protobuf")
 bazel_dep(name = "rules_buf", version = "0.5.1")
 bazel_dep(name = "rules_oci", version = "2.0.1")
@@ -369,6 +370,7 @@ crate.spec(
     features = [
         "gen-tonic",
         "metrics",
+        "with-serde",
     ],
     package = "opentelemetry-proto",
     version = "0.31.0",

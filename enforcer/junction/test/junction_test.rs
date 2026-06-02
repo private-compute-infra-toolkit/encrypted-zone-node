@@ -43,9 +43,9 @@ use payload_proto::enforcer::v1::EzPayloadData;
 use shared_memory_manager::SharedMemManager;
 use state_manager::IsolateStateManager;
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 use tokio::net::UnixListener;
-
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::{timeout, Duration};
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server;
@@ -1512,6 +1512,315 @@ async fn test_junction_unary_flow_shm_response_to_inline_data() {
         payload_proto::enforcer::v1::ez_hybrid_payload::DeliveryMethod::InlineData(data) => {
             assert_eq!(data.datagrams.len(), 1);
             assert_eq!(data.datagrams[0], test_payload);
+        }
+        _ => panic!("Expected InlineData delivery method"),
+    }
+}
+
+struct ShmRequestCheckingIsolate {
+    received_requests: Arc<Mutex<Vec<InvokeIsolateRequest>>>,
+}
+
+#[tonic::async_trait]
+impl EzIsolateBridge for ShmRequestCheckingIsolate {
+    type StreamInvokeIsolateStream =
+        tokio_stream::wrappers::ReceiverStream<Result<InvokeIsolateResponse, Status>>;
+
+    async fn stream_invoke_isolate(
+        &self,
+        request: Request<Streaming<InvokeIsolateRequest>>,
+    ) -> Result<Response<Self::StreamInvokeIsolateStream>, Status> {
+        let mut rx = request.into_inner();
+        let (tx, rx_stream) = mpsc::channel(10);
+        let received_requests = self.received_requests.clone();
+        tokio::spawn(async move {
+            use tokio_stream::StreamExt;
+            while let Some(Ok(req)) = rx.next().await {
+                received_requests.lock().unwrap().push(req.clone());
+                let resp = create_echo_invoke_isolate_response(req);
+                let _ = tx.send(Ok(resp)).await;
+            }
+        });
+        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(rx_stream)))
+    }
+
+    async fn invoke_isolate(
+        &self,
+        _request: Request<InvokeIsolateRequest>,
+    ) -> Result<Response<InvokeIsolateResponse>, Status> {
+        unimplemented!()
+    }
+
+    async fn update_isolate_state(
+        &self,
+        _request: Request<enforcer_proto::enforcer::v1::UpdateIsolateStateRequest>,
+    ) -> Result<Response<enforcer_proto::enforcer::v1::UpdateIsolateStateResponse>, Status> {
+        unimplemented!()
+    }
+}
+
+#[tokio::test]
+async fn test_junction_streaming_request_shm_payload() {
+    let isolate_service_mapper = IsolateServiceMapper::default();
+    let (container_manager_request_tx, _container_manager_request_rx) =
+        tokio::sync::mpsc::channel(JUNCTION_TEST_CHANNEL_SIZE);
+    let container_manager_requester = ContainerManagerRequester::new(container_manager_request_tx);
+    let shared_memory_manager = SharedMemManager::new(container_manager_requester.clone(), 64, 4);
+    let fileshare_manager = FileshareManager::new(container_manager_requester.clone());
+    let data_scope_requester = DataScopeRequester::new(u64::MAX);
+    let manifest_validator = ManifestValidator::default();
+    let isolate_state_manager =
+        IsolateStateManager::new(data_scope_requester.clone(), container_manager_requester.clone());
+    let isolate_junction = IsolateJunction::new(
+        data_scope_requester.clone(),
+        isolate_service_mapper.clone(),
+        shared_memory_manager.clone(),
+        fileshare_manager.clone(),
+        isolate_state_manager.clone(),
+        manifest_validator.clone(),
+        1, // Threshold of 1 byte to force SHM writing
+    );
+
+    let isolate_service_info = IsolateServiceInfo {
+        operator_domain: ECHO_ISOLATE_OPERATOR_DOMAIN.to_string(),
+        service_name: ECHO_ISOLATE_SERVICE_NAME.to_string(),
+        ..Default::default()
+    };
+
+    let binary_services_index = isolate_service_mapper
+        .new_binary_index(vec![isolate_service_info.clone()], false)
+        .await
+        .expect("Should be a valid binary services index");
+
+    manifest_validator
+        .add_scope_info(AddManifestScopeRequest {
+            binary_services_index,
+            max_input_scope: DataScopeType::UserPrivate,
+            max_output_scope: DataScopeType::UserPrivate,
+        })
+        .await
+        .expect("Should succeed to add input output scopes in manifest validator");
+
+    let isolate_id = IsolateId::new(binary_services_index);
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_string_lossy().to_string();
+
+    // Setup bridge communication buffers in the shared memory manager
+    shared_memory_manager
+        .setup_bridge_communication_buffers(isolate_id, &path)
+        .await
+        .expect("Failed to setup bridge communication buffers");
+
+    // Create the enforcer reader pool to verify written slots
+    let enforcer_pool = shm_slab_pool::ShmSlabPool::new(shm_slab_pool::ShmSlabPoolOptions {
+        file_name: format!("{path}/enforcer-writes"),
+        number_of_slots: 64,
+        slot_size: 4,
+        writer: false,
+    })
+    .expect("Failed to create enforcer reader pool");
+
+    // Start custom isolate server
+    let received_requests = Arc::new(Mutex::new(Vec::new()));
+    let fake_isolate = ShmRequestCheckingIsolate { received_requests: received_requests.clone() };
+    let unix_listener =
+        UnixListener::bind(format!("{}{}", DEFAULT_ISOLATE_UNIX_SOCKET, isolate_id)).unwrap();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        Server::builder()
+            .add_service(EzIsolateBridgeServer::new(fake_isolate))
+            .serve_with_incoming_shutdown(UnixListenerStream::new(unix_listener), async {
+                shutdown_rx.await.ok();
+            })
+            .await
+    });
+
+    let add_isolate_request = create_add_isolate_request(isolate_id);
+    isolate_state_manager.add_isolate(add_isolate_request).await;
+    isolate_state_manager.update_state(isolate_id, IsolateState::Ready).await.unwrap();
+
+    assert!(isolate_junction
+        .connect_isolate(isolate_id, format!("{}{}", DEFAULT_ISOLATE_UNIX_SOCKET, isolate_id),)
+        .await
+        .is_ok());
+
+    let mut client_junction_channels = isolate_junction.stream_invoke_isolate(None, false).await;
+
+    let invoke_isolate_request = create_random_request(&isolate_service_info);
+    assert!(client_junction_channels.client_to_junction.send(invoke_isolate_request).await.is_ok());
+
+    let _response = client_junction_channels.junction_to_client.recv().await.unwrap().unwrap();
+
+    let _ = shutdown_tx.send(());
+
+    // Verify that the isolate received the request as ShmData
+    let received = received_requests.lock().unwrap().last().unwrap().clone();
+    let payload = received.isolate_input.expect("Should have payload");
+    let delivery = payload.delivery_method.expect("Should have delivery method");
+    match delivery {
+        payload_proto::enforcer::v1::ez_hybrid_payload::DeliveryMethod::ShmData(shm_data) => {
+            let read_bytes =
+                enforcer_pool.read_from_pool(&shm_data.slots).expect("Failed to read from pool");
+            assert!(!read_bytes.is_empty());
+        }
+        _ => panic!("Expected ShmData delivery method"),
+    }
+}
+
+struct ShmResponseCheckingIsolate {
+    shm_path: String,
+}
+
+#[tonic::async_trait]
+impl EzIsolateBridge for ShmResponseCheckingIsolate {
+    type StreamInvokeIsolateStream =
+        tokio_stream::wrappers::ReceiverStream<Result<InvokeIsolateResponse, Status>>;
+
+    async fn stream_invoke_isolate(
+        &self,
+        request: Request<Streaming<InvokeIsolateRequest>>,
+    ) -> Result<Response<Self::StreamInvokeIsolateStream>, Status> {
+        let mut rx = request.into_inner();
+        let (tx, rx_stream) = mpsc::channel(10);
+        let shm_path = self.shm_path.clone();
+        tokio::spawn(async move {
+            use tokio_stream::StreamExt;
+            // Setup isolate writer pool
+            let isolate_pool = shm_slab_pool::ShmSlabPool::new(shm_slab_pool::ShmSlabPoolOptions {
+                file_name: format!("{shm_path}/isolate-writes"),
+                number_of_slots: 64,
+                slot_size: 4,
+                writer: true,
+            })
+            .expect("Failed to create isolate writer pool");
+
+            let test_payload = b"stream shm echo";
+            let slot_refs =
+                isolate_pool.write_to_pool(test_payload).await.expect("Failed to write to pool");
+
+            while let Some(Ok(req)) = rx.next().await {
+                let mut resp = create_echo_invoke_isolate_response(req);
+                resp.isolate_output = Some(payload_proto::enforcer::v1::EzHybridPayload {
+                    delivery_method: Some(
+                        payload_proto::enforcer::v1::ez_hybrid_payload::DeliveryMethod::ShmData(
+                            payload_proto::enforcer::v1::ShmSlotData { slots: slot_refs.clone() },
+                        ),
+                    ),
+                });
+                let _ = tx.send(Ok(resp)).await;
+            }
+        });
+        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(rx_stream)))
+    }
+
+    async fn invoke_isolate(
+        &self,
+        _request: Request<InvokeIsolateRequest>,
+    ) -> Result<Response<InvokeIsolateResponse>, Status> {
+        unimplemented!()
+    }
+
+    async fn update_isolate_state(
+        &self,
+        _request: Request<enforcer_proto::enforcer::v1::UpdateIsolateStateRequest>,
+    ) -> Result<Response<enforcer_proto::enforcer::v1::UpdateIsolateStateResponse>, Status> {
+        unimplemented!()
+    }
+}
+
+#[tokio::test]
+async fn test_junction_streaming_response_shm_payload() {
+    let isolate_service_mapper = IsolateServiceMapper::default();
+    let (container_manager_request_tx, _container_manager_request_rx) =
+        tokio::sync::mpsc::channel(JUNCTION_TEST_CHANNEL_SIZE);
+    let container_manager_requester = ContainerManagerRequester::new(container_manager_request_tx);
+    let shared_memory_manager = SharedMemManager::new(container_manager_requester.clone(), 64, 4);
+    let fileshare_manager = FileshareManager::new(container_manager_requester.clone());
+    let data_scope_requester = DataScopeRequester::new(u64::MAX);
+    let manifest_validator = ManifestValidator::default();
+    let isolate_state_manager =
+        IsolateStateManager::new(data_scope_requester.clone(), container_manager_requester.clone());
+    let isolate_junction = IsolateJunction::new(
+        data_scope_requester.clone(),
+        isolate_service_mapper.clone(),
+        shared_memory_manager.clone(),
+        fileshare_manager.clone(),
+        isolate_state_manager.clone(),
+        manifest_validator.clone(),
+        100 * 1024 * 1024, // threshold high, so request is inline
+    );
+
+    let isolate_service_info = IsolateServiceInfo {
+        operator_domain: ECHO_ISOLATE_OPERATOR_DOMAIN.to_string(),
+        service_name: ECHO_ISOLATE_SERVICE_NAME.to_string(),
+        ..Default::default()
+    };
+
+    let binary_services_index = isolate_service_mapper
+        .new_binary_index(vec![isolate_service_info.clone()], false)
+        .await
+        .expect("Should be a valid binary services index");
+
+    manifest_validator
+        .add_scope_info(AddManifestScopeRequest {
+            binary_services_index,
+            max_input_scope: DataScopeType::UserPrivate,
+            max_output_scope: DataScopeType::UserPrivate,
+        })
+        .await
+        .expect("Should succeed to add input output scopes in manifest validator");
+
+    let isolate_id = IsolateId::new(binary_services_index);
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_string_lossy().to_string();
+
+    // Setup bridge communication buffers in the shared memory manager
+    shared_memory_manager
+        .setup_bridge_communication_buffers(isolate_id, &path)
+        .await
+        .expect("Failed to setup bridge communication buffers");
+
+    // Start custom isolate server
+    let fake_isolate = ShmResponseCheckingIsolate { shm_path: path.clone() };
+    let unix_listener =
+        UnixListener::bind(format!("{}{}", DEFAULT_ISOLATE_UNIX_SOCKET, isolate_id)).unwrap();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        Server::builder()
+            .add_service(EzIsolateBridgeServer::new(fake_isolate))
+            .serve_with_incoming_shutdown(UnixListenerStream::new(unix_listener), async {
+                shutdown_rx.await.ok();
+            })
+            .await
+    });
+
+    let add_isolate_request = create_add_isolate_request(isolate_id);
+    isolate_state_manager.add_isolate(add_isolate_request).await;
+    isolate_state_manager.update_state(isolate_id, IsolateState::Ready).await.unwrap();
+
+    assert!(isolate_junction
+        .connect_isolate(isolate_id, format!("{}{}", DEFAULT_ISOLATE_UNIX_SOCKET, isolate_id),)
+        .await
+        .is_ok());
+
+    let mut client_junction_channels = isolate_junction.stream_invoke_isolate(None, false).await;
+
+    let invoke_isolate_request = create_random_request(&isolate_service_info);
+    assert!(client_junction_channels.client_to_junction.send(invoke_isolate_request).await.is_ok());
+
+    let response = client_junction_channels.junction_to_client.recv().await.unwrap().unwrap();
+
+    let _ = shutdown_tx.send(());
+
+    // Verify that the client received the response as InlineData (it was decrypted from SHM)
+    let payload = response.isolate_output.expect("Should have payload");
+    let delivery = payload.delivery_method.expect("Should have delivery method");
+    match delivery {
+        payload_proto::enforcer::v1::ez_hybrid_payload::DeliveryMethod::InlineData(data) => {
+            assert_eq!(data.datagrams.len(), 1);
+            assert_eq!(data.datagrams[0], b"stream shm echo");
         }
         _ => panic!("Expected InlineData delivery method"),
     }
