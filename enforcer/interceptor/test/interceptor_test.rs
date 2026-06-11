@@ -38,6 +38,8 @@ async fn setup_interceptor_with_populated_mapper() -> Result<Interceptor> {
                 ..Default::default()
             }],
             false, // is_ratified
+            "publisher_id".to_string(),
+            "isolate_name".to_string(),
         )
         .await?;
     mapper
@@ -48,6 +50,8 @@ async fn setup_interceptor_with_populated_mapper() -> Result<Interceptor> {
                 ..Default::default()
             }],
             true, // is_ratified
+            "ratified_publisher_id".to_string(),
+            "ratified_isolate_name".to_string(),
         )
         .await?;
     mapper
@@ -58,6 +62,8 @@ async fn setup_interceptor_with_populated_mapper() -> Result<Interceptor> {
                 ..Default::default()
             }],
             true, // is_ratified
+            "another_publisher_id".to_string(),
+            "another_isolate_name".to_string(),
         )
         .await?;
     mapper
@@ -69,6 +75,8 @@ async fn setup_interceptor_with_populated_mapper() -> Result<Interceptor> {
                 publisher_id: "opaque_pub".to_string(),
             }],
             false, // is_ratified
+            "opaque_pub".to_string(),
+            "opaque_iso".to_string(),
         )
         .await?;
     mapper
@@ -80,6 +88,8 @@ async fn setup_interceptor_with_populated_mapper() -> Result<Interceptor> {
                 publisher_id: "ratified_pub".to_string(),
             }],
             true, // is_ratified
+            "ratified_pub".to_string(),
+            "ratified_iso".to_string(),
         )
         .await?;
 

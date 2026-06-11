@@ -28,7 +28,12 @@ async fn test_new_binary_index_and_get_service_index_successful() {
         ..Default::default()
     };
     let binary_index = isolate_service_mapper
-        .new_binary_index(vec![test_isolate_service_info.clone()], false)
+        .new_binary_index(
+            vec![test_isolate_service_info.clone()],
+            false,
+            test_isolate_service_info.publisher_id.clone(),
+            test_isolate_service_info.isolate_name.clone(),
+        )
         .await
         .expect("new_binary_index should succeed");
     let mapped_isolate_service_index = isolate_service_mapper
@@ -61,16 +66,31 @@ async fn test_new_binary_index_fails_on_duplicate_service() {
         ..Default::default()
     };
     let _binary_index = isolate_service_mapper
-        .new_binary_index(vec![test_isolate_service_info.clone()], false)
+        .new_binary_index(
+            vec![test_isolate_service_info.clone()],
+            false,
+            test_isolate_service_info.publisher_id.clone(),
+            test_isolate_service_info.isolate_name.clone(),
+        )
         .await
         .expect("first new_binary_index should succeed");
     assert!(isolate_service_mapper
-        .new_binary_index(vec![test_isolate_service_info.clone()], false)
+        .new_binary_index(
+            vec![test_isolate_service_info.clone()],
+            false,
+            test_isolate_service_info.publisher_id.clone(),
+            test_isolate_service_info.isolate_name.clone(),
+        )
         .await
         .is_err());
     // Marking it ratified also fail
     assert!(isolate_service_mapper
-        .new_binary_index(vec![test_isolate_service_info], true)
+        .new_binary_index(
+            vec![test_isolate_service_info.clone()],
+            true,
+            test_isolate_service_info.publisher_id.clone(),
+            test_isolate_service_info.isolate_name.clone(),
+        )
         .await
         .is_err());
 }
@@ -101,7 +121,12 @@ async fn test_multiple_services_binary_mapping_successful() {
     };
     let services_vec = vec![test_info.clone(), secondary_test_info.clone()];
     let binary_index = isolate_service_mapper
-        .new_binary_index(services_vec, false)
+        .new_binary_index(
+            services_vec,
+            false,
+            test_info.publisher_id.clone(),
+            test_info.isolate_name.clone(),
+        )
         .await
         .expect("new_binary_index should succeed");
     assert!(!binary_index.is_ratified_binary());
@@ -137,12 +162,22 @@ async fn test_multiple_binary_mapping_successful() {
     };
     let secondary_services_vec = vec![secondary_test_info.clone()];
     let binary_index = isolate_service_mapper
-        .new_binary_index(services_vec, false)
+        .new_binary_index(
+            services_vec,
+            false,
+            test_info.publisher_id.clone(),
+            test_info.isolate_name.clone(),
+        )
         .await
         .expect("new_binary_index should succeed");
     assert!(!binary_index.is_ratified_binary());
     let secondary_binary_index = isolate_service_mapper
-        .new_binary_index(secondary_services_vec, true)
+        .new_binary_index(
+            secondary_services_vec,
+            true,
+            secondary_test_info.publisher_id.clone(),
+            secondary_test_info.isolate_name.clone(),
+        )
         .await
         .expect("new_binary_index should succeed for secondary");
     assert!(secondary_binary_index.is_ratified_binary());
@@ -202,7 +237,12 @@ async fn test_add_backend_dependency_service_passes_if_service_in_binary_index()
         ..Default::default()
     };
     mapper
-        .new_binary_index(vec![service_info.clone()], false)
+        .new_binary_index(
+            vec![service_info.clone()],
+            false,
+            service_info.publisher_id.clone(),
+            service_info.isolate_name.clone(),
+        )
         .await
         .expect("new_binary_index should succeed");
     let backend_dependency_index =
@@ -230,7 +270,10 @@ async fn test_new_binary_index_fails_if_service_is_backend_dependency() {
         .await
         .expect("add_backend_dependency_service should succeed");
     assert!(
-        mapper.new_binary_index(vec![service_info], false).await.is_err(),
+        mapper
+            .new_binary_index(vec![service_info], false, "".to_string(), "".to_string(),)
+            .await
+            .is_err(),
         "new_binary_index should fail for existing backend dependency"
     );
 }
@@ -250,7 +293,12 @@ async fn test_get_isolate_service_infos_successful() {
     };
     let services_vec = vec![info1.clone(), info2.clone()];
     let binary_index = isolate_service_mapper
-        .new_binary_index(services_vec.clone(), false)
+        .new_binary_index(
+            services_vec.clone(),
+            false,
+            info1.publisher_id.clone(),
+            info1.isolate_name.clone(),
+        )
         .await
         .expect("new_binary_index should succeed");
     let retrieved_services = isolate_service_mapper
@@ -272,7 +320,12 @@ async fn test_get_service_index_with_new_qualifiers_and_fallback() {
         publisher_id: "pub1".to_string(),
     };
     let _binary_index = isolate_service_mapper
-        .new_binary_index(vec![full_info.clone()], false)
+        .new_binary_index(
+            vec![full_info.clone()],
+            false,
+            full_info.publisher_id.clone(),
+            full_info.isolate_name.clone(),
+        )
         .await
         .expect("new_binary_index should succeed");
 
@@ -308,7 +361,12 @@ async fn test_new_binary_index_and_get_service_index_successful_with_qualifiers(
         publisher_id: "test_pub".to_string(),
     };
     let binary_index = isolate_service_mapper
-        .new_binary_index(vec![test_isolate_service_info.clone()], false)
+        .new_binary_index(
+            vec![test_isolate_service_info.clone()],
+            false,
+            test_isolate_service_info.publisher_id.clone(),
+            test_isolate_service_info.isolate_name.clone(),
+        )
         .await
         .expect("new_binary_index should succeed");
     let mapped_isolate_service_index = isolate_service_mapper
@@ -367,7 +425,12 @@ async fn test_add_backend_dependency_service_passes_if_service_in_binary_index_w
         publisher_id: "test_pub".to_string(),
     };
     mapper
-        .new_binary_index(vec![service_info.clone()], false)
+        .new_binary_index(
+            vec![service_info.clone()],
+            false,
+            service_info.publisher_id.clone(),
+            service_info.isolate_name.clone(),
+        )
         .await
         .expect("new_binary_index should succeed");
     let backend_dependency_index =

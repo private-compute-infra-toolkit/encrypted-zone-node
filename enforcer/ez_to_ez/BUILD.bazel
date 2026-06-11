@@ -78,7 +78,7 @@ rust_library(
 
 rust_library(
     name = "outbound_ez_to_ez_client",
-    srcs = ["outbound_ez_to_ez_client.rs"],
+    srcs = ["src/outbound_ez_to_ez_client.rs"],
     visibility = ["//visibility:public"],
     deps = [
         "//enforcer/v1:enforcer_rust",

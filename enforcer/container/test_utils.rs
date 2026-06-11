@@ -13,7 +13,10 @@
 // limitations under the License.
 
 use anyhow::{Context, Result};
-use container::{Container, ContainerOptions, ContainerRoot, ContainerRunStatus, MountOptions};
+use container::{
+    Container, ContainerMemoryStats, ContainerOptions, ContainerRoot, ContainerRunStatus,
+    MountOptions,
+};
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
@@ -142,6 +145,16 @@ impl Container for FakeContainer {
 
     fn get_run_status(&self) -> anyhow::Result<ContainerRunStatus> {
         Ok(ContainerRunStatus::Running)
+    }
+
+    fn get_memory_stats(&self) -> anyhow::Result<Option<ContainerMemoryStats>> {
+        Ok(Some(ContainerMemoryStats {
+            rss_bytes: 1024 * 1024,
+            peak_rss_bytes: Some(2 * 1024 * 1024),
+            virt_bytes: 5 * 1024 * 1024,
+            shared_bytes: 512 * 1024,
+            data_bytes: 1024 * 1024,
+        }))
     }
 }
 

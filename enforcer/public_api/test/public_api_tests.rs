@@ -564,6 +564,8 @@ async fn setup_interceptor() -> Interceptor {
                 ..Default::default()
             }],
             false, // is_ratified
+            "publisher_id".to_string(),
+            "isolate_name".to_string(),
         )
         .await
         .unwrap();
@@ -575,6 +577,8 @@ async fn setup_interceptor() -> Interceptor {
                 ..Default::default()
             }],
             true, // is_ratified
+            "ratified_publisher_id".to_string(),
+            "ratified_isolate_name".to_string(),
         )
         .await
         .unwrap();
@@ -587,6 +591,8 @@ async fn setup_interceptor() -> Interceptor {
                 publisher_id: "opaque_pub".to_string(),
             }],
             false,
+            "opaque_pub".to_string(),
+            "opaque_iso".to_string(),
         )
         .await
         .unwrap();
@@ -599,6 +605,8 @@ async fn setup_interceptor() -> Interceptor {
                 publisher_id: "ratified_pub".to_string(),
             }],
             true,
+            "ratified_pub".to_string(),
+            "ratified_iso".to_string(),
         )
         .await
         .unwrap();

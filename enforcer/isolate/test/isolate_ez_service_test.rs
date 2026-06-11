@@ -2018,7 +2018,12 @@ async fn add_backend_dependencies(
 ) -> Result<()> {
     if is_internal {
         isolate_service_mapper
-            .new_binary_index(vec![isolate_service_info.clone()], false)
+            .new_binary_index(
+                vec![isolate_service_info.clone()],
+                false,
+                isolate_service_info.publisher_id.clone(),
+                isolate_service_info.isolate_name.clone(),
+            )
             .await
             .context("Should be a valid binary services index")?;
     }
@@ -2086,7 +2091,12 @@ async fn test_unary_routes_via_interceptor() {
 
     harness
         .mapper
-        .new_binary_index(vec![interceptor_info.clone()], true)
+        .new_binary_index(
+            vec![interceptor_info.clone()],
+            true,
+            interceptor_info.publisher_id.clone(),
+            interceptor_info.isolate_name.clone(),
+        )
         .await
         .expect("Failed to index ratified service");
 
@@ -2115,7 +2125,12 @@ async fn test_unary_routes_via_interceptor() {
     };
     harness
         .mapper
-        .new_binary_index(vec![target_info.clone()], false)
+        .new_binary_index(
+            vec![target_info.clone()],
+            false,
+            target_info.publisher_id.clone(),
+            target_info.isolate_name.clone(),
+        )
         .await
         .expect("Failed to index opaque service");
 
@@ -2292,7 +2307,12 @@ async fn test_interceptor_replacement_skipped_for_ratified_isolate() {
 
     harness
         .mapper
-        .new_binary_index(vec![interceptor_info.clone()], true)
+        .new_binary_index(
+            vec![interceptor_info.clone()],
+            true,
+            interceptor_info.publisher_id.clone(),
+            interceptor_info.isolate_name.clone(),
+        )
         .await
         .expect("Failed to index ratified service");
 
@@ -2304,7 +2324,12 @@ async fn test_interceptor_replacement_skipped_for_ratified_isolate() {
     };
     harness
         .mapper
-        .new_binary_index(vec![target_info.clone()], false)
+        .new_binary_index(
+            vec![target_info.clone()],
+            false,
+            target_info.publisher_id.clone(),
+            target_info.isolate_name.clone(),
+        )
         .await
         .expect("Failed to index opaque service");
 

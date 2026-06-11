@@ -20,7 +20,13 @@ use opentelemetry::metrics::{Counter, Gauge, Meter};
 pub struct HealthManagerMetrics {
     pub state: Gauge<i64>,
     pub container_run_status: Gauge<i64>,
+    pub container_rss_memory: Gauge<i64>,
+    pub container_peak_rss_memory: Gauge<i64>,
+    pub container_virt_memory: Gauge<i64>,
+    pub container_private_memory: Gauge<i64>,
+    pub container_data_memory: Gauge<i64>,
     pub reset: Counter<u64>,
+    pub pre_ready_exit: Counter<u64>,
     pub system_fd_count: Gauge<i64>,
     pub system_memory_rss: Gauge<i64>,
     pub system_cpu_percent: Gauge<f64>,
@@ -38,6 +44,13 @@ impl HealthManagerMetrics {
             .build();
 
         let reset = common::build_reset_counter(&meter);
+
+        let pre_ready_exit = meter
+            .u64_counter(crate::metric_name!("health.isolate.pre_ready_exit"))
+            .with_description(
+                "Counts the number of times isolates exit or crash prior to being ready to serve requests.",
+            )
+            .build();
 
         let system_fd_count = meter
             .i64_gauge(crate::metric_name!("health.system.file_descriptors"))
@@ -61,10 +74,45 @@ impl HealthManagerMetrics {
             .with_description("The container run status (e.g. RUNNING, EXITED, etc).")
             .build();
 
+        let container_rss_memory = meter
+            .i64_gauge(crate::metric_name!("isolate.memory.resident_size"))
+            .with_description(
+                "Resident Set Size (RSS) memory consumption of the container in bytes.",
+            )
+            .build();
+
+        let container_peak_rss_memory = meter
+            .i64_gauge(crate::metric_name!("isolate.memory.peak_resident_size"))
+            .with_description(
+                "Peak resident memory consumption of the container (RSS peak) in bytes.",
+            )
+            .build();
+
+        let container_virt_memory = meter
+            .i64_gauge(crate::metric_name!("isolate.memory.virtual_size"))
+            .with_description("Virtual memory size of the container (vsize) in bytes.")
+            .build();
+
+        let container_private_memory = meter
+            .i64_gauge(crate::metric_name!("isolate.memory.private_size"))
+            .with_description("Private resident memory size of the container in bytes.")
+            .build();
+
+        let container_data_memory = meter
+            .i64_gauge(crate::metric_name!("isolate.memory.data_size"))
+            .with_description("Data segment memory size of the container in bytes.")
+            .build();
+
         Self {
             state,
             container_run_status,
+            container_rss_memory,
+            container_peak_rss_memory,
+            container_virt_memory,
+            container_private_memory,
+            container_data_memory,
             reset,
+            pre_ready_exit,
             system_fd_count,
             system_memory_rss,
             system_cpu_percent,

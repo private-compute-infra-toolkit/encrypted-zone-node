@@ -55,7 +55,6 @@ const CHANNEL_SIZE: usize = 10;
 const TEST_INTERNAL_ROUTE_TYPE: RouteType = RouteType::Internal;
 const METRICS_UDS_NAME: &str = "otel-metrics.sock";
 const ISOLATE_UDS_NAME: &str = "isolate-ez-bridge-uds";
-const FIFO_NAME: &str = "fifo";
 const TEST_ISOLATE_NAME: &str = "test-isolate";
 const TEST_PUBLISHER_ID: &str = "test-publisher";
 
@@ -144,7 +143,14 @@ impl TestHarness {
         route_type: RouteType,
     ) -> Result<()> {
         if route_type == RouteType::Internal {
-            self.mapper.new_binary_index(vec![service_info.clone()], false).await?;
+            self.mapper
+                .new_binary_index(
+                    vec![service_info.clone()],
+                    false,
+                    service_info.publisher_id.clone(),
+                    service_info.isolate_name.clone(),
+                )
+                .await?;
         } else {
             self.mapper.add_backend_dependency_service(service_info, route_type).await?;
         }
@@ -219,10 +225,6 @@ async fn test_metrics_server_reception() {
     let temp_dir = tempfile::Builder::new().prefix("test-metrics-server").tempdir().unwrap();
     let metrics_uds_path = temp_dir.path().join(METRICS_UDS_NAME);
     let isolate_uds_path = temp_dir.path().join(ISOLATE_UDS_NAME);
-    let fifo_path = temp_dir.path().join(FIFO_NAME);
-
-    let _ = nix::unistd::mkfifo(&fifo_path, nix::sys::stat::Mode::S_IRWXU);
-
     let service_mapper = IsolateServiceMapper::default();
     let data_scope_requester = DataScopeRequester::new(0);
     let (tx, _container_manager_rx) = tokio::sync::mpsc::channel(1);
@@ -256,7 +258,9 @@ async fn test_metrics_server_reception() {
         .start_isolate_ez_server(isolate_ez_service_manager::StartIsolateEzServerArgs {
             isolate_id,
             isolate_address: isolate_uds_path.display().to_string(),
-            isolate_fifo_path: fifo_path.display().to_string(),
+            // Opening a real FIFO for writing blocks until a reader opens it,
+            // which frequently deadlocks in sandboxed/containerized environments.
+            isolate_fifo_path: "/dev/null".to_string(),
             otel_metrics_address: metrics_uds_path.display().to_string(),
             metrics_policy: IsolateMetricsPolicy {
                 allowed_metrics: vec![AllowedMetric {
@@ -265,16 +269,12 @@ async fn test_metrics_server_reception() {
                     allowed_attributes: vec![],
                 }],
             },
-            isolate_name: TEST_ISOLATE_NAME.to_string(),
-            publisher_id: TEST_PUBLISHER_ID.to_string(),
+            isolate_type: isolate_info::IsolateType {
+                isolate_name: TEST_ISOLATE_NAME.to_string(),
+                publisher_id: TEST_PUBLISHER_ID.to_string(),
+            },
         })
         .await;
-
-    // Unblock the FIFO opening task in IsolateEzServiceManager
-    let read_fifo_path = fifo_path.clone();
-    tokio::spawn(async move {
-        let _ = tokio::fs::OpenOptions::new().read(true).open(read_fifo_path).await;
-    });
 
     let mut attempts = 0;
     while !metrics_uds_path.exists() && attempts < 100 {

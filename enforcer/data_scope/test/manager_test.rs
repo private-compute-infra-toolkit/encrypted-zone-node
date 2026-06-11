@@ -249,12 +249,12 @@ async fn test_validate_isolate_scope_valid_change() -> Result<(), Box<dyn std::e
     let validate_request = create_validate_isolate_request(isolate_id, DataScopeType::DomainOwned);
     assert!(data_scope_requester.validate_isolate_scope(validate_request).await.is_ok());
 
-    // The current scope should have changed. We can no longer get it for Public.
+    // The current scope has changed to DomainOwned. When requesting Public, it will now fall back
+    // to the DomainOwned isolate because of the fallback/traverse behavior.
     let mut get_isolate_request = create_get_isolate_request(false);
     get_isolate_request.data_scope_type = DataScopeType::Public;
-    let get_isolate_result = data_scope_requester.get_isolate(get_isolate_request).await;
-    assert!(get_isolate_result.is_err());
-    assert!(matches!(get_isolate_result, Err(DataScopeError::NoMatchingIsolates)));
+    let get_isolate_result = data_scope_requester.get_isolate(get_isolate_request).await?;
+    assert_eq!(get_isolate_result.isolate_id, isolate_id);
 
     // We can get it for DomainOwned.
     let mut get_isolate_request_2: GetIsolateRequest = create_get_isolate_request(false);
@@ -727,6 +727,95 @@ async fn test_add_isolate_mismatched_scope_ratified() -> Result<(), Box<dyn std:
 
     assert!(result.is_err());
     assert!(matches!(result, Err(DataScopeError::InternalError(_))));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_lower_data_scope_data_allowed_to_stricter_data_scope_isolate(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let data_scope_requester = DataScopeRequester::new(u64::MAX);
+
+    // Add Isolate 1: current = DomainOwned, allowed = UserPrivate
+    let mut add_req_1 = create_add_isolate_request(false);
+    add_req_1.current_data_scope_type = DataScopeType::DomainOwned;
+    add_req_1.allowed_data_scope_type = DataScopeType::UserPrivate;
+    let isolate_id_1 = add_req_1.isolate_id;
+    data_scope_requester.add_isolate(add_req_1).await?;
+
+    // Verify initial scope is DomainOwned
+    let scope_resp = data_scope_requester
+        .get_isolate_scope(GetIsolateScopeRequest { isolate_id: isolate_id_1 })
+        .await?;
+    assert_eq!(scope_resp.current_scope, DataScopeType::DomainOwned);
+
+    // Request Public.
+    let mut get_req_public = create_get_isolate_request(false);
+    get_req_public.data_scope_type = DataScopeType::Public;
+    let res = data_scope_requester.get_isolate(get_req_public).await?;
+    assert_eq!(res.isolate_id, isolate_id_1);
+
+    // Verify that the scope is still Public
+    let scope_resp = data_scope_requester
+        .get_isolate_scope(GetIsolateScopeRequest { isolate_id: isolate_id_1 })
+        .await?;
+    assert_eq!(scope_resp.current_scope, DataScopeType::DomainOwned);
+
+    // Request UserPrivate. Since allowed is UserPrivate, it should find and upgrade it.
+    let mut get_req_user = create_get_isolate_request(false);
+    get_req_user.data_scope_type = DataScopeType::UserPrivate;
+    let res = data_scope_requester.get_isolate(get_req_user).await?;
+    assert_eq!(res.isolate_id, isolate_id_1);
+
+    // Verify that the scope is still USER
+    let scope_resp = data_scope_requester
+        .get_isolate_scope(GetIsolateScopeRequest { isolate_id: isolate_id_1 })
+        .await?;
+    assert_eq!(scope_resp.current_scope, DataScopeType::UserPrivate);
+
+    // Request Public. It should fall back to the UserPrivate isolate and return isolate_id_1.
+    let mut get_req_public_2 = create_get_isolate_request(false);
+    get_req_public_2.data_scope_type = DataScopeType::Public;
+    let res = data_scope_requester.get_isolate(get_req_public_2).await?;
+    assert_eq!(res.isolate_id, isolate_id_1);
+
+    // Verify that the scope is still USER
+    let scope_resp = data_scope_requester
+        .get_isolate_scope(GetIsolateScopeRequest { isolate_id: isolate_id_1 })
+        .await?;
+    assert_eq!(scope_resp.current_scope, DataScopeType::UserPrivate);
+
+    // Add Isolate 2: current = Public, allowed = DomainOwned
+    let mut add_req_2 = create_add_isolate_request(false);
+    add_req_2.current_data_scope_type = DataScopeType::Public;
+    add_req_2.allowed_data_scope_type = DataScopeType::DomainOwned;
+    let _isolate_id_2 = add_req_2.isolate_id;
+    data_scope_requester.add_isolate(add_req_2).await?;
+
+    // Isolate 1 is now in UserPrivate. Isolate 2 is in Public.
+    // Request UserPrivate. Since only Isolate 1 is UserPrivate, it should return Isolate 1.
+    let mut get_req_user_2 = create_get_isolate_request(false);
+    get_req_user_2.data_scope_type = DataScopeType::UserPrivate;
+    let res = data_scope_requester.get_isolate(get_req_user_2).await?;
+    assert_eq!(res.isolate_id, isolate_id_1);
+
+    // Isolate 1 is USERPRIVATE and Isolate 2 is PUBLIC
+    // Request Public. It should provide Isolate 2 which is Public.
+    let mut get_req_public_3 = create_get_isolate_request(false);
+    get_req_public_3.data_scope_type = DataScopeType::Public;
+    let res = data_scope_requester.get_isolate(get_req_public_3).await?;
+    assert_eq!(res.isolate_id, _isolate_id_2);
+
+    // Remove Isolate 1 so that only Isolate 2 (Public->DomainOwned) remains.
+    data_scope_requester.remove_isolate(RemoveIsolateRequest { isolate_id: isolate_id_1 }).await?;
+
+    // Request UserPrivate. Since only Isolate 2 is available (allowed up to DomainOwned),
+    // we do NOT want to look into DomainOwned or Public to serve a UserPrivate request
+    // (never reduce strictness). It should return NoMatchingIsolates error.
+    let mut get_req_user_3 = create_get_isolate_request(false);
+    get_req_user_3.data_scope_type = DataScopeType::UserPrivate;
+    let result = data_scope_requester.get_isolate(get_req_user_3).await;
+    assert!(matches!(result, Err(DataScopeError::NoMatchingIsolates)));
 
     Ok(())
 }

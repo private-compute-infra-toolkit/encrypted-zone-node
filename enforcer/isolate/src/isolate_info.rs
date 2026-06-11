@@ -17,10 +17,44 @@ use derivative::Derivative;
 use once_cell::sync::Lazy;
 use std::{fmt, hash::Hash};
 
-static EXTERNAL_BINARY_SERVICES_INDEX: Lazy<BinaryServicesIndex> =
-    Lazy::new(|| BinaryServicesIndex::new(false));
-static REMOTE_BINARY_SERVICES_INDEX: Lazy<BinaryServicesIndex> =
-    Lazy::new(|| BinaryServicesIndex::new(false));
+// Sential values for external and remote services
+static EXTERNAL_BINARY_SERVICES_INDEX: Lazy<BinaryServicesIndex> = Lazy::new(|| {
+    let index = BinaryServicesIndex::new(false);
+    register_isolate_type(
+        index,
+        IsolateType { publisher_id: "external".to_string(), isolate_name: "external".to_string() },
+    );
+    index
+});
+static REMOTE_BINARY_SERVICES_INDEX: Lazy<BinaryServicesIndex> = Lazy::new(|| {
+    let index = BinaryServicesIndex::new(false);
+    register_isolate_type(
+        index,
+        IsolateType { publisher_id: "remote".to_string(), isolate_name: "remote".to_string() },
+    );
+    index
+});
+
+/// `IsolateType` represents the identity properties (publisher and name) of an Isolate.
+#[derive(Debug, Default, PartialEq, Eq, Hash, Clone)]
+pub struct IsolateType {
+    pub publisher_id: String,
+    pub isolate_name: String,
+}
+
+pub static ISOLATE_SERVICES_REGISTRY: Lazy<
+    std::sync::RwLock<std::collections::HashMap<BinaryServicesIndex, IsolateType>>,
+> = Lazy::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
+
+pub fn register_isolate_type(index: BinaryServicesIndex, isolate_type: IsolateType) {
+    let mut registry = ISOLATE_SERVICES_REGISTRY.write().unwrap_or_else(|e| e.into_inner());
+    registry.insert(index, isolate_type);
+}
+
+pub fn get_isolate_type(index: &BinaryServicesIndex) -> Option<IsolateType> {
+    let registry = ISOLATE_SERVICES_REGISTRY.read().unwrap_or_else(|e| e.into_inner());
+    registry.get(index).cloned()
+}
 
 /// Represents the destination route for a service request.
 ///
@@ -51,7 +85,7 @@ impl Route {
 
 /// `IsolateId` is a unique identifier for a single Isolate.
 #[derive(Derivative, Clone, Copy, Debug)]
-#[derivative(PartialEq, Eq, Hash)]
+#[derivative(PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct IsolateId {
     /// Selects a random 64 bit IsolateId (very low probability of collision)
     id: u64,
@@ -59,6 +93,8 @@ pub struct IsolateId {
     /// Don't include this field in hash because the ID uniquely identifies the Isolate
     #[derivative(PartialEq = "ignore")]
     #[derivative(Hash = "ignore")]
+    #[derivative(PartialOrd = "ignore")]
+    #[derivative(Ord = "ignore")]
     binary_services_index: BinaryServicesIndex,
 }
 
@@ -209,13 +245,24 @@ impl fmt::Display for IsolateServiceIndex {
 
 impl fmt::Display for IsolateId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}:IsolateId-{}-BinaryServicesIndex-{}",
-            if self.is_ratified_isolate() { "Ratified" } else { "Opaque" },
-            self.id,
-            self.binary_services_index.binary_services_idx
-        )
+        if let Some(isolate_type) = get_isolate_type(&self.binary_services_index) {
+            write!(
+                f,
+                "{}:IsolateId-{}-Publisher-{}-Isolate-{}",
+                if self.is_ratified_isolate() { "Ratified" } else { "Opaque" },
+                self.id,
+                isolate_type.publisher_id,
+                isolate_type.isolate_name
+            )
+        } else {
+            write!(
+                f,
+                "{}:IsolateId-{}-BinaryServicesIndex-{}",
+                if self.is_ratified_isolate() { "Ratified" } else { "Opaque" },
+                self.id,
+                self.binary_services_index.binary_services_idx
+            )
+        }
     }
 }
 

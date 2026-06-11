@@ -2,6 +2,47 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## 0.13.0 (2026-06-11)
+
+
+### EZ Policy Enforcer
+
+* **enforcer:** Add detailed enforcer memory metrics
+* **enforcer:** Add enforcer integration test case for histograms
+* **enforcer:** Add more test cases for histogram integration test
+* **enforcer:** Add per-isolate container memory to health metrics
+* **enforcer:** bake version from version.txt into binary and metrics
+* **enforcer:** define pre-ready exit health metric
+* **enforcer:** Emit detailed memory metrics for isolates
+* **enforcer:** fallback search in compatible data scopes
+* **enforcer:** Remove not allowed attributes when filtering
+* **enforcer:** simplify telemetry schema - remove ez_isolate_name
+* **enforcer:** simplify telemetry schema - remove ez_isolate_type
+* **enforcer:** simplify telemetry schema - remove ez_publisher_id
+* **enforcer:** standardize telemetry attributes as scope attributes
+
+
+### Gemini
+
+* **gemini:** Add custom Duckie integration skill for AI agent
+
+
+### Features
+
+* Add gerrit agent skill for interacting with Gerrit CLs
+* Emit ez_isolate_name/ez_publisher_id/ez_isolate_type selectively
+* update rust version to latest stable (1.96.0)
+
+
+### Bug Fixes
+
+* **node:** Use tokio fs, spawn blocking as needed
+
+
+### Documentation
+
+* **gemini:** Document code coverage and exclusions in GEMINI.md
+
 ## 0.12.0 (2026-06-02)
 
 

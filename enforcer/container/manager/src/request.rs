@@ -113,4 +113,9 @@ pub struct GetRunStatusRequest {
 #[derive(Debug)]
 pub struct GetRunStatusResponse {
     pub status: ContainerRunStatus,
+    pub rss_bytes: Option<u64>,
+    pub peak_rss_bytes: Option<u64>,
+    pub virt_bytes: Option<u64>,
+    pub shared_bytes: Option<u64>,
+    pub data_bytes: Option<u64>,
 }

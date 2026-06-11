@@ -233,7 +233,12 @@ impl TestHarness {
             qualified_isolate_service_info.clone(),
         ];
         let binary_services_index = isolate_service_mapper
-            .new_binary_index(isolate_services_vec, is_ratified)
+            .new_binary_index(
+                isolate_services_vec,
+                is_ratified,
+                "echo_pub".to_string(),
+                "echo_iso".to_string(),
+            )
             .await
             .expect("Should be a valid binary services index");
 

@@ -57,7 +57,7 @@ const PUBLIC_API_PORT_ENV_VAR: &str = "EZ_PUBLIC_API_PORT";
 const ISOLATE_MNGR_REQUEST_CHANNEL_SIZE: usize = 1024;
 
 #[derive(Parser, Debug)]
-#[command(version, about)]
+#[command(version = version::VERSION, about)]
 struct EnforcerInputs {
     /// Path to EZ Manifest Json file representing EzManifest proto
     #[arg(short = 'm', long, required = true)]

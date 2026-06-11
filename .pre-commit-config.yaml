@@ -123,7 +123,7 @@ repos:
           - javascript
           - json
           - yaml
-        exclude: .*\.clang-tidy$
+        exclude: .*\.clang-tidy$|.*/expected_output\.json$
 
   - repo: https://github.com/DavidAnson/markdownlint-cli2
     rev: v0.18.1

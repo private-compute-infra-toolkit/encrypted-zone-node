@@ -47,11 +47,11 @@ use state_manager::IsolateStateManager;
 use std::cmp::max;
 use std::convert::TryFrom;
 use std::env;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc::Receiver;
 
 // The dir name that will appear in Container where all shared files and UDSs will exist.
@@ -295,14 +295,21 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
                 get_etc_hosts_path(&args.publisher_id, &args.binary_manifest.binary_filename);
             let etc_hosts_parent_dir =
                 etc_hosts_path.parent().context("etc_hosts_path has no parent")?;
-            fs::create_dir_all(etc_hosts_parent_dir)
+            tokio::fs::create_dir_all(etc_hosts_parent_dir)
+                .await
                 .context(format!("Failed to create directory {etc_hosts_parent_dir:?}"))?;
 
             let key = (args.publisher_id.clone(), args.binary_manifest.binary_filename.clone());
             if self.etc_hosts_written.insert(key, ()).is_none() {
-                match OpenOptions::new().write(true).create_new(true).open(&etc_hosts_path) {
+                match tokio::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&etc_hosts_path)
+                    .await
+                {
                     Ok(mut file) => {
                         file.write_all(etc_hosts.as_bytes())
+                            .await
                             .context(format!("Failed to write to file {:?}", etc_hosts_path))?;
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -336,15 +343,19 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             )?;
             env_vars.push(format!("EZ_BACKEND_DEPENDENCIES={}", serialized_deps));
         }
+        let package_filename = args.package_filename.clone();
+        let shared_root =
+            tokio::task::spawn_blocking(move || utils::unpack_file_system(&package_filename))
+                .await
+                .context("Failed to run spawn_blocking for file system unpack")?
+                .context("Failed to unpack file system")?;
+
         let container_startup_args = ContainerStartupArgs {
             binary_filename: args.binary_manifest.binary_filename.clone(),
             // Copy is required because command_line_args is now owned by container_startup_args.
             command_line_args: command_line_args.clone(),
             strictest_scope,
-            shared_root: Arc::new(
-                utils::unpack_file_system(&args.package_filename)
-                    .context("Failed to unpack file system")?,
-            ),
+            shared_root: Arc::new(shared_root),
             bind_mounts,
             env_vars,
             publisher_id: args.publisher_id.clone(),
@@ -412,7 +423,12 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
 
         let binary_services_index = self
             .isolate_service_mapper
-            .new_binary_index(isolate_service_infos.clone(), is_ratified_binary)
+            .new_binary_index(
+                isolate_service_infos.clone(),
+                is_ratified_binary,
+                publisher_id.clone(),
+                isolate_name.clone(),
+            )
             .await
             .context("Failed to get binary services index")?;
 
@@ -664,8 +680,10 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
                 isolate_fifo_path: isolate_ez_bridge_ready_enforcer_side_fifo_path,
                 otel_metrics_address: otlp_metrics_enforcer_side_uds_path,
                 metrics_policy: container_startup_args.metrics_policy,
-                isolate_name: container_startup_args.binary_filename.clone(),
-                publisher_id: container_startup_args.publisher_id,
+                isolate_type: isolate_info::IsolateType {
+                    isolate_name: container_startup_args.binary_filename.clone(),
+                    publisher_id: container_startup_args.publisher_id,
+                },
             })
             .await;
 
@@ -751,28 +769,30 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
         &self,
         mount_writable_file_req: MountWritableFile,
     ) -> Result<MountFileResponse> {
-        // Need write lock because container.mount is a mutable operation
-        let mut isolate_container_ref = self
-            .isolate_container_map
-            .get_mut(&mount_writable_file_req.isolate_id)
-            .context("Isolate not recognized while mounting writable file")?;
-        let isolate_container = isolate_container_ref.value_mut();
-
         let enforcer_file_path =
             get_file_mount_enforcer_path(&mount_writable_file_req.enforcer_file_name);
-        let file = OpenOptions::new()
+        let file = tokio::fs::OpenOptions::new()
             .write(true)
             .read(true)
             .create(true)
             .truncate(true)
-            .open(enforcer_file_path.clone())?;
+            .open(enforcer_file_path.clone())
+            .await?;
         file.set_len(
             mount_writable_file_req
                 .region_size
                 .try_into()
                 .context("Invalid file size while mounting writable file")?,
         )
+        .await
         .context("Could not set file size while mounting writable file")?;
+
+        // Need write lock because container.mount is a mutable operation
+        let mut isolate_container_ref = self
+            .isolate_container_map
+            .get_mut(&mount_writable_file_req.isolate_id)
+            .context("Isolate not recognized while mounting writable file")?;
+        let isolate_container = isolate_container_ref.value_mut();
 
         // Dynamically mount a writable file
         isolate_container
@@ -808,14 +828,16 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
         &self,
         req: MountWritableDirectory,
     ) -> Result<MountDirectoryResponse> {
+        let enforcer_dir_path = get_file_mount_enforcer_path(&req.enforcer_dir_name);
+        tokio::fs::create_dir_all(&enforcer_dir_path)
+            .await
+            .context("Could not create enforcer directory")?;
+
         let mut isolate_container_ref = self
             .isolate_container_map
             .get_mut(&req.isolate_id)
             .context("Isolate not recognized while mounting writable directory")?;
         let isolate_container = isolate_container_ref.value_mut();
-
-        let enforcer_dir_path = get_file_mount_enforcer_path(&req.enforcer_dir_name);
-        fs::create_dir_all(&enforcer_dir_path).context("Could not create enforcer directory")?;
 
         isolate_container
             .container
@@ -854,7 +876,26 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             .get(&req.isolate_id)
             .context("Isolate not recognized while getting run status")?;
         let status = isolate_container_ref.value().container.get_run_status()?;
-        Ok(GetRunStatusResponse { status })
+        let memory_stats = isolate_container_ref.value().container.get_memory_stats()?;
+        let (rss_bytes, peak_rss_bytes, virt_bytes, shared_bytes, data_bytes) = memory_stats
+            .map(|s| {
+                (
+                    Some(s.rss_bytes),
+                    s.peak_rss_bytes,
+                    Some(s.virt_bytes),
+                    Some(s.shared_bytes),
+                    Some(s.data_bytes),
+                )
+            })
+            .unwrap_or_default();
+        Ok(GetRunStatusResponse {
+            status,
+            rss_bytes,
+            peak_rss_bytes,
+            virt_bytes,
+            shared_bytes,
+            data_bytes,
+        })
     }
 }
 

@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use anyhow::Context;
-use container::{Container, ContainerOptions, ContainerRoot, ContainerRunStatus};
+use container::{
+    Container, ContainerMemoryStats, ContainerOptions, ContainerRoot, ContainerRunStatus,
+};
 use nix::errno::Errno;
 use nix::mount::{self, MntFlags, MsFlags};
 use nix::sched::{self, CloneFlags};
@@ -36,6 +38,8 @@ const ROOTFS: &str = "rootfs";
 
 const UNPRIVILEGED_UID: u32 = 1000;
 const UNPRIVILEGED_GID: u32 = 1000;
+
+const BYTES_PER_KIB: u64 = 1024;
 
 static INIT_AS_SUBREAPER: Once = Once::new();
 
@@ -559,5 +563,51 @@ impl Container for ContainerCustom {
             Err(Errno::ECHILD) => Err(anyhow::anyhow!("Exited or not child of calling process")),
             Err(e) => Err(anyhow::anyhow!("Waitpid failed with error: {}", e)),
         }
+    }
+
+    fn get_memory_stats(&self) -> anyhow::Result<Option<ContainerMemoryStats>> {
+        let pid = match self.pid {
+            Some(pid) => pid,
+            None => return Ok(None),
+        };
+
+        let Ok(proc) = procfs::process::Process::new(pid.as_raw()) else {
+            return Ok(None);
+        };
+
+        let Ok(statm) = proc.statm() else {
+            return Ok(None);
+        };
+        let status = proc
+            .status()
+            .inspect_err(|e| log::debug!("Failed to read status for pid {pid}: {e}"))
+            .ok();
+
+        let page_size = procfs::page_size() as u64;
+
+        let rss_bytes = statm.resident.checked_mul(page_size);
+
+        let virt_bytes = statm.size.checked_mul(page_size);
+
+        let shared_bytes = statm.shared.checked_mul(page_size);
+
+        let data_bytes = statm.data.checked_mul(page_size);
+
+        let peak_rss_bytes =
+            status.and_then(|s| s.vmhwm).and_then(|kb| kb.checked_mul(BYTES_PER_KIB));
+
+        let (Some(rss_bytes), Some(virt_bytes), Some(shared_bytes), Some(data_bytes)) =
+            (rss_bytes, virt_bytes, shared_bytes, data_bytes)
+        else {
+            return Ok(None);
+        };
+
+        Ok(Some(ContainerMemoryStats {
+            rss_bytes,
+            peak_rss_bytes,
+            virt_bytes,
+            shared_bytes,
+            data_bytes,
+        }))
     }
 }

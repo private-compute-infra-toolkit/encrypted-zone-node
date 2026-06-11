@@ -72,8 +72,7 @@ pub struct StartIsolateEzServerArgs {
     pub isolate_fifo_path: String,
     pub otel_metrics_address: String,
     pub metrics_policy: IsolateMetricsPolicy,
-    pub isolate_name: String,
-    pub publisher_id: String,
+    pub isolate_type: isolate_info::IsolateType,
 }
 
 impl IsolateEzServiceManager {
@@ -103,8 +102,8 @@ impl IsolateEzServiceManager {
                 .create_otel_metrics_server(
                     args.otel_metrics_address,
                     args.metrics_policy,
-                    args.isolate_name,
-                    args.publisher_id,
+                    args.isolate_type.isolate_name,
+                    args.isolate_type.publisher_id,
                     is_ratified,
                 )
                 .await;

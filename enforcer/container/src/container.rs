@@ -83,6 +83,21 @@ pub struct ContainerOptions {
     pub run_isolate_as_unprivileged: bool,
 }
 
+/// Represents the memory statistics of a container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContainerMemoryStats {
+    /// Resident Set Size in bytes.
+    pub rss_bytes: u64,
+    /// Peak Resident Set Size in bytes.
+    pub peak_rss_bytes: Option<u64>,
+    /// Virtual Memory Size in bytes.
+    pub virt_bytes: u64,
+    /// Shared memory usage in bytes.
+    pub shared_bytes: u64,
+    /// Data segment size in bytes.
+    pub data_bytes: u64,
+}
+
 #[tonic::async_trait]
 pub trait Container: Send + Sync {
     /// Creates a new instance of Container.
@@ -108,4 +123,7 @@ pub trait Container: Send + Sync {
 
     /// Checks if the container process is running. Fetches exit code / signal if available.
     fn get_run_status(&self) -> anyhow::Result<ContainerRunStatus>;
+
+    /// Gets the memory stats of the container in bytes.
+    fn get_memory_stats(&self) -> anyhow::Result<Option<ContainerMemoryStats>>;
 }

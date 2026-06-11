@@ -190,6 +190,8 @@ impl MetricAttributes {
             KeyValue::new("operator_domain", domain.to_string()),
             KeyValue::new("service_name", service.to_string()),
             KeyValue::new("method_name", method.to_string()),
+            KeyValue::new("ez_component_name", "enforcer"),
+            KeyValue::new("ez_enforcer_version", crate::get_enforcer_version()),
         ]);
         Self {
             base_attributes,

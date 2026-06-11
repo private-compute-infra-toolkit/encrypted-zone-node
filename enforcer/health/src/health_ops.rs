@@ -36,15 +36,15 @@ impl HealthOp {
     ) {
         match self {
             HealthOp::CheckContainerRunStatus => {
-                let status =
-                    match requester.get_run_status(GetRunStatusRequest { isolate_id }).await {
-                        Ok(resp) => resp.status,
-                        Err(e) => {
-                            log::error!("Failed to get container run status: {:?}", e);
-                            return;
-                        }
-                    };
-                let (run_status, exit_code, signal) = match status {
+                let resp = match requester.get_run_status(GetRunStatusRequest { isolate_id }).await
+                {
+                    Ok(resp) => resp,
+                    Err(e) => {
+                        log::error!("Failed to get container run status: {:?}", e);
+                        return;
+                    }
+                };
+                let (run_status, exit_code, signal) = match resp.status {
                     ContainerRunStatusEnum::Running => (RunStatus::Running, None, None),
                     ContainerRunStatusEnum::Exited(code) => (RunStatus::Exited, Some(code), None),
                     ContainerRunStatusEnum::Signaled(sig) => (RunStatus::Signaled, None, Some(sig)),
@@ -52,6 +52,12 @@ impl HealthOp {
                 };
                 health.container_run_status =
                     Some(ContainerRunStatus { status: run_status as i32, exit_code, signal });
+                let to_i64 = |val: Option<u64>| val.and_then(|b| i64::try_from(b).ok());
+                health.container_rss_memory_bytes = to_i64(resp.rss_bytes);
+                health.container_peak_rss_memory_bytes = to_i64(resp.peak_rss_bytes);
+                health.container_virt_memory_bytes = to_i64(resp.virt_bytes);
+                health.container_shared_memory_bytes = to_i64(resp.shared_bytes);
+                health.container_data_memory_bytes = to_i64(resp.data_bytes);
                 if run_status != RunStatus::Running {
                     log::info!(
                         "[HealthOp::CheckContainerRunStatus] Isolate {} is not running (status: {:?}). Requesting reset.",

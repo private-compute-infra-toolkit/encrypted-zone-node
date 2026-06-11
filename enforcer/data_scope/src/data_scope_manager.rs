@@ -225,7 +225,7 @@ impl DataScopeManager {
         let strictest_allowed_scope =
             isolate_max_scope_index.get(&isolate_id).copied().unwrap_or_default();
 
-        if requested_data_scope != current_data_scope {
+        if requested_data_scope > current_data_scope {
             change_isolate_scope(
                 scope_index,
                 isolate_scope_index,
@@ -431,19 +431,21 @@ fn get_isolate_from_index(
 ) -> Option<IsolateId> {
     match scope_index_option {
         Some(scope_index) => {
-            let isolate_set_option = scope_index.get(&data_scope);
-            match isolate_set_option {
-                // Select a Random Isolate from the Set (uniformly distribute traffic)
-                Some(isolate_set) => {
-                    // TODO Maybe create a separate module for LB to reuse ThreadRng
-                    if isolate_set.is_empty() {
-                        return None;
+            let start_idx = DATA_SCOPES.iter().position(|&x| x == data_scope)?;
+
+            // Search compatible data scopes (from the requested scope up to most strict)
+            // For e.g. it is okay to send PUBLIC DataScoped data to a USER DataScoped Isolate
+            for &current_scope in &DATA_SCOPES[start_idx..] {
+                if let Some(isolate_set) = scope_index.get(&current_scope) {
+                    if !isolate_set.is_empty() {
+                        // Select a Random Isolate from the Set (uniformly distribute traffic)
+                        // TODO Maybe create a separate module for LB to reuse ThreadRng
+                        let random_isolate_index = rand::rng().random_range(0..isolate_set.len());
+                        return isolate_set.get_index(random_isolate_index).copied();
                     }
-                    let random_isolate_index = rand::rng().random_range(0..isolate_set.len());
-                    isolate_set.get_index(random_isolate_index).copied()
                 }
-                None => None,
             }
+            None
         }
         None => None,
     }

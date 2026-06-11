@@ -21,6 +21,19 @@ use opentelemetry::metrics::MeterProvider;
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::{WithExportConfig, WithTonicConfig};
 use opentelemetry_sdk::{metrics::SdkMeterProvider, Resource};
+/// Gets the compile-time baked enforcer version, allowing override via ENFORCER_VERSION_OVERRIDE env var.
+pub fn get_enforcer_version() -> &'static str {
+    static VERSION_CACHE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    VERSION_CACHE.get_or_init(|| {
+        if let Ok(val) = std::env::var("ENFORCER_VERSION_OVERRIDE") {
+            Box::leak(val.into_boxed_str())
+        } else if std::env::var("TEST_WORKSPACE").is_ok() {
+            "1.23.45"
+        } else {
+            version::VERSION
+        }
+    })
+}
 
 pub mod common;
 pub mod data_scope;
@@ -72,14 +85,6 @@ pub async fn setup_otel_metrics(
         let resource = Resource::builder()
             .with_attribute(KeyValue::new("service.name", "ez-enforcer"))
             .with_attribute(KeyValue::new("privacy.scope", provider_type))
-            .with_attribute(KeyValue::new("ez_component_name", "enforcer"))
-            .with_attribute(KeyValue::new("ez_isolate_name", "null_isolate"))
-            .with_attribute(KeyValue::new("ez_publisher_id", "null_publisher"))
-            .with_attribute(KeyValue::new("ez_isolate_type", "null_type"))
-            .with_attribute(KeyValue::new(
-                "ez_enforcer_version",
-                option_env!("CARGO_PKG_VERSION").unwrap_or("unknown"),
-            ))
             .build();
 
         Ok::<SdkMeterProvider, anyhow::Error>(

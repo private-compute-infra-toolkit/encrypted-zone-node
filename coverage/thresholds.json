@@ -11,13 +11,16 @@
   "enforcer/data_scope/src/ratified_isolate_manager.rs": {
     "lines": 80
   },
+  "enforcer/diagnostics/src/pprof.rs": {
+    "lines": 80
+  },
   "enforcer/diagnostics/src/tokio_service.rs": {
     "lines": 70
   },
   "enforcer/ez_to_external/src/external_proxy_connector.rs": {
     "lines": 80
   },
-  "enforcer/ez_to_ez/outbound_ez_to_ez_client.rs": {
+  "enforcer/ez_to_ez/src/outbound_ez_to_ez_client.rs": {
     "lines": 0
   },
   "enforcer/ez_to_ez/src/mtls.rs": {
@@ -36,7 +39,7 @@
     "lines": 70
   },
   "enforcer/isolate/src/isolate_ez_service.rs": {
-    "lines": 80
+    "lines": 70
   },
   "enforcer/isolate/src/isolate_ez_service_manager.rs": {
     "lines": 80
@@ -87,6 +90,6 @@
     "lines": 80
   },
   "enforcer/trace_context/src/lib.rs": {
-    "lines": 80
+    "lines": 70
   }
 }

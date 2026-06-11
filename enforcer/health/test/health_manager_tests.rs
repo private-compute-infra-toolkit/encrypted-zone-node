@@ -83,7 +83,26 @@ async fn test_health_manager() {
                     } else {
                         ContainerRunStatus::NotFound
                     };
-                    let _ = resp.send(Ok(GetRunStatusResponse { status }));
+                    let (rss_bytes, peak_rss_bytes, virt_bytes, shared_bytes, data_bytes) =
+                        if status == ContainerRunStatus::Running {
+                            (
+                                Some(100_000_000),
+                                Some(200_000_000),
+                                Some(500_000_000),
+                                Some(50_000_000),
+                                Some(10_000_000),
+                            )
+                        } else {
+                            (None, None, None, None, None)
+                        };
+                    let _ = resp.send(Ok(GetRunStatusResponse {
+                        status,
+                        rss_bytes,
+                        peak_rss_bytes,
+                        virt_bytes,
+                        shared_bytes,
+                        data_bytes,
+                    }));
                 }
                 ContainerManagerRequest::ResetIsolateRequest { req, resp } => {
                     let mut counts = reset_counts_clone.lock().unwrap();
@@ -108,20 +127,86 @@ async fn test_health_manager() {
         report.isolates.into_iter().map(|i| (i.isolate_id.clone(), i)).collect();
 
     let expected_isolates = vec![
-        (isolate_id_1, IsolateState::Ready, RunStatus::Running, None, None, false),
-        (isolate_id_2, IsolateState::Starting, RunStatus::Exited, Some(1), None, true),
-        (isolate_id_3, IsolateState::Ready, RunStatus::Signaled, None, Some(9), true),
-        (isolate_id_4, IsolateState::Ready, RunStatus::NotFound, None, None, true),
+        (
+            isolate_id_1,
+            IsolateState::Ready,
+            RunStatus::Running,
+            None,
+            None,
+            false,
+            Some(100_000_000),
+            Some(200_000_000),
+            Some(500_000_000),
+            Some(50_000_000),
+            Some(10_000_000),
+        ),
+        (
+            isolate_id_2,
+            IsolateState::Starting,
+            RunStatus::Exited,
+            Some(1),
+            None,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
+        (
+            isolate_id_3,
+            IsolateState::Ready,
+            RunStatus::Signaled,
+            None,
+            Some(9),
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
+        (
+            isolate_id_4,
+            IsolateState::Ready,
+            RunStatus::NotFound,
+            None,
+            None,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
     ];
 
     let counts = reset_counts.lock().unwrap();
-    for (id, state, status, exit_code, signal, reset_requested) in &expected_isolates {
+    for (
+        id,
+        state,
+        status,
+        exit_code,
+        signal,
+        reset_requested,
+        rss_memory,
+        peak_rss_memory,
+        virt_memory,
+        shared_memory,
+        data_memory,
+    ) in &expected_isolates
+    {
         let isolate = isolates_by_id.get(&id.to_string()).unwrap();
         assert_eq!(isolate.state, Some(*state as i32));
         assert_eq!(isolate.container_run_status.as_ref().unwrap().status, *status as i32);
         assert_eq!(isolate.container_run_status.as_ref().unwrap().exit_code, *exit_code);
         assert_eq!(isolate.container_run_status.as_ref().unwrap().signal, *signal);
         assert_eq!(isolate.container_reset_requested, *reset_requested);
+        assert_eq!(isolate.container_rss_memory_bytes, *rss_memory);
+        assert_eq!(isolate.container_peak_rss_memory_bytes, *peak_rss_memory);
+        assert_eq!(isolate.container_virt_memory_bytes, *virt_memory);
+        assert_eq!(isolate.container_shared_memory_bytes, *shared_memory);
+        assert_eq!(isolate.container_data_memory_bytes, *data_memory);
         if *reset_requested {
             assert_eq!(counts.get(id), Some(&1));
         } else {
@@ -153,7 +238,15 @@ async fn test_health_manager_exposes_services() {
         service_name: "myservice".to_string(),
         ..Default::default()
     };
-    let binary_index = mapper.new_binary_index(vec![service_info], false).await.unwrap();
+    let binary_index = mapper
+        .new_binary_index(
+            vec![service_info.clone()],
+            false,
+            service_info.publisher_id.clone(),
+            service_info.isolate_name.clone(),
+        )
+        .await
+        .unwrap();
     let isolate_id = IsolateId::new(binary_index);
     // Add Isolate
     let add_req = AddIsolateRequest {
@@ -172,7 +265,14 @@ async fn test_health_manager_exposes_services() {
     tokio::spawn(async move {
         while let Some(request) = rx.recv().await {
             if let ContainerManagerRequest::GetRunStatus { req: _, resp } = request {
-                let _ = resp.send(Ok(GetRunStatusResponse { status: ContainerRunStatus::Running }));
+                let _ = resp.send(Ok(GetRunStatusResponse {
+                    status: ContainerRunStatus::Running,
+                    rss_bytes: Some(100_000_000),
+                    peak_rss_bytes: None,
+                    virt_bytes: None,
+                    shared_bytes: None,
+                    data_bytes: None,
+                }));
             }
         }
     });
@@ -212,7 +312,14 @@ async fn test_health_report_includes_current_scope() {
     tokio::spawn(async move {
         while let Some(request) = rx.recv().await {
             if let ContainerManagerRequest::GetRunStatus { req: _, resp } = request {
-                let _ = resp.send(Ok(GetRunStatusResponse { status: ContainerRunStatus::Running }));
+                let _ = resp.send(Ok(GetRunStatusResponse {
+                    status: ContainerRunStatus::Running,
+                    rss_bytes: Some(100_000_000),
+                    peak_rss_bytes: None,
+                    virt_bytes: None,
+                    shared_bytes: None,
+                    data_bytes: None,
+                }));
             }
         }
     });

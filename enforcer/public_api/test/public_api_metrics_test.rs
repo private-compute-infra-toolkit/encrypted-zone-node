@@ -345,6 +345,8 @@ async fn setup_interceptor() -> Interceptor {
                 ..Default::default()
             }],
             false, // is_ratified
+            "publisher_id".to_string(),
+            "isolate_name".to_string(),
         )
         .await
         .unwrap();
@@ -356,6 +358,8 @@ async fn setup_interceptor() -> Interceptor {
                 ..Default::default()
             }],
             true, // is_ratified
+            "ratified_publisher_id".to_string(),
+            "ratified_isolate_name".to_string(),
         )
         .await
         .unwrap();

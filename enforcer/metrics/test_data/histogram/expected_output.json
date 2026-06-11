@@ -48,11 +48,11 @@
             },
             "metrics": [
               {
-                "name": "allowed_gauge",
+                "name": "allowed_histogram",
                 "description": "",
                 "unit": "",
                 "metadata": [],
-                "gauge": {
+                "histogram": {
                   "dataPoints": [
                     {
                       "attributes": [
@@ -65,46 +65,58 @@
                       ],
                       "startTimeUnixNano": "0",
                       "timeUnixNano": "0",
+                      "count": 3,
+                      "sum": 15.5,
+                      "bucketCounts": [
+                        1,
+                        2
+                      ],
+                      "explicitBounds": [
+                        5.0
+                      ],
                       "exemplars": [],
-                      "flags": 0
-                    }
-                  ]
-                }
-              },
-              {
-                "name": "no_attr_gauge",
-                "description": "",
-                "unit": "",
-                "metadata": [],
-                "gauge": {
-                  "dataPoints": [
-                    {
-                      "attributes": [],
-                      "startTimeUnixNano": "0",
-                      "timeUnixNano": "0",
-                      "exemplars": [],
-                      "flags": 0
-                    }
-                  ]
-                }
-              },
-              {
-                "name": "/allowed/counter",
-                "description": "",
-                "unit": "",
-                "metadata": [],
-                "sum": {
-                  "dataPoints": [
-                    {
-                      "attributes": [],
-                      "startTimeUnixNano": "0",
-                      "timeUnixNano": "0",
-                      "exemplars": [],
-                      "flags": 0
+                      "flags": 0,
+                      "min": null,
+                      "max": null
                     }
                   ],
-                  "aggregationTemporality": 0,
-                  "isMonotonic": false
+                  "aggregationTemporality": 1
+                }
+              },
+              {
+                "name": "allowed_histogram_no_attrs",
+                "description": "",
+                "unit": "",
+                "metadata": [],
+                "histogram": {
+                  "dataPoints": [
+                    {
+                      "attributes": [],
+                      "startTimeUnixNano": "0",
+                      "timeUnixNano": "0",
+                      "count": 1,
+                      "sum": 5.0,
+                      "bucketCounts": [
+                        1
+                      ],
+                      "explicitBounds": [],
+                      "exemplars": [],
+                      "flags": 0,
+                      "min": null,
+                      "max": null
+                    }
+                  ],
+                  "aggregationTemporality": 1
+                }
+              },
+              {
+                "name": "allowed_histogram_empty_dps",
+                "description": "",
+                "unit": "",
+                "metadata": [],
+                "histogram": {
+                  "dataPoints": [],
+                  "aggregationTemporality": 1
                 }
               }
             ],

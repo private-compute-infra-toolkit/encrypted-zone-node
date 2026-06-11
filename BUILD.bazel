@@ -30,6 +30,7 @@ licenses(["notice"])
 exports_files([
     "LICENSE",
     ".rustfmt.toml",
+    "version.txt",
 ])
 
 genrule(

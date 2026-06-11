@@ -21,13 +21,17 @@ rust_library(
     name = "metrics",
     srcs = glob(["src/**/*.rs"]),
     deps = [
+        "//enforcer/error:ez_error",
+        "//enforcer/error:ez_error_trait",
         "//enforcer/grpc_connector",
         "//enforcer/logging",
         "//enforcer/v1:enforcer_rust",
+        "//enforcer/v1:error_detail_rust",
         "//enforcer/v1:external_proxy_rust",
         "//enforcer/v1:ez_service_rust",
         "//enforcer/v1:ez_to_ez_service_rust",
         "//enforcer/v1:manifest_rust",
+        "//enforcer/version",
         "@crates//:anyhow",
         "@crates//:futures",
         "@crates//:hyper-util",
@@ -121,4 +125,11 @@ metrics_simulator_test(
     expected = "test_data/missing_policy/expected_output.json",
     input = "test_data/missing_policy/metrics_input.json",
     manifest = "test_data/missing_policy/manifest.json",
+)
+
+metrics_simulator_test(
+    name = "simulator_histogram_test",
+    expected = "test_data/histogram/expected_output.json",
+    input = "test_data/histogram/metrics_input.json",
+    manifest = "test_data/histogram/manifest.json",
 )

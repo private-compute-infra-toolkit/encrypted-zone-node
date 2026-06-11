@@ -82,21 +82,43 @@ async fn test_enrich_metrics() {
     assert_eq!(request.resource_metrics.len(), 1);
     let rm = &request.resource_metrics[0];
 
-    // Verify resource attributes
+    // Verify resource attributes are empty/do not contain isolate identity attributes
     let resource_attrs = &rm.resource.as_ref().unwrap().attributes;
-    assert!(resource_attrs.iter().any(|kv| kv.key == "ez_component_name"
+    assert!(resource_attrs.iter().all(|kv| kv.key != "ez_component_name"
+        && kv.key != "ez_isolate_name"
+        && kv.key != "ez_publisher_id"
+        && kv.key != "ez_isolate_type"
+        && kv.key != "ez_enforcer_version"));
+
+    // Verify scope attributes are enriched
+    let sm = &rm.scope_metrics[0];
+    let scope = sm.scope.as_ref().unwrap();
+    assert_eq!(scope.attributes.len(), 5);
+    assert!(scope.attributes.iter().any(|kv| kv.key == "ez_component_name"
         && kv.value.as_ref().unwrap().value == Some(Value::StringValue("isolate".to_string()))));
-    assert!(resource_attrs.iter().any(|kv| kv.key == "ez_isolate_name"
+    assert!(scope.attributes.iter().any(|kv| kv.key == "ez_isolate_name"
         && kv.value.as_ref().unwrap().value
             == Some(Value::StringValue("test-isolate".to_string()))));
-    assert!(resource_attrs.iter().any(|kv| kv.key == "ez_publisher_id"
+    assert!(scope.attributes.iter().any(|kv| kv.key == "ez_publisher_id"
         && kv.value.as_ref().unwrap().value
             == Some(Value::StringValue("test-publisher".to_string()))));
-    assert!(resource_attrs.iter().any(|kv| kv.key == "ez_isolate_type"
+    assert!(scope.attributes.iter().any(|kv| kv.key == "ez_isolate_type"
         && kv.value.as_ref().unwrap().value == Some(Value::StringValue("opaque".to_string()))));
-    assert!(resource_attrs
+    assert!(scope
+        .attributes
         .iter()
         .any(|kv| kv.key == "ez_enforcer_version" && kv.value.as_ref().unwrap().value.is_some()));
+
+    // Verify datapoint attributes are unchanged
+    let metric = &sm.metrics[0];
+    if let Some(Data::Gauge(gauge)) = &metric.data {
+        let dp = &gauge.data_points[0];
+        assert_eq!(dp.attributes.len(), 1);
+        assert!(dp.attributes.iter().any(|kv| kv.key == "allowed_attr"
+            && kv.value.as_ref().unwrap().value == Some(Value::StringValue("val1".to_string()))));
+    } else {
+        panic!("Expected Gauge data");
+    }
 }
 
 #[tokio::test]
@@ -292,7 +314,7 @@ async fn test_filter_metrics_coverage_various_types() {
     let sm = &rm.scope_metrics[0];
     assert_eq!(sm.metrics.len(), 3);
 
-    // Verify all three are correctly sanitized
+    // Verify all three are correctly sanitized (unauthorized attributes removed)
     for m in &sm.metrics {
         let attrs = match m.data.as_ref().unwrap() {
             Data::Histogram(h) => &h.data_points[0].attributes,
@@ -300,16 +322,11 @@ async fn test_filter_metrics_coverage_various_types() {
             Data::Summary(s) => &s.data_points[0].attributes,
             _ => panic!("Unexpected type"),
         };
-        assert_eq!(attrs.len(), 2);
+        assert_eq!(attrs.len(), 1);
         let attr_allowed = attrs.iter().find(|kv| kv.key == "allowed").unwrap();
         assert_eq!(
             attr_allowed.value.as_ref().unwrap().value,
             Some(Value::StringValue("val".to_string()))
-        );
-        let attr_forbidden = attrs.iter().find(|kv| kv.key == "forbidden").unwrap();
-        assert_eq!(
-            attr_forbidden.value.as_ref().unwrap().value,
-            Some(Value::StringValue("".to_string()))
         );
     }
 }
@@ -381,37 +398,7 @@ async fn test_filter_metrics_coverage_attribute_value_types() {
 
     if let Some(Data::Gauge(g)) = &m.data {
         let dp = &g.data_points[0];
-        assert_eq!(dp.attributes.len(), 6);
-
-        let bool_attr = dp.attributes.iter().find(|kv| kv.key == "bool_val").unwrap();
-        assert_eq!(bool_attr.value.as_ref().unwrap().value, Some(Value::BoolValue(false)));
-
-        let int_attr = dp.attributes.iter().find(|kv| kv.key == "int_val").unwrap();
-        assert_eq!(int_attr.value.as_ref().unwrap().value, Some(Value::IntValue(0)));
-
-        let double_attr = dp.attributes.iter().find(|kv| kv.key == "double_val").unwrap();
-        assert_eq!(double_attr.value.as_ref().unwrap().value, Some(Value::DoubleValue(0.0)));
-
-        let array_attr = dp.attributes.iter().find(|kv| kv.key == "array_val").unwrap();
-        if let Some(Value::ArrayValue(arr)) = &array_attr.value.as_ref().unwrap().value {
-            assert_eq!(arr.values.len(), 0);
-        } else {
-            panic!("Expected ArrayValue");
-        }
-
-        let kvlist_attr = dp.attributes.iter().find(|kv| kv.key == "kvlist_val").unwrap();
-        if let Some(Value::KvlistValue(list)) = &kvlist_attr.value.as_ref().unwrap().value {
-            assert_eq!(list.values.len(), 0);
-        } else {
-            panic!("Expected KvlistValue");
-        }
-
-        let bytes_attr = dp.attributes.iter().find(|kv| kv.key == "bytes_val").unwrap();
-        if let Some(Value::BytesValue(bytes)) = &bytes_attr.value.as_ref().unwrap().value {
-            assert_eq!(bytes.len(), 0);
-        } else {
-            panic!("Expected BytesValue");
-        }
+        assert_eq!(dp.attributes.len(), 0);
     }
 }
 
@@ -480,8 +467,8 @@ async fn test_filter_metrics_coverage_disable_filtering_and_purging() {
 
     let rm_purged = &request_purged.resource_metrics[0];
     let resource_attrs = &rm_purged.resource.as_ref().unwrap().attributes;
-    // Should have 6 attributes: ez_component_name, ez_isolate_name, ez_publisher_id, ez_isolate_type, ez_enforcer_version, and custom_resource_attr
-    assert_eq!(resource_attrs.len(), 6);
+    // Should have 1 attribute: custom_resource_attr (identity ones were purged and moved to datapoints)
+    assert_eq!(resource_attrs.len(), 1);
 
     // Verify custom_resource_attr was retained
     let custom_attr = resource_attrs.iter().find(|kv| kv.key == "custom_resource_attr").unwrap();
@@ -490,8 +477,10 @@ async fn test_filter_metrics_coverage_disable_filtering_and_purging() {
         Some(Value::StringValue("keep-me".to_string()))
     );
 
-    // Verify ez_isolate_name was successfully purged and overwritten with the trusted one
-    let identity_attr = resource_attrs.iter().find(|kv| kv.key == "ez_isolate_name").unwrap();
+    // Verify identity attributes are now in the scope attributes instead of resource attributes
+    let sm = &rm_purged.scope_metrics[0];
+    let scope = sm.scope.as_ref().unwrap();
+    let identity_attr = scope.attributes.iter().find(|kv| kv.key == "ez_isolate_name").unwrap();
     assert_eq!(
         identity_attr.value.as_ref().unwrap().value,
         Some(Value::StringValue("test-isolate".to_string()))
@@ -576,7 +565,7 @@ async fn test_filter_metrics_scalar_value_retention() {
 }
 
 #[tokio::test]
-async fn test_filter_metrics_empty_allowlist_anonymization() {
+async fn test_filter_metrics_empty_allowlist_removal() {
     let policy = IsolateMetricsPolicy {
         allowed_metrics: vec![AllowedMetric {
             name: "metric_with_empty_allowlist".to_string(),
@@ -604,17 +593,11 @@ async fn test_filter_metrics_empty_allowlist_anonymization() {
 
     assert_eq!(sm.metrics.len(), 1);
 
-    // Verify metric_with_empty_allowlist has all attributes anonymized/redacted to defaults (not dropped)
+    // Verify metric_with_empty_allowlist has all attributes removed
     let m2 = sm.metrics.iter().find(|m| m.name == "metric_with_empty_allowlist").unwrap();
     if let Some(Data::Gauge(gauge)) = &m2.data {
         let dp = &gauge.data_points[0];
-        assert_eq!(dp.attributes.len(), 2);
-
-        let attr1 = dp.attributes.iter().find(|kv| kv.key == "sensitive_id").unwrap();
-        assert_eq!(attr1.value.as_ref().unwrap().value, Some(Value::StringValue("".to_string())));
-
-        let attr2 = dp.attributes.iter().find(|kv| kv.key == "user_ip").unwrap();
-        assert_eq!(attr2.value.as_ref().unwrap().value, Some(Value::StringValue("".to_string())));
+        assert_eq!(dp.attributes.len(), 0);
     } else {
         panic!("Expected Gauge");
     }

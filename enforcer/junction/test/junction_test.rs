@@ -146,7 +146,12 @@ async fn test_metadata_propagation_to_isolate() {
     };
 
     let binary_services_index = isolate_service_mapper
-        .new_binary_index(vec![isolate_service_info.clone()], false)
+        .new_binary_index(
+            vec![isolate_service_info.clone()],
+            false,
+            "publisher_id".to_string(),
+            "isolate_name".to_string(),
+        )
         .await
         .expect("Should be a valid binary services index");
 
@@ -1339,7 +1344,12 @@ async fn test_junction_streaming_deadlock_fix() {
     };
 
     let binary_services_index = isolate_service_mapper
-        .new_binary_index(vec![isolate_service_info.clone()], false)
+        .new_binary_index(
+            vec![isolate_service_info.clone()],
+            false,
+            "publisher_id".to_string(),
+            "isolate_name".to_string(),
+        )
         .await
         .unwrap();
 
@@ -1436,7 +1446,12 @@ async fn test_junction_unary_flow_shm_response_to_inline_data() {
     };
 
     let binary_services_index = isolate_service_mapper
-        .new_binary_index(vec![isolate_service_info.clone()], false)
+        .new_binary_index(
+            vec![isolate_service_info.clone()],
+            false,
+            "publisher_id".to_string(),
+            "isoate_name".to_string(),
+        )
         .await
         .expect("Should be a valid binary services index");
 
@@ -1588,7 +1603,12 @@ async fn test_junction_streaming_request_shm_payload() {
     };
 
     let binary_services_index = isolate_service_mapper
-        .new_binary_index(vec![isolate_service_info.clone()], false)
+        .new_binary_index(
+            vec![isolate_service_info.clone()],
+            false,
+            "publisher_id".to_string(),
+            "isolate_name".to_string(),
+        )
         .await
         .expect("Should be a valid binary services index");
 
@@ -1758,7 +1778,7 @@ async fn test_junction_streaming_response_shm_payload() {
     };
 
     let binary_services_index = isolate_service_mapper
-        .new_binary_index(vec![isolate_service_info.clone()], false)
+        .new_binary_index(vec![isolate_service_info.clone()], false, "".to_string(), "".to_string())
         .await
         .expect("Should be a valid binary services index");
 

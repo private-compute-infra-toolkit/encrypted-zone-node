@@ -20,12 +20,13 @@ use opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_server::
 use opentelemetry_proto::tonic::collector::metrics::v1::{
     ExportMetricsServiceRequest, ExportMetricsServiceResponse,
 };
-use opentelemetry_proto::tonic::common::v1::any_value::Value;
 use opentelemetry_proto::tonic::common::v1::KeyValue;
 use opentelemetry_proto::tonic::metrics::v1::{metric::Data, Metric};
 use std::collections::{HashMap, HashSet};
 use tonic::transport::Channel;
 use tonic::{Request, Response, Status};
+
+use ez_error_trait::ToEzError;
 
 struct MetricPolicy {
     metric_type: MetricType,
@@ -57,9 +58,7 @@ pub struct IsolateMetricsReceiver {
     /// List of allowed metric prefixes to their expected policies
     /// Strings store here will have their trailing * stripped
     prefix_metrics: Vec<(String, MetricPolicy)>,
-    isolate_name: String,
-    publisher_id: String,
-    is_ratified: bool,
+    extra_attributes: Vec<KeyValue>,
     client: Option<MetricsServiceClient<Channel>>,
     disable_filtering: bool,
 }
@@ -114,15 +113,9 @@ impl IsolateMetricsReceiver {
             None
         };
 
-        Ok(Self {
-            exact_metrics,
-            prefix_metrics,
-            isolate_name,
-            publisher_id,
-            is_ratified,
-            client,
-            disable_filtering,
-        })
+        let extra_attributes = build_isolate_attributes(&isolate_name, &publisher_id, is_ratified);
+
+        Ok(Self { exact_metrics, prefix_metrics, extra_attributes, client, disable_filtering })
     }
 
     /// Gets the MetricsServiceClient.
@@ -170,43 +163,29 @@ impl IsolateMetricsReceiver {
         }
     }
 
-    /// Appends identity and metadata attributes to the resource attributes of the request.
+    /// Appends identity and metadata attributes to each metric's datapoints.
     pub fn enrich_metrics(&self, request: &mut ExportMetricsServiceRequest) {
+        let is_identity_attr = |key: &str| {
+            matches!(
+                key,
+                "ez_isolate_name"
+                    | "ez_publisher_id"
+                    | "ez_isolate_type"
+                    | "ez_enforcer_version"
+                    | "ez_component_name"
+            )
+        };
+
         for resource_metrics in &mut request.resource_metrics {
-            let resource = resource_metrics.resource.get_or_insert_with(Default::default);
+            if let Some(ref mut resource) = resource_metrics.resource {
+                resource.attributes.retain(|attr| !is_identity_attr(&attr.key));
+            }
 
-            resource.attributes.retain(|attr| {
-                attr.key != "ez_isolate_name"
-                    && attr.key != "ez_publisher_id"
-                    && attr.key != "ez_isolate_type"
-                    && attr.key != "ez_enforcer_version"
-                    && attr.key != "ez_component_name"
-            });
-
-            resource.attributes.push(make_string_attribute(
-                "ez_component_name".to_string(),
-                "isolate".to_string(),
-            ));
-            resource.attributes.push(make_string_attribute(
-                "ez_isolate_name".to_string(),
-                self.isolate_name.clone(),
-            ));
-            resource.attributes.push(make_string_attribute(
-                "ez_publisher_id".to_string(),
-                self.publisher_id.clone(),
-            ));
-
-            let isolate_type_str = if self.is_ratified { "ratified" } else { "opaque" };
-            resource.attributes.push(make_string_attribute(
-                "ez_isolate_type".to_string(),
-                isolate_type_str.to_string(),
-            ));
-
-            let enforcer_version = option_env!("CARGO_PKG_VERSION").unwrap_or("unknown");
-            resource.attributes.push(make_string_attribute(
-                "ez_enforcer_version".to_string(),
-                enforcer_version.to_string(),
-            ));
+            for scope_metrics in &mut resource_metrics.scope_metrics {
+                let scope = scope_metrics.scope.get_or_insert_with(Default::default);
+                scope.attributes.retain(|attr| !is_identity_attr(&attr.key));
+                scope.attributes.extend_from_slice(&self.extra_attributes);
+            }
         }
     }
 
@@ -243,25 +222,9 @@ impl IsolateMetricsReceiver {
         }
     }
 
-    /// Sanitizes the attributes vector by resetting values of forbidden keys to defaults.
-    fn sanitize_attributes(attributes: &mut [KeyValue], allowed_keys: &HashSet<String>) {
-        for kv in attributes {
-            if !allowed_keys.contains(&kv.key) {
-                if let Some(any_val) = &mut kv.value {
-                    if let Some(val) = &mut any_val.value {
-                        match val {
-                            Value::StringValue(s) => *s = "".to_string(),
-                            Value::BoolValue(b) => *b = false,
-                            Value::IntValue(i) => *i = 0,
-                            Value::DoubleValue(d) => *d = 0.0,
-                            Value::ArrayValue(arr) => arr.values.clear(),
-                            Value::KvlistValue(kv_list) => kv_list.values.clear(),
-                            Value::BytesValue(bytes) => bytes.clear(),
-                        }
-                    }
-                }
-            }
-        }
+    /// Sanitizes the attributes vector by removing forbidden keys.
+    fn sanitize_attributes(attributes: &mut Vec<KeyValue>, allowed_keys: &HashSet<String>) {
+        attributes.retain(|kv| allowed_keys.contains(&kv.key));
     }
 }
 
@@ -278,7 +241,7 @@ impl MetricsService for IsolateMetricsReceiver {
 
         let mut client = self.get_client().map_err(|e| {
             log::error!("Failed to get MetricsServiceClient: {:?}", e);
-            Status::internal("Failed to connect to safe endpoint")
+            MetricsReceiverError::ClientConnectionError(e).to_tonic_status()
         })?;
 
         client.export(metrics_request).await
@@ -286,13 +249,80 @@ impl MetricsService for IsolateMetricsReceiver {
 }
 
 /// Helper to create a KeyValue attribute with a string value.
-fn make_string_attribute(key: String, value: String) -> KeyValue {
+fn make_string_attribute(key: impl Into<String>, value: impl Into<String>) -> KeyValue {
     KeyValue {
-        key,
+        key: key.into(),
         value: Some(opentelemetry_proto::tonic::common::v1::AnyValue {
             value: Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(
-                value,
+                value.into(),
             )),
         }),
+    }
+}
+
+/// Returns the raw key-value string metadata attributes for an isolate.
+///
+/// This avoids duplicating the metadata names and the version-fetching logic
+/// across components (like the health manager) that record metrics.
+pub fn get_isolate_attribute_data(
+    isolate_name: &str,
+    publisher_id: &str,
+    is_ratified: bool,
+) -> Vec<(&'static str, std::borrow::Cow<'static, str>)> {
+    let isolate_type_str = if is_ratified { "ratified" } else { "opaque" };
+    vec![
+        ("ez_component_name", "isolate".into()),
+        ("ez_isolate_name", isolate_name.to_string().into()),
+        ("ez_publisher_id", publisher_id.to_string().into()),
+        ("ez_isolate_type", isolate_type_str.into()),
+        ("ez_enforcer_version", crate::get_enforcer_version().into()),
+    ]
+}
+
+/// Builds the default OpenTelemetry attributes for an isolate component.
+///
+/// These attributes include the component name, isolate name, publisher ID,
+/// isolate type (ratified vs. opaque), and the enforcer version.
+pub fn build_isolate_attributes(
+    isolate_name: &str,
+    publisher_id: &str,
+    is_ratified: bool,
+) -> Vec<KeyValue> {
+    get_isolate_attribute_data(isolate_name, publisher_id, is_ratified)
+        .into_iter()
+        .map(|(k, v)| make_string_attribute(k, v))
+        .collect()
+}
+
+#[derive(Debug)]
+pub enum MetricsReceiverError {
+    ClientConnectionError(anyhow::Error),
+}
+
+impl std::fmt::Display for MetricsReceiverError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MetricsReceiverError::ClientConnectionError(e) => {
+                write!(f, "Failed to connect to safe metrics endpoint: {:?}", e)
+            }
+        }
+    }
+}
+
+impl std::error::Error for MetricsReceiverError {}
+
+impl ToEzError for MetricsReceiverError {
+    fn to_ez_error(&self) -> ez_error::EzError {
+        let code = tonic::Code::Internal;
+        let source = error_detail_proto::enforcer::v1::ez_error_detail::ErrorSource::Enforcer;
+
+        let enforcer_error = ez_error::EnforcerError {
+            message: self.to_string(),
+            error_code: code,
+            source,
+            error_reason: None,
+            bad_request: None,
+        };
+        ez_error::EzError::EnforcerError(enforcer_error)
     }
 }

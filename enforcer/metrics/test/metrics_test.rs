@@ -373,7 +373,11 @@ fn test_metric_attribute_caching() {
     // Second call: Should return reference to the SAME memory location
     let req_2 = attr.request();
 
-    assert_eq!(req_1.len(), 4, "Should have 4 attributes: domain, service, method, direction");
+    assert_eq!(
+        req_1.len(),
+        6,
+        "Should have 6 attributes: domain, service, method, component, version, direction"
+    );
     assert_eq!(
         req_1.as_ptr(),
         req_2.as_ptr(),
@@ -387,7 +391,7 @@ fn test_metric_attribute_caching() {
     let attr_extended = attr_base.with_attribute("extra_key", "extra_val");
 
     let base_attrs = attr_extended.base();
-    assert_eq!(base_attrs.len(), 4); // 3 original + 1 new
+    assert_eq!(base_attrs.len(), 6); // 5 original + 1 new
     assert!(base_attrs
         .iter()
         .any(|kv| kv.key.as_str() == "extra_key" && kv.value.as_str() == "extra_val"));

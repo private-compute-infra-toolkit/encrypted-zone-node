@@ -49,6 +49,36 @@ The `DEVELOPMENT.md` file also provides instructions for running benchmarks.
 
 -   **Enforcer Benchmarks:** See `enforcer/benches/GEMINI.md`
 
+## Code Coverage
+
+Code coverage thresholds are managed on a per-file basis using the `coverage/thresholds.json`
+configuration file.
+
+To run code coverage locally and verify compliance with the thresholds, run:
+
+```bash
+devkit/coverage --lines 90 --thresholds-file coverage/thresholds.json
+```
+
+### Adding Coverage Exclusions
+
+To exclude a file from code coverage validation (or to lower its minimum required coverage
+threshold), add an entry for the file path in `coverage/thresholds.json` with custom limits.
+
+-   **Exclude lines coverage**: Set `"lines": 0`.
+-   **Exclude branch coverage**: Set `"branch": 0`.
+
+Example configuration:
+
+```json
+{
+    "enforcer/junction/trait.rs": {
+        "lines": 0,
+        "branch": 0
+    }
+}
+```
+
 ## Commit Messages
 
 This project follows the Conventional Commits specification. The commit message title must follow

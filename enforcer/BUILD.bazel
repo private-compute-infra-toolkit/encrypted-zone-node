@@ -59,6 +59,7 @@ load("//:container_deps.bzl", "get_user")
             "//enforcer/traces",
             "//enforcer/v1:enforcer_rust",
             "//enforcer/v1:ez_service_rust",
+            "//enforcer/version",
             "@crates//:anyhow",
             "@crates//:async-stream",
             "@crates//:clap",

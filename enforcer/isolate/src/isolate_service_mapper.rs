@@ -36,6 +36,8 @@ impl IsolateServiceMapper {
         &self,
         isolate_service_infos: Vec<IsolateServiceInfo>,
         is_ratified_binary: bool,
+        publisher_id: String,
+        isolate_name: String,
     ) -> Result<BinaryServicesIndex> {
         // Write lock acquired, all reads and writes are blocked now
         let mut isolate_service_info_index = self.isolate_service_info_index.write().await;
@@ -61,6 +63,9 @@ impl IsolateServiceMapper {
                 anyhow::bail!("Service {} already present in the map", isolate_service_info);
             }
         }
+        let isolate_type = isolate_info::IsolateType { publisher_id, isolate_name };
+        isolate_info::register_isolate_type(new_binary_services_index, isolate_type);
+
         binary_services_index_info.insert(new_binary_services_index, isolate_service_infos);
         Ok(new_binary_services_index)
     }

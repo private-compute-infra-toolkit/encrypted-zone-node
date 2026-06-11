@@ -50,6 +50,8 @@ async fn test_health_manager_metrics_scenarios() {
                 ..Default::default()
             }],
             false,
+            "publisher_id".to_string(),
+            "isolate_name".to_string(),
         )
         .await
         .expect("Failed to add binary index");
@@ -78,8 +80,26 @@ async fn test_health_manager_metrics_scenarios() {
                     } else {
                         ContainerRunStatusEnum::Running
                     };
-                    let _ =
-                        resp.send(Ok(container_manager_request::GetRunStatusResponse { status }));
+                    let (rss_bytes, peak_rss_bytes, virt_bytes, shared_bytes, data_bytes) =
+                        if status == ContainerRunStatusEnum::Running {
+                            (
+                                Some(100_000_000),
+                                Some(200_000_000),
+                                Some(500_000_000),
+                                Some(50_000_000),
+                                Some(10_000_000),
+                            )
+                        } else {
+                            (None, None, None, None, None)
+                        };
+                    let _ = resp.send(Ok(container_manager_request::GetRunStatusResponse {
+                        status,
+                        rss_bytes,
+                        peak_rss_bytes,
+                        virt_bytes,
+                        shared_bytes,
+                        data_bytes,
+                    }));
                 }
                 ContainerManagerRequest::ResetIsolateRequest { resp, .. } => {
                     let _ = resp.send(Ok(container_manager_request::ResetIsolateResponse {}));
@@ -104,6 +124,63 @@ async fn test_health_manager_metrics_scenarios() {
         "Expected encrypted_zone.enforcer.health.isolate.state metric"
     );
     assert_eq!(state_points[0].0, 7.0, "State should be 7 (Ready)");
+    let attrs = &state_points[0].1;
+    assert_eq!(attrs.get("ez_component_name").map(|s| s.as_str()), Some("isolate"));
+    assert_eq!(attrs.get("ez_isolate_name").map(|s| s.as_str()), Some("isolate_name"));
+    assert_eq!(attrs.get("ez_publisher_id").map(|s| s.as_str()), Some("publisher_id"));
+    assert_eq!(attrs.get("ez_isolate_type").map(|s| s.as_str()), Some("opaque"));
+
+    let mem_isolate_points =
+        verifier.get_gauge_points("encrypted_zone.enforcer.isolate.memory.resident_size", false);
+    assert!(
+        !mem_isolate_points.is_empty(),
+        "Expected encrypted_zone.enforcer.isolate.memory.resident_size metric"
+    );
+    assert_eq!(mem_isolate_points[0].0, 100_000_000.0, "Isolate memory should be 100_000_000");
+
+    let peak_mem_isolate_points = verifier
+        .get_gauge_points("encrypted_zone.enforcer.isolate.memory.peak_resident_size", false);
+    assert!(
+        !peak_mem_isolate_points.is_empty(),
+        "Expected encrypted_zone.enforcer.isolate.memory.peak_resident_size metric"
+    );
+    assert_eq!(
+        peak_mem_isolate_points[0].0, 200_000_000.0,
+        "Isolate peak RSS should be 200_000_000"
+    );
+
+    let virt_mem_isolate_points =
+        verifier.get_gauge_points("encrypted_zone.enforcer.isolate.memory.virtual_size", false);
+    assert!(
+        !virt_mem_isolate_points.is_empty(),
+        "Expected encrypted_zone.enforcer.isolate.memory.virtual_size metric"
+    );
+    assert_eq!(
+        virt_mem_isolate_points[0].0, 500_000_000.0,
+        "Isolate virtual memory should be 500_000_000"
+    );
+
+    let private_mem_isolate_points =
+        verifier.get_gauge_points("encrypted_zone.enforcer.isolate.memory.private_size", false);
+    assert!(
+        !private_mem_isolate_points.is_empty(),
+        "Expected encrypted_zone.enforcer.isolate.memory.private_size metric"
+    );
+    assert_eq!(
+        private_mem_isolate_points[0].0, 50_000_000.0,
+        "Isolate private memory should be 50_000_000"
+    );
+
+    let data_mem_isolate_points =
+        verifier.get_gauge_points("encrypted_zone.enforcer.isolate.memory.data_size", false);
+    assert!(
+        !data_mem_isolate_points.is_empty(),
+        "Expected encrypted_zone.enforcer.isolate.memory.data_size metric"
+    );
+    assert_eq!(
+        data_mem_isolate_points[0].0, 10_000_000.0,
+        "Isolate data memory should be 10_000_000"
+    );
 
     // Start Scenario 2
     should_exit.store(true, std::sync::atomic::Ordering::Relaxed);

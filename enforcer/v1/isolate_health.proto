@@ -64,6 +64,16 @@ message EzIsolateHealth {
   // Current data scope of the Isolate. This value can change over the course of
   // an Isolate's lifetime and only applies to Opaque Isolates.
   optional DataScopeType current_scope = 7;
+  // Resident memory consumption of the container in bytes.
+  optional int64 container_rss_memory_bytes = 8;
+  // Peak RSS (High Water Mark resident memory) size in bytes.
+  optional int64 container_peak_rss_memory_bytes = 9;
+  // Total Virtual memory (VM) size in bytes.
+  optional int64 container_virt_memory_bytes = 10;
+  // Shared memory size in bytes.
+  optional int64 container_shared_memory_bytes = 11;
+  // Data segment memory size in bytes.
+  optional int64 container_data_memory_bytes = 12;
 }
 
 // Information about a service running in an Isolate.

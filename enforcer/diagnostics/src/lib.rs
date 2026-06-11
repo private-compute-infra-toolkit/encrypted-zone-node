@@ -47,7 +47,7 @@ impl DiagnosticService for EnforcerDiagnosticService {
         request: Request<GetDiagnosticRequest>,
     ) -> Result<Response<GetDiagnosticResponse>, Status> {
         let profile_spec = request.into_inner().profile_spec.ok_or_else(|| {
-            log::warn!("GetDiagnostic request missing profile_spec");
+            log::debug!("GetDiagnostic request missing profile_spec");
             Status::invalid_argument("profile_spec is required")
         })?;
 
@@ -94,7 +94,7 @@ impl DiagnosticService for EnforcerDiagnosticService {
                 }))
             }
             _ => {
-                log::warn!("Requested unsupported profiling type in GetDiagnostic");
+                log::debug!("Requested unsupported profiling type in GetDiagnostic");
                 Err(Status::unimplemented("Requested profiling type is not supported"))
             }
         }

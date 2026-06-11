@@ -49,7 +49,6 @@ use shared_memory_manager::SharedMemManager;
 use simple_tonic_stream::SimpleStreamingWrapper;
 use state_manager::{IsolateStateManager, IsolateStateManagerError};
 use std::fs::OpenOptions;
-use std::path::PathBuf;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc::channel;
 use tokio::task::spawn_blocking;
@@ -606,7 +605,7 @@ async fn test_start_one_isolate_with_override() {
             .value()
             .boot_mounts
             .iter()
-            .find(|m| m.destination == PathBuf::from("/etc/hosts"))
+            .find(|m| *m.destination == *"/etc/hosts")
             .expect("should have /etc/hosts mount");
 
         let contents = std::fs::read(etc_hosts_mount.source.clone()).unwrap();
