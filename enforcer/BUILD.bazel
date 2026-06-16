@@ -126,7 +126,10 @@ pkg_mkdirs(
         name = "enforcer_image{}".format(flavor.suffix),
         base = "@isolate_runtime_ubuntu_base{}".format(flavor.ubuntu),
         entrypoint = ["/enforcer/bin/enforcer"],
-        tars = [":enforcer_tar{}".format(flavor.suffix)],
+        tars = [
+            ":enforcer_tar{}".format(flavor.suffix),
+            ":fix_ld_symlink",
+        ],
         workdir = "/",
     )
     for flavor in flavors
@@ -202,3 +205,10 @@ EOF""".format(dir = "dist/enforcer"),
 exports_files([
     "buf.yaml",
 ])
+
+pkg_tar(
+    name = "fix_ld_symlink",
+    symlinks = {
+        "/lib64/ld-linux-x86-64.so.2": "../lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+    },
+)

@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## 0.13.1 (2026-06-16)
+
+
+### Bug Fixes
+
+* missing ELF due to extractor absolute symlink changes
+* Revert Rust toolchain upgrade back to "1.87.0" from "1.96.0"
+
 ## 0.13.0 (2026-06-11)
 
 

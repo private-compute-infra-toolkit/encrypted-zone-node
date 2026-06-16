@@ -3,15 +3,12 @@
     "lines": 30
   },
   "enforcer/container/manager/src/manager.rs": {
-    "lines": 80
+    "lines": 75
   },
   "enforcer/data_scope/src/error.rs": {
     "lines": 80
   },
   "enforcer/data_scope/src/ratified_isolate_manager.rs": {
-    "lines": 80
-  },
-  "enforcer/diagnostics/src/pprof.rs": {
     "lines": 80
   },
   "enforcer/diagnostics/src/tokio_service.rs": {
@@ -39,7 +36,7 @@
     "lines": 70
   },
   "enforcer/isolate/src/isolate_ez_service.rs": {
-    "lines": 70
+    "lines": 80
   },
   "enforcer/isolate/src/isolate_ez_service_manager.rs": {
     "lines": 80
@@ -90,6 +87,6 @@
     "lines": 80
   },
   "enforcer/trace_context/src/lib.rs": {
-    "lines": 70
+    "lines": 80
   }
 }

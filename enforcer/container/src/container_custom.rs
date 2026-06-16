@@ -583,7 +583,7 @@ impl Container for ContainerCustom {
             .inspect_err(|e| log::debug!("Failed to read status for pid {pid}: {e}"))
             .ok();
 
-        let page_size = procfs::page_size() as u64;
+        let page_size = procfs::page_size();
 
         let rss_bytes = statm.resident.checked_mul(page_size);
 

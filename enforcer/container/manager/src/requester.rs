@@ -116,9 +116,12 @@ impl ContainerManagerRequester {
 
     async fn send_request(&self, container_manager_request: ContainerManagerRequest) {
         let send_result = self.request_sender.send(container_manager_request).await;
-        if let Err(send_err) = send_result {
+        if send_result.is_err() {
             // Ideally, should never happen.
-            log::error!("Couldn't send requests to ContainerManager {:?}", send_err);
+            log::error!(
+                "Couldn't send requests to ContainerManager {:?}",
+                send_result.unwrap_err()
+            );
         }
     }
 }
