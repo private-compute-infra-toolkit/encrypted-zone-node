@@ -15,7 +15,7 @@
 use manifest_proto::enforcer::v1::{
     allowed_metric::MetricType, AllowedMetric, IsolateMetricsPolicy,
 };
-use metrics::receiver::IsolateMetricsReceiver;
+use metrics::isolate_metrics_receiver::IsolateMetricsReceiver;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{
     any_value::Value, AnyValue, ArrayValue, KeyValue, KeyValueList,

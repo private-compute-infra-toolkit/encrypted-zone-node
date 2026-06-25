@@ -23,7 +23,7 @@ use isolate_info::IsolateId;
 use isolate_service_mapper::IsolateServiceMapper;
 use junction_trait::Junction;
 use manifest_proto::enforcer::v1::IsolateMetricsPolicy;
-use metrics::receiver::IsolateMetricsReceiver;
+use metrics::isolate_metrics_receiver::IsolateMetricsReceiver;
 use opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_server::MetricsServiceServer;
 use outbound_ez_to_ez_client::OutboundEzToEzClient;
 use shared_memory_manager::SharedMemManager;

@@ -379,7 +379,7 @@ fn main() -> anyhow::Result<()> {
                 Some(Box::new(
                     OutboundEzToEzHandler::new(
                         ez_to_ez_outbound_address,
-                        metrics::outbound::OutboundMetrics::default(),
+                        metrics::ez_to_ez_outbound::EzToEzOutboundMetrics::default(),
                         outbound_tls_config,
                     )
                     .await?,

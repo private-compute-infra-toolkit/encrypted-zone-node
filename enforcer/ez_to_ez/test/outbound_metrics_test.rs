@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 use fake_opentelemetry_collector::FakeCollectorServer;
-use metrics::outbound::OutboundMetrics;
+use metrics::ez_to_ez_outbound::EzToEzOutboundMetrics;
 use metrics::setup_otel_metrics;
 use outbound_ez_to_ez_client::OutboundEzToEzClient;
 use outbound_ez_to_ez_handler::OutboundEzToEzHandler;
@@ -33,7 +33,7 @@ async fn test_outbound_stream_metrics() {
     let (port, shutdown_tx) = start_fake_proxy_server(None).await;
     let server_address = format!("http://localhost:{}", port);
 
-    let metrics = OutboundMetrics::default();
+    let metrics = EzToEzOutboundMetrics::default();
     let handler = OutboundEzToEzHandler::new(server_address, metrics, None).await.unwrap();
 
     let first_payload = "hello metrics 1";

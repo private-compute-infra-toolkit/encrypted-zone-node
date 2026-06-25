@@ -39,15 +39,15 @@ pub mod common;
 pub mod data_scope;
 pub mod external_proxy_connector;
 pub mod ez_to_ez_inbound;
+pub mod ez_to_ez_outbound;
 pub mod global;
 pub mod health_manager;
 pub mod isolate_ez_service;
+pub mod isolate_metrics_receiver;
 pub mod junction;
 pub mod observed_proxy_channel;
 pub mod observed_stream;
-pub mod outbound;
 pub mod public_api;
-pub mod receiver;
 
 /// Holds the providers so they can be kept alive or shut down gracefully.
 pub struct OtelProviders {

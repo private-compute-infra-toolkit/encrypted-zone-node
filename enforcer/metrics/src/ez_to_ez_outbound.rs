@@ -17,7 +17,7 @@ use crate::global;
 use opentelemetry::metrics::{Counter, Histogram, Meter, UpDownCounter};
 
 #[derive(Clone, Debug)]
-pub struct OutboundMetrics {
+pub struct EzToEzOutboundMetrics {
     pub requests: Counter<u64>,
     pub duration_sec: Histogram<f64>,
     pub errors: Counter<u64>,
@@ -26,7 +26,7 @@ pub struct OutboundMetrics {
     pub message_processing_duration: Histogram<f64>,
 }
 
-impl OutboundMetrics {
+impl EzToEzOutboundMetrics {
     pub fn new() -> Self {
         Self::from_meters(
             global::safe_meter("enforcer.ez_to_ez.outbound"),
@@ -81,13 +81,13 @@ impl OutboundMetrics {
     }
 }
 
-impl Default for OutboundMetrics {
+impl Default for EzToEzOutboundMetrics {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl ServiceMetrics for OutboundMetrics {
+impl ServiceMetrics for EzToEzOutboundMetrics {
     fn requests(&self) -> Option<&Counter<u64>> {
         Some(&self.requests)
     }

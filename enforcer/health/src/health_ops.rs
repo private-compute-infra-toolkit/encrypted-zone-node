@@ -66,6 +66,39 @@ impl HealthOp {
                     );
                     let _ = requester.reset_container(ResetIsolateRequest { isolate_id }).await;
                     health.container_reset_requested = true;
+                    let pre_ready_state_str =
+                        match health.state.and_then(|s| IsolateState::try_from(s).ok()) {
+                            Some(IsolateState::Starting) => Some("starting"),
+                            Some(IsolateState::Warmed) => Some("warmed"),
+                            Some(IsolateState::Updating) => Some("updating"),
+                            _ => None,
+                        };
+                    if let Some(state_str) = pre_ready_state_str {
+                        let (isolate_name, publisher_id) = health
+                            .services
+                            .first()
+                            .map(|s| (s.isolate_name.as_str(), s.publisher_id.as_str()))
+                            .unwrap_or(("unknown", "unknown"));
+                        let exit_reason = match run_status {
+                            RunStatus::Exited => "exited",
+                            RunStatus::Signaled => "signaled",
+                            RunStatus::NotFound => "not_found",
+                            _ => "unknown",
+                        };
+                        let attributes = [
+                            opentelemetry::KeyValue::new(
+                                "ez_isolate_name",
+                                isolate_name.to_owned(),
+                            ),
+                            opentelemetry::KeyValue::new(
+                                "ez_publisher_id",
+                                publisher_id.to_owned(),
+                            ),
+                            opentelemetry::KeyValue::new("exit_reason", exit_reason),
+                            opentelemetry::KeyValue::new("pre_ready_state", state_str),
+                        ];
+                        metrics.pre_ready_exit.add(1, &attributes);
+                    }
 
                     if health.services.is_empty() {
                         metrics::common::record_reset(&metrics.reset, "", "", "healthmanager");

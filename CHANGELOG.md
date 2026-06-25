@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## 0.14.0 (2026-06-25)
+
+
+### Dependencies
+
+* **deps:** Update DevKit to release-3.9.0
+
+
+### EZ Policy Enforcer
+
+* **enforcer:** record pre-ready exit metric on container crash
+
+
+### Bug Fixes
+
+* missing ELF due to extractor absolute symlink changes
+
+
+### Documentation
+
+* **gemini:** Add rebasing and conflict resolution to Gerrit skill
+
 ## 0.13.0 (2026-06-11)
 
 
@@ -22,26 +44,13 @@ All notable changes to this project will be documented in this file. See [commit
 * **enforcer:** standardize telemetry attributes as scope attributes
 
 
-### Gemini
-
-* **gemini:** Add custom Duckie integration skill for AI agent
-
-
-### Features
-
-* Add gerrit agent skill for interacting with Gerrit CLs
-* Emit ez_isolate_name/ez_publisher_id/ez_isolate_type selectively
-* update rust version to latest stable (1.96.0)
-
 
 ### Bug Fixes
 
 * **node:** Use tokio fs, spawn blocking as needed
 
 
-### Documentation
 
-* **gemini:** Document code coverage and exclusions in GEMINI.md
 
 ## 0.12.0 (2026-06-02)
 

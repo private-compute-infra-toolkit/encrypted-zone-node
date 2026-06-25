@@ -84,7 +84,7 @@ rust_test(
 rust_test(
     name = "receiver_test",
     size = "small",
-    srcs = ["test/receiver_test.rs"],
+    srcs = ["test/isolate_metrics_receiver_test.rs"],
     deps = [
         ":metrics",
         ":metrics_test_utils",

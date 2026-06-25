@@ -240,8 +240,12 @@ fn build_health_isolate_attributes(
     publisher_id: &str,
     is_ratified: bool,
 ) -> Vec<KeyValue> {
-    metrics::receiver::get_isolate_attribute_data(isolate_name, publisher_id, is_ratified)
-        .into_iter()
-        .map(|(k, v)| KeyValue::new(k, v))
-        .collect()
+    metrics::isolate_metrics_receiver::get_isolate_attribute_data(
+        isolate_name,
+        publisher_id,
+        is_ratified,
+    )
+    .into_iter()
+    .map(|(k, v)| KeyValue::new(k, v))
+    .collect()
 }

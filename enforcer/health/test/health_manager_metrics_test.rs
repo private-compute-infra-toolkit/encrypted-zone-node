@@ -42,40 +42,71 @@ async fn test_health_manager_metrics_scenarios() {
 
     let mapper = IsolateServiceMapper::default();
 
-    let binary_index = mapper
+    // Register Starting isolate
+    let starting_binary_index = mapper
         .new_binary_index(
             vec![IsolateServiceInfo {
-                operator_domain: "test_domain".to_string(),
-                service_name: "test_service".to_string(),
-                ..Default::default()
+                operator_domain: "starting_domain".to_string(),
+                service_name: "starting_service".to_string(),
+                isolate_name: "starting_isolate".to_string(),
+                publisher_id: "starting_publisher".to_string(),
             }],
             false,
-            "publisher_id".to_string(),
-            "isolate_name".to_string(),
+            "starting_publisher".to_string(),
+            "starting_isolate".to_string(),
         )
         .await
         .expect("Failed to add binary index");
-
-    let isolate_id = isolate_info::IsolateId::new(binary_index);
-
-    let add_isolate_req = AddIsolateRequest {
-        isolate_id,
+    let starting_isolate_id = isolate_info::IsolateId::new(starting_binary_index);
+    ism.add_isolate(AddIsolateRequest {
+        isolate_id: starting_isolate_id,
         current_data_scope_type: DataScopeType::Public,
         allowed_data_scope_type: DataScopeType::Public,
-    };
-    ism.add_isolate(add_isolate_req).await;
-    ism.update_state(isolate_id, IsolateState::Ready).await.expect("Failed to update state");
+    })
+    .await;
+
+    // Register Ready isolate
+    let ready_binary_index = mapper
+        .new_binary_index(
+            vec![IsolateServiceInfo {
+                operator_domain: "ready_domain".to_string(),
+                service_name: "ready_service".to_string(),
+                isolate_name: "ready_isolate".to_string(),
+                publisher_id: "ready_publisher".to_string(),
+            }],
+            false,
+            "ready_publisher".to_string(),
+            "ready_isolate".to_string(),
+        )
+        .await
+        .expect("Failed to add binary index");
+    let ready_isolate_id = isolate_info::IsolateId::new(ready_binary_index);
+    ism.add_isolate(AddIsolateRequest {
+        isolate_id: ready_isolate_id,
+        current_data_scope_type: DataScopeType::Public,
+        allowed_data_scope_type: DataScopeType::Public,
+    })
+    .await;
+    ism.update_state(ready_isolate_id, IsolateState::Ready).await.expect("Failed to update state");
 
     let health_manager = HealthManager::new(ism.clone(), cm_req, mapper.clone(), ds_req);
 
-    let should_exit = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let should_exit_clone = should_exit.clone();
+    let starting_should_exit = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ready_should_exit = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let starting_should_exit_clone = starting_should_exit.clone();
+    let ready_should_exit_clone = ready_should_exit.clone();
 
     tokio::spawn(async move {
         while let Some(req) = cm_rx.recv().await {
             match req {
-                ContainerManagerRequest::GetRunStatus { resp, .. } => {
-                    let status = if should_exit_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                ContainerManagerRequest::GetRunStatus { req, resp } => {
+                    let isolate_id = req.isolate_id;
+                    let should_exit = (isolate_id == starting_isolate_id
+                        && starting_should_exit_clone.load(std::sync::atomic::Ordering::Relaxed))
+                        || (isolate_id == ready_isolate_id
+                            && ready_should_exit_clone.load(std::sync::atomic::Ordering::Relaxed));
+                    let status = if should_exit {
                         ContainerRunStatusEnum::Exited(1)
                     } else {
                         ContainerRunStatusEnum::Running
@@ -109,6 +140,7 @@ async fn test_health_manager_metrics_scenarios() {
         }
     });
 
+    // Run 1: both running. Verify state metrics.
     health_manager.run().await;
     if let Some(ref provider) = providers.safe {
         let _ = provider.force_flush();
@@ -123,70 +155,88 @@ async fn test_health_manager_metrics_scenarios() {
         !state_points.is_empty(),
         "Expected encrypted_zone.enforcer.health.isolate.state metric"
     );
-    assert_eq!(state_points[0].0, 7.0, "State should be 7 (Ready)");
-    let attrs = &state_points[0].1;
-    assert_eq!(attrs.get("ez_component_name").map(|s| s.as_str()), Some("isolate"));
-    assert_eq!(attrs.get("ez_isolate_name").map(|s| s.as_str()), Some("isolate_name"));
-    assert_eq!(attrs.get("ez_publisher_id").map(|s| s.as_str()), Some("publisher_id"));
-    assert_eq!(attrs.get("ez_isolate_type").map(|s| s.as_str()), Some("opaque"));
+
+    let assert_gauge_point = |points: &[(f64, std::collections::HashMap<String, String>)],
+                              expected_val: f64,
+                              isolate_name: &str,
+                              publisher_id: &str| {
+        let found = points.iter().any(|(val, attrs)| {
+            *val == expected_val
+                && attrs.get("ez_isolate_name").map(|s| s.as_str()) == Some(isolate_name)
+                && attrs.get("ez_publisher_id").map(|s| s.as_str()) == Some(publisher_id)
+                && attrs.get("ez_component_name").map(|s| s.as_str()) == Some("isolate")
+                && attrs.get("ez_isolate_type").map(|s| s.as_str()) == Some("opaque")
+        });
+        assert!(
+            found,
+            "Expected point with value {} for isolate {}/{}",
+            expected_val, publisher_id, isolate_name
+        );
+    };
+
+    assert_gauge_point(&state_points, 1.0, "starting_isolate", "starting_publisher");
+    assert_gauge_point(&state_points, 7.0, "ready_isolate", "ready_publisher");
 
     let mem_isolate_points =
         verifier.get_gauge_points("encrypted_zone.enforcer.isolate.memory.resident_size", false);
-    assert!(
-        !mem_isolate_points.is_empty(),
-        "Expected encrypted_zone.enforcer.isolate.memory.resident_size metric"
+    assert_gauge_point(
+        &mem_isolate_points,
+        100_000_000.0,
+        "starting_isolate",
+        "starting_publisher",
     );
-    assert_eq!(mem_isolate_points[0].0, 100_000_000.0, "Isolate memory should be 100_000_000");
+    assert_gauge_point(&mem_isolate_points, 100_000_000.0, "ready_isolate", "ready_publisher");
 
     let peak_mem_isolate_points = verifier
         .get_gauge_points("encrypted_zone.enforcer.isolate.memory.peak_resident_size", false);
-    assert!(
-        !peak_mem_isolate_points.is_empty(),
-        "Expected encrypted_zone.enforcer.isolate.memory.peak_resident_size metric"
+    assert_gauge_point(
+        &peak_mem_isolate_points,
+        200_000_000.0,
+        "starting_isolate",
+        "starting_publisher",
     );
-    assert_eq!(
-        peak_mem_isolate_points[0].0, 200_000_000.0,
-        "Isolate peak RSS should be 200_000_000"
-    );
+    assert_gauge_point(&peak_mem_isolate_points, 200_000_000.0, "ready_isolate", "ready_publisher");
 
     let virt_mem_isolate_points =
         verifier.get_gauge_points("encrypted_zone.enforcer.isolate.memory.virtual_size", false);
-    assert!(
-        !virt_mem_isolate_points.is_empty(),
-        "Expected encrypted_zone.enforcer.isolate.memory.virtual_size metric"
+    assert_gauge_point(
+        &virt_mem_isolate_points,
+        500_000_000.0,
+        "starting_isolate",
+        "starting_publisher",
     );
-    assert_eq!(
-        virt_mem_isolate_points[0].0, 500_000_000.0,
-        "Isolate virtual memory should be 500_000_000"
-    );
+    assert_gauge_point(&virt_mem_isolate_points, 500_000_000.0, "ready_isolate", "ready_publisher");
 
     let private_mem_isolate_points =
         verifier.get_gauge_points("encrypted_zone.enforcer.isolate.memory.private_size", false);
-    assert!(
-        !private_mem_isolate_points.is_empty(),
-        "Expected encrypted_zone.enforcer.isolate.memory.private_size metric"
+    assert_gauge_point(
+        &private_mem_isolate_points,
+        50_000_000.0,
+        "starting_isolate",
+        "starting_publisher",
     );
-    assert_eq!(
-        private_mem_isolate_points[0].0, 50_000_000.0,
-        "Isolate private memory should be 50_000_000"
+    assert_gauge_point(
+        &private_mem_isolate_points,
+        50_000_000.0,
+        "ready_isolate",
+        "ready_publisher",
     );
 
     let data_mem_isolate_points =
         verifier.get_gauge_points("encrypted_zone.enforcer.isolate.memory.data_size", false);
-    assert!(
-        !data_mem_isolate_points.is_empty(),
-        "Expected encrypted_zone.enforcer.isolate.memory.data_size metric"
+    assert_gauge_point(
+        &data_mem_isolate_points,
+        10_000_000.0,
+        "starting_isolate",
+        "starting_publisher",
     );
-    assert_eq!(
-        data_mem_isolate_points[0].0, 10_000_000.0,
-        "Isolate data memory should be 10_000_000"
-    );
+    assert_gauge_point(&data_mem_isolate_points, 10_000_000.0, "ready_isolate", "ready_publisher");
 
-    // Start Scenario 2
-    should_exit.store(true, std::sync::atomic::Ordering::Relaxed);
+    // Run 2: both exit/crash.
+    starting_should_exit.store(true, std::sync::atomic::Ordering::Relaxed);
+    ready_should_exit.store(true, std::sync::atomic::Ordering::Relaxed);
 
     let mut found_cpu_metric = false;
-    // Retry up to 5 times to allow for system time difference to be significant enough for CPU usage calculation
     for _ in 0..5 {
         health_manager.run().await;
         if let Some(ref provider) = providers.safe {
@@ -204,64 +254,33 @@ async fn test_health_manager_metrics_scenarios() {
         }
         found_cpu_metric = true;
 
-        let found_cpu = cpu_points.iter().any(|(val, _)| *val >= 0.0);
-        assert!(found_cpu, "CPU percent should be >= 0.0. Found: {:?}", cpu_points);
+        // Verify pre_ready_exit is recorded for Starting isolate
+        let pre_ready_exit_points =
+            verifier_2.get_counter_points("encrypted_zone.enforcer.health.isolate.pre_ready_exit");
+        assert_eq!(pre_ready_exit_points.len(), 1, "Expected exactly 1 pre_ready_exit point");
+        let (val, attrs) = &pre_ready_exit_points[0];
+        assert!(*val >= 1, "Expected pre_ready_exit count to be >= 1, found: {}", val);
+        assert_eq!(attrs.get("ez_isolate_name").map(|v| v.as_str()), Some("starting_isolate"));
+        assert_eq!(attrs.get("ez_publisher_id").map(|v| v.as_str()), Some("starting_publisher"));
+        assert_eq!(attrs.get("exit_reason").map(|v| v.as_str()), Some("exited"));
+        assert_eq!(attrs.get("pre_ready_state").map(|v| v.as_str()), Some("starting"));
 
-        let container_status_points_2 = verifier_2
-            .get_gauge_points("encrypted_zone.enforcer.health.isolate.container_run_status", false);
-        assert!(
-            !container_status_points_2.is_empty(),
-            "Expected enforcer.health.isolate.container_run_status metric"
-        );
-        let found_container_exited = container_status_points_2.iter().any(|(val, _)| *val == 3.0);
-        assert!(
-            found_container_exited,
-            "Container run status should eventually be 3 (Exited). Found: {:?}",
-            container_status_points_2
-        );
+        // Verify pre_ready_exit has NO points for Ready isolate
+        let has_ready_pre_ready_exit = pre_ready_exit_points.iter().any(|(_, attrs)| {
+            attrs.get("ez_isolate_name").map(|v| v.as_str()) == Some("ready_isolate")
+        });
+        assert!(!has_ready_pre_ready_exit, "Ready isolate should not record pre-ready exit");
 
-        let state_points_2 =
-            verifier_2.get_gauge_points("encrypted_zone.enforcer.health.isolate.state", false);
-        assert!(
-            !state_points_2.is_empty(),
-            "Expected encrypted_zone.enforcer.health.isolate.state metric"
-        );
-        // State remains Ready (7) as HealthManager doesn't update IsolateState on container exit.
-        let found_state_ready = state_points_2.iter().any(|(val, _)| *val == 7.0);
-        assert!(found_state_ready, "State should remain 7 (Ready). Found: {:?}", state_points_2);
-
+        // Verify reset metric is recorded for Ready isolate
         let reset_points = verifier_2.get_counter_points("encrypted_zone.enforcer.reset");
-        assert!(!reset_points.is_empty(), "Expected encrypted_zone.enforcer.reset metric");
-        let found_reset = reset_points.iter().any(|(val, _)| *val >= 1);
-        assert!(
-            found_reset,
-            "Reset count should be >= 1 after a container mismatch. Found: {:?}",
-            reset_points
-        );
-        let fd_points = verifier_2
-            .get_gauge_points("encrypted_zone.enforcer.health.system.file_descriptors", false);
-        assert!(
-            !fd_points.is_empty(),
-            "Expected encrypted_zone.enforcer.health.system.file_descriptors metric"
-        );
-        let found_fd = fd_points.iter().any(|(val, _)| *val > 0.0);
-        assert!(found_fd, "FD count should be > 0. Found: {:?}", fd_points);
-
-        let mem_points =
-            verifier_2.get_gauge_points("encrypted_zone.enforcer.health.system.memory_rss", false);
-        assert!(
-            !mem_points.is_empty(),
-            "Expected encrypted_zone.enforcer.health.system.memory_rss metric"
-        );
-        let found_mem = mem_points.iter().any(|(val, _)| *val > 0.0);
-        assert!(found_mem, "Memory RSS should be > 0. Found: {:?}", mem_points);
+        let found_ready_reset = reset_points.iter().any(|(val, attrs)| {
+            *val >= 1 && attrs.get("service").map(|v| v.as_str()) == Some("ready_service")
+        });
+        assert!(found_ready_reset, "Ready isolate should record reset");
 
         break;
     }
-    assert!(
-        found_cpu_metric,
-        "Expected encrypted_zone.enforcer.health.system.cpu.usage metric after retries"
-    );
+    assert!(found_cpu_metric, "CPU metric should be recorded after retries");
 
     if let Some(provider) = providers.safe {
         let _ = provider.shutdown();

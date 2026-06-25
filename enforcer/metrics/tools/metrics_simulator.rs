@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use manifest_proto::enforcer::v1::ez_manifest::ManifestType;
 use manifest_proto::enforcer::v1::EzManifest;
-use metrics::receiver::IsolateMetricsReceiver;
+use metrics::isolate_metrics_receiver::IsolateMetricsReceiver;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use std::collections::BTreeMap;
 use std::fs::File;
