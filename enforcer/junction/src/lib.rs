@@ -312,10 +312,10 @@ impl Junction for IsolateJunction {
                 .await;
             // Using TonicClient, create a new streaming rpc to Isolate
             // and send initial request to Isolate
-            let (isolate_tx_channel, junction_to_isolate_rx) =
+            let (junction_to_isolate_tx, junction_to_isolate_rx) =
                 channel::<InvokeIsolateRequest>(CHANNEL_SIZE);
             let outbound_stream = ReceiverStream::new(junction_to_isolate_rx);
-            if let Err(_e) = isolate_tx_channel.send(initial_invoke_request).await {
+            if let Err(_e) = junction_to_isolate_tx.send(initial_invoke_request).await {
                 let _ = junction_to_client_tx
                     .send(Err(IsolateStatusCode::DestinationChannelClosed.to_ez_error()))
                     .await;
@@ -324,7 +324,7 @@ impl Junction for IsolateJunction {
 
             // Spawn proxy task before connecting, to avoid deadlock when
             // server waits for subsequent requests before sending headers.
-            let isolate_tx_channel_clone = isolate_tx_channel.clone();
+            let junction_to_isolate_tx_clone = junction_to_isolate_tx.clone();
             let junction_to_client_tx_clone = junction_to_client_tx.clone();
             let isolate_junction_clone_2 = isolate_junction_clone.clone();
             let metric_attr_clone = metric_attr.clone();
@@ -332,7 +332,7 @@ impl Junction for IsolateJunction {
                 isolate_junction_clone_2
                     .proxy_streaming_isolate_requests(
                         client_to_junction_rx,
-                        isolate_tx_channel_clone,
+                        junction_to_isolate_tx_clone,
                         junction_to_client_tx_clone,
                         destination_isolate_info.id,
                         stream_id,
@@ -559,7 +559,7 @@ impl IsolateJunction {
     async fn proxy_streaming_isolate_requests(
         self,
         mut client_to_junction_rx: Receiver<InvokeIsolateRequest>,
-        isolate_tx_channel: Sender<InvokeIsolateRequest>,
+        junction_to_isolate_tx: Sender<InvokeIsolateRequest>,
         junction_to_client_tx: Sender<Result<InvokeIsolateResponse, EzError>>,
         isolate_id: IsolateId,
         stream_id: u64,
@@ -590,7 +590,7 @@ impl IsolateJunction {
                     log::info!("failed to mask msg_id: {:?}", e);
                 }
             }
-            let send_result = isolate_tx_channel.send(invoke_isolate_request).await;
+            let send_result = junction_to_isolate_tx.send(invoke_isolate_request).await;
             // break if we are unable to route request to Isolate
             if send_result.is_err() {
                 let _ = junction_to_client_tx

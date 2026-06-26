@@ -13,9 +13,8 @@
 // limitations under the License.
 use crate::error::DataScopeError;
 use crate::request::{
-    AddIsolateRequest, AddIsolateResponse, GetIsolateRequest, GetIsolateResponse,
-    GetIsolateScopeRequest, GetIsolateScopeResponse, RemoveIsolateRequest, RemoveIsolateResponse,
-    ValidateIsolateRequest, ValidateIsolateResponse,
+    AddIsolateRequest, GetIsolateRequest, GetIsolateResponse, GetIsolateScopeRequest,
+    GetIsolateScopeResponse, RemoveIsolateRequest, RemoveIsolateResponse, ValidateIsolateRequest,
 };
 use dashmap::{mapref::one::Ref, DashMap};
 use data_scope_proto::enforcer::v1::DataScopeType;
@@ -49,7 +48,7 @@ impl RatifiedIsolateManager {
     pub async fn add_isolate(
         &self,
         add_isolate_request: AddIsolateRequest,
-    ) -> Result<AddIsolateResponse, DataScopeError> {
+    ) -> Result<(), DataScopeError> {
         let AddIsolateRequest {
             current_data_scope_type: _, // The `current_data_scope_type` is ignored.
             allowed_data_scope_type,
@@ -87,7 +86,7 @@ impl RatifiedIsolateManager {
         isolate_set.insert(isolate_id);
         self.max_data_scope_map.insert(binary_services_index, allowed_data_scope_type);
 
-        Ok(AddIsolateResponse {})
+        Ok(())
     }
 
     /// Removes a Ratified Isolate from the manager.
@@ -159,8 +158,8 @@ impl RatifiedIsolateManager {
     pub async fn validate_isolate_scope(
         &self,
         _validate_isolate_request: ValidateIsolateRequest,
-    ) -> Result<ValidateIsolateResponse, DataScopeError> {
-        Ok(ValidateIsolateResponse {})
+    ) -> Result<(), DataScopeError> {
+        Ok(())
     }
 
     /// Retrieves the scope of a Ratified Isolate.

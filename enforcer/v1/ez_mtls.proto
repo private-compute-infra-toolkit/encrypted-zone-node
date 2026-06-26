@@ -19,6 +19,17 @@ package enforcer.v1;
 import "proto/attestation/endorsement.proto";
 import "proto/attestation/evidence.proto";
 
+enum PolicyHint {
+  // Default value, should not be used.
+  POLICY_HINT_UNSPECIFIED = 0;
+  // The operator is getting the frontend TLS certificate.
+  // Frontend cert is for EZ end user client to authenticate server.
+  POLICY_HINT_FRONTEND_TLS_CERT = 1;
+  // The operator is getting the backend mTLS certificate.
+  // Backend cert is for EZ node to authenticate another EZ node.
+  POLICY_HINT_BACKEND_MTLS_CERT = 2;
+}
+
 // Service for managing Mutual TLS (mTLS) identity and routing within the
 // Encrypted Zone (EZ).
 //
@@ -102,6 +113,12 @@ message GetCertificateRequest {
   // AMD, Intel) or other verifiers that certify the validity of the hardware
   // and firmware components described in the `evidence`.
   .oak.attestation.v1.Endorsements endorsements = 3;
+
+  // The role of the operator. This should be equivalent to the policy installed to the node.
+  string operator_role = 4;
+
+  // The hint about what certificate to get.
+  PolicyHint policy_hint = 5;
 }
 
 // Response containing the signed certificate.

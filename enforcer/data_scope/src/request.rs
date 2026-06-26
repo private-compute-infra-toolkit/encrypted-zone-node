@@ -31,10 +31,6 @@ pub struct AddIsolateRequest {
     pub isolate_id: IsolateId,
 }
 
-/// A response for an `AddIsolateRequest`, indicating the operation was successful.
-#[derive(Debug)]
-pub struct AddIsolateResponse {}
-
 /// A request to remove an Isolate from the `DataScopeManager` and `RatifiedIsolateManager`.
 #[derive(Debug)]
 pub struct RemoveIsolateRequest {
@@ -76,20 +72,12 @@ pub struct ValidateIsolateRequest {
     pub requested_scope: DataScopeType,
 }
 
-/// A response for a `ValidateIsolateRequest`, indicating the validation was successful.
-#[derive(Debug)]
-pub struct ValidateIsolateResponse {}
-
 /// A request to freeze the data scope of an Isolate, preventing it from being changed further.
 #[derive(Debug)]
 pub struct FreezeIsolateScopeRequest {
     /// The ID of the Isolate whose scope is to be frozen.
     pub isolate_id: IsolateId,
 }
-
-/// A response for a `FreezeIsolateScopeRequest`, indicating the operation was successful.
-#[derive(Debug)]
-pub struct FreezeIsolateScopeResponse {}
 
 /// A request to get the current data scope of an Isolate.
 #[derive(Debug)]
@@ -151,23 +139,3 @@ pub struct ValidateManifestOutputScopeRequest {
     /// The output data scope being emitted.
     pub emitted_scope: DataScopeType,
 }
-
-/// A response for a `ValidateBackendDependencyRequest`, indicating the validation was successful.
-#[derive(Debug)]
-pub struct ValidateBackendDependencyResponse {}
-
-/// A response for an `AddBackendDependenciesRequest`, indicating the operation was successful.
-#[derive(Debug)]
-pub struct AddBackendDependenciesResponse {}
-
-/// A response for an `AddManifestScopeRequest`, indicating the operation was successful.
-#[derive(Debug)]
-pub struct AddManifestScopeResponse {}
-
-/// A response for a `ValidateManifestInputScopeRequest`, indicating the validation was successful.
-#[derive(Debug)]
-pub struct ValidateManifestInputScopeResponse {}
-
-/// A response for a `ValidateManifestOutputScopeRequest`, indicating the validation was successful.
-#[derive(Debug)]
-pub struct ValidateManifestOutputScopeResponse {}

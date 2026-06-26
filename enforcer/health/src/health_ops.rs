@@ -58,6 +58,7 @@ impl HealthOp {
                 health.container_virt_memory_bytes = to_i64(resp.virt_bytes);
                 health.container_shared_memory_bytes = to_i64(resp.shared_bytes);
                 health.container_data_memory_bytes = to_i64(resp.data_bytes);
+                health.container_restart_count = Some(resp.restart_count as i32);
                 if run_status != RunStatus::Running {
                     log::info!(
                         "[HealthOp::CheckContainerRunStatus] Isolate {} is not running (status: {:?}). Requesting reset.",

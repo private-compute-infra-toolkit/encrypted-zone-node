@@ -126,7 +126,7 @@ async fn test_setup_otel_metrics_uds_waiting() {
         let _listener =
             tokio::net::UnixListener::bind(&socket_path_clone).expect("Failed to bind UDS");
         // Keep it alive long enough for the connection to be established
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(Duration::from_secs(30)).await;
     });
 
     // The setup_otel_metrics call should now wait for the listener to start

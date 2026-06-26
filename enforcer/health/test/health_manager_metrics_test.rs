@@ -130,6 +130,7 @@ async fn test_health_manager_metrics_scenarios() {
                         virt_bytes,
                         shared_bytes,
                         data_bytes,
+                        restart_count: 0,
                     }));
                 }
                 ContainerManagerRequest::ResetIsolateRequest { resp, .. } => {

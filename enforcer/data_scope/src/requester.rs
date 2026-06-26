@@ -13,10 +13,9 @@
 // limitations under the License.
 
 use crate::request::{
-    AddIsolateRequest, AddIsolateResponse, DataScopeManagerResponse, FreezeIsolateScopeRequest,
-    FreezeIsolateScopeResponse, GetIsolateRequest, GetIsolateResponse, GetIsolateScopeRequest,
-    GetIsolateScopeResponse, RemoveIsolateRequest, RemoveIsolateResponse, ValidateIsolateRequest,
-    ValidateIsolateResponse,
+    AddIsolateRequest, DataScopeManagerResponse, FreezeIsolateScopeRequest, GetIsolateRequest,
+    GetIsolateResponse, GetIsolateScopeRequest, GetIsolateScopeResponse, RemoveIsolateRequest,
+    RemoveIsolateResponse, ValidateIsolateRequest,
 };
 use crate::{
     data_scope_manager::DataScopeManager, ratified_isolate_manager::RatifiedIsolateManager,
@@ -54,7 +53,7 @@ impl DataScopeRequester {
     pub async fn add_isolate(
         &self,
         add_isolate_request: AddIsolateRequest,
-    ) -> DataScopeManagerResponse<AddIsolateResponse> {
+    ) -> DataScopeManagerResponse<()> {
         if add_isolate_request.isolate_id.is_ratified_isolate() {
             self.ratified_isolate_manager.add_isolate(add_isolate_request).await
         } else {
@@ -97,7 +96,7 @@ impl DataScopeRequester {
     pub async fn freeze_isolate_scope(
         &self,
         freeze_isolate_request: FreezeIsolateScopeRequest,
-    ) -> DataScopeManagerResponse<FreezeIsolateScopeResponse> {
+    ) -> DataScopeManagerResponse<()> {
         self.data_scope_manager.freeze_isolate_scope(freeze_isolate_request).await
     }
 
@@ -107,7 +106,7 @@ impl DataScopeRequester {
     pub async fn validate_isolate_scope(
         &self,
         validate_isolate_request: ValidateIsolateRequest,
-    ) -> DataScopeManagerResponse<ValidateIsolateResponse> {
+    ) -> DataScopeManagerResponse<()> {
         if validate_isolate_request.isolate_id.is_ratified_isolate() {
             self.ratified_isolate_manager.validate_isolate_scope(validate_isolate_request).await
         } else {

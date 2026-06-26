@@ -74,6 +74,8 @@ message EzIsolateHealth {
   optional int64 container_shared_memory_bytes = 11;
   // Data segment memory size in bytes.
   optional int64 container_data_memory_bytes = 12;
+  // Number of times the container has been restarted.
+  optional int32 container_restart_count = 13;
 }
 
 // Information about a service running in an Isolate.

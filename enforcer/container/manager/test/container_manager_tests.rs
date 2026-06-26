@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use anyhow::{ensure, Context, Result};
-use container_manager::{ContainerManager, ContainerManagerArgs};
+use container_manager::{sanitize_path_component, ContainerManager, ContainerManagerArgs};
 use container_manager_request::{
     ContainerManagerRequest, MountReadOnlyFile, MountWritableFile, ResetIsolateRequest,
 };
@@ -117,6 +117,7 @@ impl TestHarness {
         manifest_path: &str,
         isolate_runtime_configs: &IsolateRuntimeConfigs,
         otel_endpoint: Option<String>,
+        operator_role: String,
     ) -> Result<Self> {
         // Clear the tracker for test isolation.
         FakeContainer::clear_tracker();
@@ -179,6 +180,7 @@ impl TestHarness {
             shm_num_slots: SHM_NUM_SLOTS,
             shm_slot_size: SHM_SLOT_SIZE,
             shm_payload_threshold: SHM_PAYLOAD_THRESHOLD,
+            operator_role,
         };
 
         let container_manager = ContainerManager::<FakeContainer>::start(container_manager_args)
@@ -235,6 +237,7 @@ async fn test_start_one_isolate() {
         JSON_MANIFEST_PATH_ONE_ISOLATE,
         &IsolateRuntimeConfigs::default(),
         /* otel_endpoint= */ None,
+        /* operator_role= */ "test_operator_role".to_string(),
     )
     .await
     .expect("TestHarness::new should succeed");
@@ -330,6 +333,7 @@ async fn test_mount_files() {
         JSON_MANIFEST_PATH_ONE_ISOLATE,
         &IsolateRuntimeConfigs::default(),
         /* otel_endpoint= */ None,
+        /* operator_role= */ "".to_string(),
     )
     .await
     .expect("TestHarness::new should succeed");
@@ -413,6 +417,7 @@ async fn test_isolate_reset() {
         JSON_MANIFEST_PATH_MULTIPLE_ISOLATE,
         &IsolateRuntimeConfigs::default(),
         /* otel_endpoint= */ None,
+        /* operator_role= */ "".to_string(),
     )
     .await
     .expect("TestHarness::new should succeed");
@@ -569,12 +574,17 @@ async fn test_start_one_isolate_with_override() {
             command_line_arguments: vec!["--new_arg".to_string()],
             environment_variables: vec!["NEW_ENV=1".to_string()],
             etc_hosts: etc_hosts.to_string(),
+            isolate_name: "".to_string(),
         }],
     };
-    let mut harness =
-        TestHarness::new(JSON_MANIFEST_PATH_ONE_ISOLATE, &configs, /* otel_endpoint= */ None)
-            .await
-            .expect("TestHarness::new should succeed");
+    let mut harness = TestHarness::new(
+        JSON_MANIFEST_PATH_ONE_ISOLATE,
+        &configs,
+        /* otel_endpoint= */ None,
+        /* operator_role= */ "".to_string(),
+    )
+    .await
+    .expect("TestHarness::new should succeed");
 
     let isolate_and_uds_vec =
         check_container_started(vec![HELLOWORLD_BINARY]).await.expect("Container should start");
@@ -599,7 +609,8 @@ async fn test_start_one_isolate_with_override() {
                 "EZ_SHM_NUM_SLOTS=10".to_string(),
                 "EZ_SHM_SLOT_SIZE=64".to_string(),
                 "EZ_SHM_PAYLOAD_THRESHOLD=104857600".to_string(),
-                "EZ_BACKEND_DEPENDENCIES=ez_backend_dependencies:[{operator_domain:\"helloworld_domain\",service_name:\"Greeter\",method_name:\"SayHello\"}]".to_string()
+                "EZ_BACKEND_DEPENDENCIES=ez_backend_dependencies:[{operator_domain:\"helloworld_domain\",service_name:\"Greeter\",method_name:\"SayHello\"}]".to_string(),
+                "EZ_OPERATOR_ROLE=".to_string()
             ]
         );
         let etc_hosts_mount = tracked_container
@@ -629,6 +640,7 @@ async fn test_ratified_isolate() {
         JSON_MANIFEST_PATH_RATIFIED_ISOLATE,
         &IsolateRuntimeConfigs::default(),
         /* otel_endpoint= */ None,
+        /* operator_role= */ "".to_string(),
     )
     .await
     .expect("TestHarness::new should succeed");
@@ -721,6 +733,7 @@ async fn test_ratified_isolate_wrong_domain_manifest() {
         JSON_MANIFEST_PATH_WRONG_DOMAIN,
         &IsolateRuntimeConfigs::default(),
         /* otel_endpoint= */ None,
+        /* operator_role= */ "".to_string(),
     )
     .await
     .expect_err("TestHarness::new should fail");
@@ -737,6 +750,7 @@ async fn test_backend_dependencies() {
         JSON_MANIFEST_PATH_MULTIPLE_ISOLATE,
         &IsolateRuntimeConfigs::default(),
         /* otel_endpoint= */ None,
+        /* operator_role= */ "".to_string(),
     )
     .await
     .expect("TestHarness::new should succeed");
@@ -830,6 +844,7 @@ async fn test_interceptor() {
         JSON_MANIFEST_PATH_INTERCEPTOR,
         &IsolateRuntimeConfigs::default(),
         /* otel_endpoint= */ None,
+        /* operator_role= */ "".to_string(),
     )
     .await
     .expect("TestHarness::new should succeed");
@@ -1169,6 +1184,7 @@ async fn test_otel_endpoint_http() {
         JSON_MANIFEST_PATH_OTEL,
         &IsolateRuntimeConfigs::default(),
         /* otel_endpoint= */ Some(LOCALHOST_OTLP_ENDPOINT.to_string()),
+        /* operator_role= */ "".to_string(),
     )
     .await
     .expect("TestHarness::new should succeed");
@@ -1209,6 +1225,7 @@ async fn test_otel_endpoint_unix_variant(endpoint_val: &str) {
         JSON_MANIFEST_PATH_OTEL,
         &IsolateRuntimeConfigs::default(),
         /* otel_endpoint= */ Some(endpoint_val.to_string()),
+        /* operator_role= */ "".to_string(),
     )
     .await
     .expect("TestHarness::new should succeed");
@@ -1243,6 +1260,7 @@ async fn test_backend_dependencies_env_var() {
         JSON_MANIFEST_PATH_ONE_ISOLATE,
         &IsolateRuntimeConfigs::default(),
         /* otel_endpoint= */ None,
+        /* operator_role= */ "test_operator_role".to_string(),
     )
     .await
     .expect("TestHarness::new should succeed");
@@ -1257,9 +1275,15 @@ async fn test_backend_dependencies_env_var() {
 
     // Verify that the EZ_BACKEND_DEPENDENCIES environment variable is set and matches the textproto
     let expected_env = "EZ_BACKEND_DEPENDENCIES=ez_backend_dependencies:[{operator_domain:\"helloworld_domain\",service_name:\"Greeter\",method_name:\"SayHello\"}]";
+    let expected_operator_role_env = "EZ_OPERATOR_ROLE=test_operator_role";
     assert!(
         tracked_container.env.iter().any(|e| e == expected_env),
         "EZ_BACKEND_DEPENDENCIES env var not found or incorrect. Actual env: {:?}",
+        tracked_container.env
+    );
+    assert!(
+        tracked_container.env.iter().any(|e| e == expected_operator_role_env),
+        "EZ_OPERATOR_ROLE env var not found or incorrect. Actual env: {:?}",
         tracked_container.env
     );
 
@@ -1275,6 +1299,7 @@ async fn test_multiple_isolates_backend_dependencies_env_vars() {
         JSON_MANIFEST_PATH_MULTIPLE_ISOLATE,
         &IsolateRuntimeConfigs::default(),
         /* otel_endpoint= */ None,
+        /* operator_role= */ "".to_string(),
     )
     .await
     .expect("TestHarness::new should succeed");
@@ -1331,4 +1356,168 @@ async fn test_multiple_isolates_backend_dependencies_env_vars() {
     for (fake_container_id, _) in isolate_and_uds_vec {
         ensure_isolate_stopped(fake_container_id).await.expect("Container should stop");
     }
+}
+
+#[tokio::test]
+async fn test_process_binary_manifest_matches_isolate_name() {
+    let configs = IsolateRuntimeConfigs {
+        configs: vec![
+            manifest_proto::enforcer::v1::IsolateRuntimeConfig {
+                publisher_id: HELLOWORLD_DOMAIN.to_string(),
+                binary_filename: HELLOWORLD_BINARY.to_string(),
+                isolate_name: "ezpkg://helloworld.com/internal".to_string(),
+                command_line_arguments: vec!["--wrong_arg".to_string()],
+                environment_variables: vec![],
+                etc_hosts: "".to_string(),
+            },
+            manifest_proto::enforcer::v1::IsolateRuntimeConfig {
+                publisher_id: HELLOWORLD_DOMAIN.to_string(),
+                binary_filename: HELLOWORLD_BINARY.to_string(),
+                isolate_name: "ezpkg://helloworld.com".to_string(),
+                command_line_arguments: vec!["--correct_arg".to_string()],
+                environment_variables: vec![],
+                etc_hosts: "".to_string(),
+            },
+        ],
+    };
+
+    // In JSON_MANIFEST_PATH_ONE_ISOLATE, the isolate_name is "ezpkg://helloworld"
+    let mut harness = TestHarness::new(
+        JSON_MANIFEST_PATH_ONE_ISOLATE,
+        &configs,
+        /* otel_endpoint= */ None,
+        /* operator_role= */ "".to_string(),
+    )
+    .await
+    .expect("TestHarness::new should succeed");
+
+    let isolate_and_uds_vec =
+        check_container_started(vec![HELLOWORLD_BINARY]).await.expect("Container should start");
+    assert_eq!(isolate_and_uds_vec.len(), 1);
+    let (fake_container_id, isolate_ez_bridge_enforcer_side_uds_path) =
+        isolate_and_uds_vec[0].clone();
+    let _client = notify_isolate_ready(isolate_ez_bridge_enforcer_side_uds_path)
+        .await
+        .expect("Isolate should be ready");
+
+    {
+        let tracker = FakeContainer::get_tracker();
+        let tracked_container = tracker.iter().next().unwrap();
+        // It should match the second config because the isolate_name matches
+        assert_eq!(
+            tracked_container.value().command_line_arguments,
+            vec!["--correct_arg".to_string()]
+        );
+    }
+
+    harness.stop().await;
+    ensure_isolate_stopped(fake_container_id).await.expect("Container should stop");
+}
+
+#[tokio::test]
+async fn test_ratified_isolate_operator_role_env_var() {
+    let mut harness = TestHarness::new(
+        JSON_MANIFEST_PATH_RATIFIED_ISOLATE,
+        &IsolateRuntimeConfigs::default(),
+        /* otel_endpoint= */ None,
+        /* operator_role= */ "test_operator_role".to_string(),
+    )
+    .await
+    .expect("TestHarness::new should succeed");
+
+    let isolate_and_uds_vec =
+        check_container_started(vec![HELLOWORLD_BINARY]).await.expect("Container should start");
+    assert_eq!(isolate_and_uds_vec.len(), 1);
+    let fake_container_id = isolate_and_uds_vec[0].0;
+
+    let tracker = FakeContainer::get_tracker();
+    let tracked_container = tracker.get(&fake_container_id).unwrap();
+
+    // Verify that the EZ_OPERATOR_ROLE environment variable is set
+    let expected_env = "EZ_OPERATOR_ROLE=test_operator_role";
+    assert!(
+        tracked_container.env.iter().any(|e| e == expected_env),
+        "EZ_OPERATOR_ROLE env var not found or incorrect. Actual env: {:?}",
+        tracked_container.env
+    );
+
+    drop(tracked_container);
+    drop(tracker);
+    harness.stop().await;
+    ensure_isolate_stopped(fake_container_id).await.expect("Container should stop");
+}
+
+#[tokio::test]
+async fn test_ratified_isolate_missing_operator_role() {
+    let mut harness = TestHarness::new(
+        JSON_MANIFEST_PATH_RATIFIED_ISOLATE,
+        &IsolateRuntimeConfigs::default(),
+        /* otel_endpoint= */ None,
+        /* operator_role= */ "".to_string(),
+    )
+    .await
+    .expect("TestHarness::new should succeed");
+
+    let isolate_and_uds_vec =
+        check_container_started(vec![HELLOWORLD_BINARY]).await.expect("Container should start");
+    assert_eq!(isolate_and_uds_vec.len(), 1);
+    let fake_container_id = isolate_and_uds_vec[0].0;
+
+    let tracker = FakeContainer::get_tracker();
+    let tracked_container = tracker.get(&fake_container_id).unwrap();
+
+    let expected_env = "EZ_OPERATOR_ROLE=";
+    assert!(
+        tracked_container.env.iter().any(|e| e == expected_env),
+        "EZ_OPERATOR_ROLE env var not found or incorrect. Actual env: {:?}",
+        tracked_container.env
+    );
+
+    drop(tracked_container);
+    drop(tracker);
+    harness.stop().await;
+    ensure_isolate_stopped(fake_container_id).await.expect("Container should stop");
+}
+
+#[tokio::test]
+async fn test_non_ratified_isolate_missing_operator_role() {
+    let mut harness = TestHarness::new(
+        JSON_MANIFEST_PATH_ONE_ISOLATE,
+        &IsolateRuntimeConfigs::default(),
+        /* otel_endpoint= */ None,
+        /* operator_role= */ "".to_string(),
+    )
+    .await
+    .expect("TestHarness::new should succeed");
+
+    let isolate_and_uds_vec =
+        check_container_started(vec![HELLOWORLD_BINARY]).await.expect("Container should start");
+    assert_eq!(isolate_and_uds_vec.len(), 1);
+    let fake_container_id = isolate_and_uds_vec[0].0;
+
+    let tracker = FakeContainer::get_tracker();
+    let tracked_container = tracker.get(&fake_container_id).unwrap();
+
+    let expected_env = "EZ_OPERATOR_ROLE=";
+    assert!(
+        tracked_container.env.iter().any(|e| e == expected_env),
+        "EZ_OPERATOR_ROLE env var not found or incorrect. Actual env: {:?}",
+        tracked_container.env
+    );
+
+    drop(tracked_container);
+    drop(tracker);
+    harness.stop().await;
+    ensure_isolate_stopped(fake_container_id).await.expect("Container should stop");
+}
+
+#[test]
+fn test_sanitize_path_component() {
+    assert_eq!(sanitize_path_component("normal_name"), "normal_name");
+    assert_eq!(sanitize_path_component("path/with/slashes"), "path_with_slashes");
+    assert_eq!(sanitize_path_component("path\\with\\backslashes"), "path_with_backslashes");
+    assert_eq!(sanitize_path_component("traversal/../../etc"), "traversal_.._.._etc");
+    assert_eq!(sanitize_path_component("name:with:colons"), "name_with_colons");
+    assert_eq!(sanitize_path_component("wildcard*and?query"), "wildcard_and_query");
+    assert_eq!(sanitize_path_component("null\0byte"), "null_byte");
 }

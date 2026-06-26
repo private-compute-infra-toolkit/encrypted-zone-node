@@ -13,10 +13,7 @@
 // limitations under the License.
 
 use anyhow::Result;
-use grpc_connector::{
-    GrpcChannelPool, DEFAULT_CONNECT_RETRY_COUNT, DEFAULT_CONNECT_RETRY_DELAY_MS,
-    DEFAULT_CONNECT_RETRY_SCALING, DEFAULT_POOL_SIZE,
-};
+use grpc_connector::{GrpcChannelPool, DEFAULT_POOL_SIZE};
 use opentelemetry::metrics::MeterProvider;
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::{WithExportConfig, WithTonicConfig};
@@ -55,6 +52,10 @@ pub struct OtelProviders {
     pub unsafe_metrics: Option<SdkMeterProvider>,
 }
 
+const CONNECT_RETRY_COUNT: usize = 10;
+const CONNECT_RETRY_DELAY_MS: u64 = 5000;
+const CONNECT_RETRY_SCALING: u64 = 1;
+
 // Initializes the OpenTelemetry metrics pipeline and sets the global meter providers.
 // Takes optional endpoints for safe and unsafe pipelines.
 pub async fn setup_otel_metrics(
@@ -70,11 +71,15 @@ pub async fn setup_otel_metrics(
             let channel_pool = GrpcChannelPool::new(
                 endpoint.to_string(),
                 DEFAULT_POOL_SIZE,
-                DEFAULT_CONNECT_RETRY_COUNT,
-                DEFAULT_CONNECT_RETRY_DELAY_MS,
-                DEFAULT_CONNECT_RETRY_SCALING,
+                CONNECT_RETRY_COUNT,
+                CONNECT_RETRY_DELAY_MS,
+                CONNECT_RETRY_SCALING,
             )
-            .await?;
+            .await
+            .map_err(|e| {
+                log::error!("OTel collector UDS socket is not available at {}: {:?}", path, e);
+                e
+            })?;
             let channel = channel_pool.next_channel();
             exporter_builder.with_channel(channel)
         } else {

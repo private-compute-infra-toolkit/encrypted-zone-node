@@ -13,10 +13,7 @@
 // limitations under the License.
 
 use anyhow::Result;
-use grpc_connector::{
-    GrpcChannelPool, DEFAULT_CONNECT_RETRY_COUNT, DEFAULT_CONNECT_RETRY_DELAY_MS,
-    DEFAULT_CONNECT_RETRY_SCALING, DEFAULT_POOL_SIZE,
-};
+use grpc_connector::{GrpcChannelPool, DEFAULT_POOL_SIZE};
 use opentelemetry::global;
 use opentelemetry::trace::TracerProvider;
 use opentelemetry::KeyValue;
@@ -26,6 +23,9 @@ use opentelemetry_sdk::{trace, Resource};
 use tracing_subscriber::{prelude::*, EnvFilter, Registry};
 
 pub const ENFORCER_SERVICE_NAME: &str = "enforcer";
+const CONNECT_RETRY_COUNT: usize = 10;
+const CONNECT_RETRY_DELAY_MS: u64 = 5000;
+const CONNECT_RETRY_SCALING: u64 = 1;
 
 async fn init_tracer(
     service_name: &str,
@@ -38,9 +38,9 @@ async fn init_tracer(
         let channel_pool = GrpcChannelPool::new(
             endpoint.to_string(),
             DEFAULT_POOL_SIZE,
-            DEFAULT_CONNECT_RETRY_COUNT,
-            DEFAULT_CONNECT_RETRY_DELAY_MS,
-            DEFAULT_CONNECT_RETRY_SCALING,
+            CONNECT_RETRY_COUNT,
+            CONNECT_RETRY_DELAY_MS,
+            CONNECT_RETRY_SCALING,
         )
         .await
         .map_err(|e| trace::TraceError::Other(e.into()))?;
@@ -78,12 +78,20 @@ pub async fn setup_telemetry(
 ) -> anyhow::Result<trace::SdkTracerProvider> {
     // 1. Initialize OpenTelemetry tracing IF an endpoint is provided.
     let (telemetry_layer, tracer_provider) = if let Some(endpoint) = endpoint {
-        let tracer_provider = init_tracer(service_name, endpoint, sampler_probability).await?;
-        let tracer = tracer_provider.tracer(service_name.to_string());
-        let filter = EnvFilter::new("debug,h2=info");
-        let layer = tracing_opentelemetry::layer().with_tracer(tracer).with_filter(filter);
-        (Some(layer), tracer_provider)
+        match init_tracer(service_name, endpoint, sampler_probability).await {
+            Ok(provider) => {
+                let tracer = provider.tracer(service_name.to_string());
+                let filter = EnvFilter::new("debug,h2=info");
+                let layer = tracing_opentelemetry::layer().with_tracer(tracer).with_filter(filter);
+                (Some(layer), provider)
+            }
+            Err(e) => {
+                log::error!("Failed to initialize tracer: {:?}. Tracing is disabled.", e);
+                (None, trace::SdkTracerProvider::builder().build())
+            }
+        }
     } else {
+        log::info!("Traces endpoint not provided. Tracing is disabled.");
         (None, trace::SdkTracerProvider::builder().build())
     };
 

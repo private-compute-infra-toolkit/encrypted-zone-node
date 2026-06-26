@@ -43,6 +43,8 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status, Streaming};
 use trace_context::get_trace_context;
+use tracing::Instrument;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 type CallResponseResult = Result<Response<CallResponse>, Status>;
 
@@ -92,8 +94,7 @@ impl EzPublicApi for EzPublicApiService {
     async fn call(&self, request: Request<CallRequest>) -> CallResponseResult {
         let timeout = try_parse_grpc_timeout(request.metadata()).unwrap_or(None);
         tracing::debug!("after parsing timeout");
-        let trace_context = get_trace_context(&request);
-        tracing::debug!("after fetching trace context");
+
         let mut call_request = request.into_inner();
         tracing::debug!("after getting call_request");
 
@@ -118,9 +119,7 @@ impl EzPublicApi for EzPublicApiService {
         let session_id = session_metadata.session_id;
 
         // Send request to IsolateJunction
-        let metadata_headers = trace_context;
-        let invoke_isolate_request =
-            create_invoke_isolate_request(call_request, session_id, metadata_headers);
+        let invoke_isolate_request = create_invoke_isolate_request(call_request, session_id);
         self.metrics.record_message_size_bytes(
             metric_attr.request(),
             invoke_isolate_request.encoded_len() as u64,
@@ -151,7 +150,6 @@ impl EzPublicApi for EzPublicApiService {
         &self,
         request: Request<Streaming<CallRequest>>,
     ) -> Result<Response<Self::StreamCallStream>, Status> {
-        let trace_context = get_trace_context(&request);
         let call_request_stream = request.into_inner();
 
         let (api_to_client_response_tx, api_to_client_response_rx) =
@@ -180,7 +178,6 @@ impl EzPublicApi for EzPublicApiService {
             isolate_junction_channel.client_to_junction,
             interceptor_clone,
             self.metrics.clone(),
-            trace_context,
         ));
 
         tokio::spawn(process_invoke_isolate_response_stream(
@@ -208,7 +205,6 @@ async fn process_call_request_stream(
     isolate_junction_channel: Sender<InvokeIsolateRequest>,
     interceptor: Interceptor,
     metrics: PublicApiMetrics,
-    trace_context: HashMap<String, String>,
 ) {
     let Some(mut initial_call_request) = call_request_stream.next().await else {
         let _ = api_to_client_response_tx
@@ -243,17 +239,22 @@ async fn process_call_request_stream(
 
         let metric_ctx = MetricContext { metrics: &metrics, metric_attr: &metric_attr };
 
-        let send_result = send_to_junction(
+        let parent_context = extract_trace_context(&initial_call_request);
+
+        let span = tracing::info_span!("Enforcer.EzPublicApi.StreamCall.handle_first_request");
+        let _ = span.set_parent(parent_context);
+
+        let res = send_to_junction(
             initial_call_request,
             isolate_junction_channel.clone(),
             session_id,
             metric_ctx,
-            trace_context.clone(),
         )
+        .instrument(span)
         .await;
 
-        if send_result.code() != tonic::Code::Ok {
-            let _ = api_to_client_response_tx.send(Err(send_result)).await;
+        if res.code() != tonic::Code::Ok {
+            let _ = api_to_client_response_tx.send(Err(res)).await;
             return;
         }
 
@@ -262,16 +263,23 @@ async fn process_call_request_stream(
             let _timer = metrics.track_message_processing(metric_attr.request());
             let metric_ctx = MetricContext { metrics: &metrics, metric_attr: &metric_attr };
 
-            let send_result = send_to_junction(
+            let parent_context = extract_trace_context(&call_request);
+
+            let span =
+                tracing::info_span!("Enforcer.EzPublicApi.StreamCall.handle_subsequent_request");
+            let _ = span.set_parent(parent_context);
+
+            let res = send_to_junction(
                 call_request,
                 isolate_junction_channel.clone(),
                 session_id,
                 metric_ctx,
-                trace_context.clone(),
             )
+            .instrument(span)
             .await;
-            if send_result.code() != tonic::Code::Ok {
-                let _ = api_to_client_response_tx.send(Err(send_result)).await;
+
+            if res.code() != tonic::Code::Ok {
+                let _ = api_to_client_response_tx.send(Err(res)).await;
                 return;
             }
         }
@@ -316,19 +324,42 @@ fn validate_initial_stream_call_request(initial_request: &CallRequest) -> Status
     }
 }
 
+fn extract_trace_context(call_request: &CallRequest) -> opentelemetry::Context {
+    let trace_headers: HashMap<String, String> = call_request
+        .input_params
+        .as_ref()
+        .map(|input_params| {
+            input_params
+                .request_metadata
+                .iter()
+                .filter_map(|(k, v)| {
+                    if k.eq_ignore_ascii_case("traceparent") || k.eq_ignore_ascii_case("tracestate")
+                    {
+                        std::str::from_utf8(v).ok().map(|s| (k.to_lowercase(), s.to_string()))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    opentelemetry::global::get_text_map_propagator(|propagator| {
+        propagator.extract(&trace_context::HashMapExtractor(&trace_headers))
+    })
+}
+
 async fn send_to_junction(
     call_request: CallRequest,
     isolate_junction_channel: Sender<InvokeIsolateRequest>,
     session_id: u64,
     ctx: MetricContext<'_>,
-    metadata_headers: HashMap<String, String>,
 ) -> Status {
     tracing::trace!("Enforcer.EzPublicApi.send_to_junction");
     if call_request.input_params.is_none() {
         return IsolateStatusCode::MissingField("input_params".to_string()).to_tonic_status();
     }
-    let invoke_isolate_request =
-        create_invoke_isolate_request(call_request, session_id, metadata_headers);
+    let invoke_isolate_request = create_invoke_isolate_request(call_request, session_id);
     log::debug!("Sending invoke isolate request: {:?}", invoke_isolate_request);
 
     let isolate_bridge_send_result = isolate_junction_channel.send(invoke_isolate_request).await;
@@ -343,7 +374,6 @@ async fn send_to_junction(
 fn create_invoke_isolate_request(
     mut call_request: CallRequest,
     session_id: u64,
-    metadata_headers: HashMap<String, String>,
 ) -> InvokeIsolateRequest {
     let request_metadata = if let Some(ref mut input_params) = call_request.input_params {
         std::mem::take(&mut input_params.request_metadata)
@@ -354,6 +384,8 @@ fn create_invoke_isolate_request(
     let (isolate_input_iscope, isolate_input) =
         convert_isolate_input_to_iscope_and_payload(call_request.input_params);
     tracing::trace!("converted isolate input");
+
+    let metadata_headers = get_trace_context();
 
     InvokeIsolateRequest {
         control_plane_metadata: Some(ControlPlaneMetadata {

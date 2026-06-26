@@ -29,7 +29,7 @@ use tonic::Status;
 /// 2.  **Scope Escalation Check**: It ensures that an Isolate does not emit a scope that is
 ///     less strict than its `current_scope`. Doing so would be a security violation.
 /// 3.  **Public API Restriction**: If the request originated from the public API, it prevents
-///     the Isolate from emitting scopes of `UserPrivate` or higher to avoid leaking
+///     the Isolate from emitting scopes of `DomainOwned` or higher to avoid leaking
 ///     sensitive data scopes externally.
 ///
 /// # Arguments
@@ -54,7 +54,7 @@ pub fn replace_and_enforce_invoke_isolate_resp_scopes(
                     current: current_scope.as_str_name().to_string(),
                 });
             }
-            if is_from_public_api && iscope.scope_type >= DataScopeType::UserPrivate.into() {
+            if is_from_public_api && iscope.scope_type >= DataScopeType::DomainOwned.into() {
                 return Err(crate::error::DataScopeError::PublicApiScopeViolation {
                     emitted: DataScopeType::try_from(iscope.scope_type)
                         .unwrap_or(DataScopeType::Unspecified)
@@ -71,7 +71,7 @@ pub fn replace_and_enforce_invoke_isolate_resp_scopes(
 /// Enforces data scope restrictions on `InvokeIsolateResponse` for public API calls.
 ///
 /// This function ensures that an Isolate responding to a public API call does not emit
-/// any data scopes that are `UserPrivate` or higher. This prevents sensitive data from
+/// any data scopes that are `DomainOwned` or higher. This prevents sensitive data from
 /// being leaked through the public API.
 ///
 /// # Arguments
@@ -84,7 +84,7 @@ pub fn enforce_public_api_invoke_isolate_resp_scopes(
 ) -> Result<(), DataScopeError> {
     if let Some(ref mut iscopes) = &mut invoke_isolate_resp.isolate_output_iscope {
         for iscope in iscopes.datagram_iscopes.iter() {
-            if iscope.scope_type >= DataScopeType::UserPrivate.into() {
+            if iscope.scope_type >= DataScopeType::DomainOwned.into() {
                 return Err(crate::error::DataScopeError::PublicApiScopeViolation {
                     emitted: DataScopeType::try_from(iscope.scope_type)
                         .unwrap_or(DataScopeType::Unspecified)
@@ -180,18 +180,18 @@ pub fn get_strictest_scope(iscopes: &EzPayloadIsolateScope) -> DataScopeType {
 ///
 /// # Returns
 /// A `Result` which is `Ok` if validation passes, or an `Error` if a scope violation is detected.
-pub fn validate_external_call(req: &InvokeEzRequest) -> Result<()> {
+pub fn validate_external_call(req: &InvokeEzRequest) -> std::result::Result<(), DataScopeError> {
     if let Some(ref iscopes) = &req.isolate_request_iscope {
         for iscope in iscopes.datagram_iscopes.iter() {
             if iscope.scope_type == DataScopeType::Unspecified.into() {
-                anyhow::bail!("Cannot emit scope Unspecified while being in scope Unspecified");
+                return Err(DataScopeError::InvalidDataScopeType);
             } else if iscope.scope_type >= DataScopeType::UserPrivate.into() {
-                anyhow::bail!(format!(
-                    "Cannot invoke external service while being on {} scope",
-                    DataScopeType::try_from(iscope.scope_type)
+                return Err(DataScopeError::PublicApiScopeViolation {
+                    emitted: DataScopeType::try_from(iscope.scope_type)
                         .unwrap_or(DataScopeType::Unspecified)
                         .as_str_name()
-                ));
+                        .to_string(),
+                });
             }
         }
     }

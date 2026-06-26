@@ -15,8 +15,7 @@
 use container_manager_request::{ContainerManagerRequest, ResetIsolateResponse};
 use container_manager_requester::ContainerManagerRequester;
 use data_scope::request::{
-    AddIsolateRequest, FreezeIsolateScopeRequest, FreezeIsolateScopeResponse, GetIsolateRequest,
-    RemoveIsolateRequest,
+    AddIsolateRequest, FreezeIsolateScopeRequest, GetIsolateRequest, RemoveIsolateRequest,
 };
 use data_scope::requester::DataScopeRequester;
 use data_scope_proto::enforcer::v1::DataScopeType;
@@ -242,8 +241,7 @@ async fn test_freeze_scope_succeeds_for_ready_isolate() -> Result<(), Box<dyn st
     harness.advance_to_state(IsolateState::Ready).await;
 
     let freeze_req = FreezeIsolateScopeRequest { isolate_id: harness.isolate_id };
-    let result: Result<FreezeIsolateScopeResponse, _> =
-        harness.state_manager.freeze_scope(freeze_req).await;
+    let result: Result<(), _> = harness.state_manager.freeze_scope(freeze_req).await;
 
     assert!(result.is_ok());
 

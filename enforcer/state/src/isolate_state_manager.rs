@@ -18,8 +18,8 @@ use container_manager_requester::ContainerManagerRequester;
 use dashmap::DashMap;
 use data_scope::error::DataScopeError;
 use data_scope::request::{
-    AddIsolateRequest, DataScopeManagerResponse, FreezeIsolateScopeRequest,
-    FreezeIsolateScopeResponse, RemoveIsolateRequest, RemoveIsolateResponse,
+    AddIsolateRequest, DataScopeManagerResponse, FreezeIsolateScopeRequest, RemoveIsolateRequest,
+    RemoveIsolateResponse,
 };
 use data_scope::requester::DataScopeRequester;
 use enforcer_proto::enforcer::v1::IsolateState;
@@ -250,7 +250,7 @@ impl IsolateStateManager {
     pub async fn freeze_scope(
         &self,
         freeze_isolate_request: FreezeIsolateScopeRequest,
-    ) -> DataScopeManagerResponse<FreezeIsolateScopeResponse> {
+    ) -> DataScopeManagerResponse<()> {
         let add_isolate_req_option =
             self.unready_isolate_map.remove(&freeze_isolate_request.isolate_id);
 
@@ -258,7 +258,7 @@ impl IsolateStateManager {
             Some((_isolate_id, mut add_isolate_req)) => {
                 add_isolate_req.allowed_data_scope_type = add_isolate_req.current_data_scope_type;
                 self.unready_isolate_map.insert(freeze_isolate_request.isolate_id, add_isolate_req);
-                Ok(FreezeIsolateScopeResponse {})
+                Ok(())
             }
             None => self.data_scope_requester.freeze_isolate_scope(freeze_isolate_request).await,
         }

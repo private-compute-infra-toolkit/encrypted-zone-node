@@ -15,9 +15,9 @@
 use crate::error::DataScopeError;
 
 use crate::request::{
-    AddIsolateRequest, AddIsolateResponse, FreezeIsolateScopeRequest, FreezeIsolateScopeResponse,
-    GetIsolateRequest, GetIsolateResponse, GetIsolateScopeRequest, GetIsolateScopeResponse,
-    RemoveIsolateRequest, RemoveIsolateResponse, ValidateIsolateRequest, ValidateIsolateResponse,
+    AddIsolateRequest, FreezeIsolateScopeRequest, GetIsolateRequest, GetIsolateResponse,
+    GetIsolateScopeRequest, GetIsolateScopeResponse, RemoveIsolateRequest, RemoveIsolateResponse,
+    ValidateIsolateRequest,
 };
 use data_scope_proto::enforcer::v1::DataScopeType;
 use enforcer_proto::enforcer::v1::IsolateState;
@@ -78,7 +78,7 @@ impl DataScopeManager {
     pub async fn add_isolate(
         &self,
         add_isolate_request: AddIsolateRequest,
-    ) -> Result<AddIsolateResponse, DataScopeError> {
+    ) -> Result<(), DataScopeError> {
         let AddIsolateRequest { current_data_scope_type, allowed_data_scope_type, isolate_id } =
             add_isolate_request;
 
@@ -120,7 +120,7 @@ impl DataScopeManager {
             return Err(DataScopeError::DisallowedByManifest);
         }
 
-        Ok(AddIsolateResponse {})
+        Ok(())
     }
 
     /// Removes an Isolate from the [DataScopeManager].
@@ -283,7 +283,7 @@ impl DataScopeManager {
     pub async fn validate_isolate(
         &self,
         validate_isolate_request: ValidateIsolateRequest,
-    ) -> Result<ValidateIsolateResponse, DataScopeError> {
+    ) -> Result<(), DataScopeError> {
         let isolate_id = validate_isolate_request.isolate_id;
         let requested_scope = validate_isolate_request.requested_scope;
         if requested_scope == DataScopeType::Unspecified {
@@ -327,7 +327,7 @@ impl DataScopeManager {
                 strictest_allowed_scope,
             );
         }
-        Ok(ValidateIsolateResponse {})
+        Ok(())
     }
 
     /// Freezes the Isolate's scope at its current level.
@@ -337,7 +337,7 @@ impl DataScopeManager {
     pub async fn freeze_isolate_scope(
         &self,
         req: FreezeIsolateScopeRequest,
-    ) -> Result<FreezeIsolateScopeResponse, DataScopeError> {
+    ) -> Result<(), DataScopeError> {
         let mut state_guard = self.state.lock().await;
         let state = &mut *state_guard;
 
@@ -354,7 +354,7 @@ impl DataScopeManager {
 
         state.isolate_max_scope_index.insert(req.isolate_id, current_data_scope);
         freeze_data_scope_index(scope_index, req.isolate_id, current_data_scope);
-        Ok(FreezeIsolateScopeResponse {})
+        Ok(())
     }
 
     /// Retrieves the current data scope of the specified Isolate.

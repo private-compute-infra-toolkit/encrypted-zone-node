@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## 0.15.0 (2026-06-26)
+
+
+### EZ Policy Enforcer
+
+* **enforcer:** add container_restart_count to EzIsolateHealth
+* **enforcer:** Disable egress of Domain scoped data from PublicApi
+* **enforcer:** Disable tracing when UDS connection fail
+* **enforcer:** Handle context propagation in streams
+* **enforcer:** Inject traceparent from current span in public API
+* **enforcer:** report restart count in HealthManager
+* **enforcer:** Sanitize etc/hosts path components
+* **enforcer:** Shutdown enforcer when metrics UDS connection fail
+
+
+### Features
+
+* add isolate_name to IsolateRuntimeConfig
+* **container:** track and report restart count in ContainerManager
+* match IsolateRuntimeConfig by isolate_name
+* **setup_isolate:** Add operator role and hint
+* **setup_isolate:** Add operator_role as argument
+* **traces:** Enable traces in enforcer
+
 ## 0.14.0 (2026-06-25)
 
 

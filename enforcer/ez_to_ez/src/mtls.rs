@@ -18,7 +18,7 @@ use boring::pkey::{PKey, Private};
 use boring::ssl::{SslAcceptor, SslConnector, SslMethod, SslVerifyMode};
 use boring::x509::{store::X509StoreBuilder, X509};
 use ez_mtls_proto::enforcer::v1::ez_mtls_service_client::EzMtlsServiceClient;
-use ez_mtls_proto::enforcer::v1::{GetCertificateRequest, ReportSniRequest};
+use ez_mtls_proto::enforcer::v1::{GetCertificateRequest, PolicyHint, ReportSniRequest};
 use grpc_connector::GrpcChannelPool;
 use manifest_proto::enforcer::v1::{ez_manifest::ManifestType, EzManifest};
 use sha2::Digest;
@@ -234,7 +234,13 @@ impl EzMtlsManager {
         client: &mut EzMtlsServiceClient<Channel>,
         csr: &[u8],
     ) -> Result<(Vec<X509>, Vec<X509>)> {
-        let req = GetCertificateRequest { csr: csr.to_vec(), evidence: None, endorsements: None };
+        let req = GetCertificateRequest {
+            csr: csr.to_vec(),
+            evidence: None,
+            endorsements: None,
+            operator_role: String::new(),
+            policy_hint: PolicyHint::Unspecified as i32,
+        };
         let resp = client.get_certificate(tonic::Request::new(req)).await.map_err(|e| {
             anyhow::anyhow!("Failed to fetch certificate from EzMtlsService: {}", e)
         })?;

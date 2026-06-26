@@ -25,6 +25,8 @@ rust_library(
         "@crates//:opentelemetry",
         "@crates//:opentelemetry_sdk",
         "@crates//:tonic",
+        "@crates//:tracing",
+        "@crates//:tracing-opentelemetry",
     ],
 )
 

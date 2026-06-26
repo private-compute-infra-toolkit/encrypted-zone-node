@@ -53,6 +53,7 @@ load("//:build_flavors.bzl", "flavors")
             "@crates//:tonic",
             "@crates//:tower",
             "@crates//:tracing",
+            "@crates//:tracing-opentelemetry",
         ],
     )
     for flavor in flavors

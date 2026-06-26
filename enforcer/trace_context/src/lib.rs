@@ -14,10 +14,10 @@
 
 use opentelemetry::propagation::{Extractor, Injector, TextMapPropagator};
 use opentelemetry::trace::TraceContextExt;
-use opentelemetry::Context;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use std::collections::HashMap;
 use tonic::Request;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// A struct that can be used to extract OpenTelemetry context from tonic request metadata.
 pub struct TonicHeaderExtractor<'a>(&'a tonic::metadata::MetadataMap);
@@ -68,14 +68,15 @@ impl<'a> Injector for HashMapInjector<'a> {
 }
 
 /// Injects the current span's context for propagation.
-pub fn get_trace_context<T>(_req: &Request<T>) -> HashMap<String, String> {
+pub fn get_trace_context() -> HashMap<String, String> {
     let mut headers = HashMap::new();
     let propagator = TraceContextPropagator::new();
 
-    // Inject the current context. This assumes that a tracing middleware has already
-    // been used to establish the parent-child relationship between the incoming request
-    // and the current span.
-    let context = Context::current();
+    let mut context = tracing::Span::current().context();
+    if !context.span().span_context().is_valid() {
+        context = opentelemetry::Context::current();
+    }
+
     if context.span().span_context().is_valid() {
         // This will create the `traceparent` and `tracestate` headers
         // with the correct values for the downstream service.

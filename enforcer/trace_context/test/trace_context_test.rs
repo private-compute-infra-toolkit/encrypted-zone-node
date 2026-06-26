@@ -55,8 +55,7 @@ fn test_get_trace_context_with_active_span() {
     let span_context = current_span.span_context();
     assert!(span_context.is_valid());
 
-    let request = Request::new(());
-    let headers = get_trace_context(&request);
+    let headers = get_trace_context();
 
     // A traceparent and tracestate should be injected.
     assert_eq!(headers.len(), 2);
@@ -72,7 +71,6 @@ fn test_get_trace_context_with_active_span() {
 
 #[test]
 fn test_get_trace_context_without_headers() {
-    let request = Request::new(());
-    let context = get_trace_context(&request);
+    let context = get_trace_context();
     assert!(context.is_empty());
 }

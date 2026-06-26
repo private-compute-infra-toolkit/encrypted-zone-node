@@ -97,6 +97,7 @@ pub struct ContainerManager<ContainerT: Container> {
     interceptor: Interceptor,
     otel_traces_endpoint: Option<String>,
     run_isolate_as_unprivileged: bool,
+    operator_role: String,
 }
 
 #[derive(Debug)]
@@ -120,6 +121,7 @@ pub struct ContainerManagerArgs {
     pub shm_num_slots: u64,
     pub shm_slot_size: u64,
     pub shm_payload_threshold: u64,
+    pub operator_role: String,
 }
 
 struct ProcessBinaryManifestArgs {
@@ -141,6 +143,7 @@ struct IsolateContainer<ContainerT: Container> {
     pub _root_dir: TempDir,
     // dir where all mounted data related to Container will be stored
     pub _sharing_dir: TempDir,
+    pub restart_count: u32,
 }
 
 /// Data required to initiate a new container.
@@ -173,6 +176,7 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             interceptor: args.interceptor,
             otel_traces_endpoint: args.otel_traces_endpoint,
             run_isolate_as_unprivileged: args.run_isolate_as_unprivileged,
+            operator_role: args.operator_role.clone(),
         };
 
         let ez_manifest =
@@ -274,7 +278,10 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             .context("Failed to process scope of binary")?;
 
         let config = args.isolate_runtime_configs.configs.iter().find(|config| {
-            config.publisher_id == args.publisher_id
+            let isolate_name_matches =
+                config.isolate_name.is_empty() || config.isolate_name == args.isolate_name;
+            isolate_name_matches
+                && config.publisher_id == args.publisher_id
                 && config.binary_filename == args.binary_manifest.binary_filename
         });
         let command_line_args = if let Some(config) = config {
@@ -343,6 +350,7 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             )?;
             env_vars.push(format!("EZ_BACKEND_DEPENDENCIES={}", serialized_deps));
         }
+        env_vars.push(format!("EZ_OPERATOR_ROLE={}", self.operator_role));
         let package_filename = args.package_filename.clone();
         let shared_root =
             tokio::task::spawn_blocking(move || utils::unpack_file_system(&package_filename))
@@ -375,11 +383,14 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             );
         } else {
             for _ in 0..number_of_isolates {
-                self.add_new_isolate(AddIsolateRequest {
-                    isolate_id: IsolateId::new(binary_services_index),
-                    current_data_scope_type: DataScopeType::Public,
-                    allowed_data_scope_type: strictest_scope,
-                })
+                self.add_new_isolate(
+                    AddIsolateRequest {
+                        isolate_id: IsolateId::new(binary_services_index),
+                        current_data_scope_type: DataScopeType::Public,
+                        allowed_data_scope_type: strictest_scope,
+                    },
+                    0,
+                )
                 .await?;
             }
         }
@@ -590,7 +601,7 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
         }
     }
 
-    async fn add_new_isolate(&self, request: AddIsolateRequest) -> Result<()> {
+    async fn add_new_isolate(&self, request: AddIsolateRequest, restart_count: u32) -> Result<()> {
         let binary_services_index = request.isolate_id.get_binary_services_index();
         let container_startup_args_ref = self
             .container_startup_args_map
@@ -691,7 +702,12 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
 
         self.isolate_container_map.insert(
             isolate_id,
-            IsolateContainer { container, _root_dir: root_dir, _sharing_dir: sharing_dir },
+            IsolateContainer {
+                container,
+                _root_dir: root_dir,
+                _sharing_dir: sharing_dir,
+                restart_count,
+            },
         );
         self.add_isolate_to_state_mngr(isolate_id, request.allowed_data_scope_type).await?;
         self.add_isolate_to_junction(isolate_id, ez_isolate_bridge_enforcer_side_uds_path)
@@ -731,6 +747,7 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             .isolate_container_map
             .remove(&reset_isolate_req.isolate_id)
             .context("IsolateManager received unrecognized IsolateId")?;
+        let restart_count = isolate_container.restart_count;
         if let Err(e) = isolate_container.container.stop().await {
             log::warn!(
                 "Failed to stop container during reset for isolate {:?}: {:?}. Proceeding with cleanup and relaunch.",
@@ -756,11 +773,14 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
         // Since the container has stopped, the Isolate's client is dead and won't receive this
         // response in a real scenario. However, Container Manager tests use this response to
         // synchronize and wait for the new container and its Isolate EZ Server to start.
-        self.add_new_isolate(AddIsolateRequest {
-            isolate_id: IsolateId::new(binary_services_index),
-            current_data_scope_type: DataScopeType::Public,
-            allowed_data_scope_type: container_startup_args.strictest_scope,
-        })
+        self.add_new_isolate(
+            AddIsolateRequest {
+                isolate_id: IsolateId::new(binary_services_index),
+                current_data_scope_type: DataScopeType::Public,
+                allowed_data_scope_type: container_startup_args.strictest_scope,
+            },
+            restart_count + 1,
+        )
         .await?;
         Ok(ResetIsolateResponse {})
     }
@@ -875,6 +895,7 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             .isolate_container_map
             .get(&req.isolate_id)
             .context("Isolate not recognized while getting run status")?;
+        let restart_count = isolate_container_ref.value().restart_count;
         let status = isolate_container_ref.value().container.get_run_status()?;
         let memory_stats = isolate_container_ref.value().container.get_memory_stats()?;
         let (rss_bytes, peak_rss_bytes, virt_bytes, shared_bytes, data_bytes) = memory_stats
@@ -895,6 +916,7 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             virt_bytes,
             shared_bytes,
             data_bytes,
+            restart_count,
         })
     }
 }
@@ -920,7 +942,7 @@ fn get_file_mount_enforcer_path(enforcer_file_name: &str) -> String {
 }
 
 fn get_etc_hosts_path(publisher_id: &str, binary_filename: &str) -> PathBuf {
-    let base_path = match env::var("TEST_TMPDIR") {
+    let mut base_path = match env::var("TEST_TMPDIR") {
         Ok(tmpdir) => {
             println!("Under Bazel test, use TEST_TMPDIR: {}", tmpdir);
             PathBuf::from(tmpdir)
@@ -928,12 +950,13 @@ fn get_etc_hosts_path(publisher_id: &str, binary_filename: &str) -> PathBuf {
         Err(_) => PathBuf::from("/tmp"),
     };
 
-    let sanitized_publisher_id = publisher_id.replace('/', "_");
-    let sanitized_binary_filename = binary_filename.replace('/', "_");
-    base_path.join(PathBuf::from(format!(
+    let sanitized_publisher_id = sanitize_path_component(publisher_id);
+    let sanitized_binary_filename = sanitize_path_component(binary_filename);
+    base_path.push(format!(
         "isolate_etc_hosts/{}_{}/etc/hosts",
         sanitized_publisher_id, sanitized_binary_filename
-    )))
+    ));
+    base_path
 }
 
 fn extract_unix_path(endpoint: &str) -> Option<PathBuf> {
@@ -943,4 +966,18 @@ fn extract_unix_path(endpoint: &str) -> Option<PathBuf> {
         }
         PathBuf::from(path)
     })
+}
+
+pub fn sanitize_path_component(component: &str) -> String {
+    component
+        .chars()
+        .map(|c| {
+            // Allow alphanumeric and a few safe separators
+            if c.is_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }

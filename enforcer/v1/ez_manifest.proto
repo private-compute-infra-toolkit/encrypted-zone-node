@@ -205,6 +205,8 @@ message IsolateRuntimeConfig {
   repeated string environment_variables = 4;
   // Override /etc/hosts file inside the container for routing.
   string etc_hosts = 5;
+  // Disambiguate when multiple isolates share the same binary
+  string isolate_name = 6;
 }
 
 message IsolateRuntimeConfigs {

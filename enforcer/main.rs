@@ -75,7 +75,7 @@ struct EnforcerInputs {
     #[arg(long)]
     otel_unsafe_endpoint: Option<String>,
     /// OTel traces endpoint
-    #[arg(long)]
+    #[arg(long, default_value = "unix:///tmp/otlp_dapper_proxy.sock")]
     otel_traces_endpoint: Option<String>,
     /// Disable metrics filtering for debugging
     #[arg(long, default_value_t = false)]
@@ -201,6 +201,13 @@ struct EnforcerInputs {
         help = "Payload threshold (bytes), below which messages will be sent via standard gRPC instead of SHM"
     )]
     shm_payload_threshold: u64,
+    // TODO: Remove this argument once it's completely deprecated.
+    #[arg(
+        long,
+        default_value = "",
+        help = "Operator role to be provided to all isolates as EZ_OPERATOR_ROLE. Note: This argument will be deprecated soon."
+    )]
+    operator_role: String,
 }
 
 enum Endpoint {
@@ -219,7 +226,11 @@ fn main() -> anyhow::Result<()> {
             enforcer_inputs.otel_safe_endpoint.clone(),
             enforcer_inputs.otel_unsafe_endpoint.clone(),
         )
-        .await?;
+        .await
+        .map_err(|e| {
+            log::error!("FATAL: Failed to initialize OTel metrics: {:?}", e);
+            e
+        })?;
 
         let _otel_traces = traces::setup_telemetry(
             traces::ENFORCER_SERVICE_NAME,
@@ -440,6 +451,7 @@ fn main() -> anyhow::Result<()> {
             shm_num_slots: enforcer_inputs.shm_num_slots,
             shm_slot_size: enforcer_inputs.shm_slot_size,
             shm_payload_threshold: enforcer_inputs.shm_payload_threshold,
+            operator_role: enforcer_inputs.operator_role.clone(),
         };
 
         let mut container_manager =

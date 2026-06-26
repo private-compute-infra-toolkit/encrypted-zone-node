@@ -24,6 +24,7 @@ rust_library(
         "//enforcer/grpc_connector",
         "@crates//:anyhow",
         "@crates//:console-subscriber",
+        "@crates//:log",
         "@crates//:opentelemetry",
         "@crates//:opentelemetry-otlp",
         "@crates//:opentelemetry_sdk",

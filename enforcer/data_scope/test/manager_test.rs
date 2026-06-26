@@ -64,7 +64,7 @@ async fn test_remove_isolate() -> Result<(), Box<dyn std::error::Error>> {
     for is_ratified in [true, false] {
         let add_isolate_request = create_add_isolate_request(is_ratified);
         let isolate_id = add_isolate_request.isolate_id;
-        let _ = data_scope_requester.add_isolate(add_isolate_request).await?;
+        data_scope_requester.add_isolate(add_isolate_request).await?;
 
         let remove_isolate_request = create_remove_isolate_request(isolate_id);
         let response = data_scope_requester.remove_isolate(remove_isolate_request).await?;
@@ -158,10 +158,10 @@ async fn test_freeze_isolate() -> Result<(), Box<dyn std::error::Error>> {
 
     let add_isolate_request: AddIsolateRequest = create_add_isolate_request(false);
     let isolate_id = add_isolate_request.isolate_id;
-    let _ = data_scope_requester.add_isolate(add_isolate_request).await?;
+    data_scope_requester.add_isolate(add_isolate_request).await?;
 
     let freeze_isolate_request = create_freeze_isolate_request(isolate_id);
-    let _ = data_scope_requester.freeze_isolate_scope(freeze_isolate_request).await?;
+    data_scope_requester.freeze_isolate_scope(freeze_isolate_request).await?;
     Ok(())
 }
 
@@ -275,7 +275,7 @@ async fn test_validate_isolate_scope_ratified() -> Result<(), Box<dyn std::error
     assert!(data_scope_requester.add_isolate(add_isolate_request).await.is_ok());
 
     let validate_request = create_validate_isolate_request(isolate_id, DataScopeType::DomainOwned);
-    let _ = data_scope_requester.validate_isolate_scope(validate_request).await?;
+    data_scope_requester.validate_isolate_scope(validate_request).await?;
 
     Ok(())
 }
@@ -665,7 +665,7 @@ async fn test_parallel_validate_isolate_requests() -> Result<(), Box<dyn std::er
     }
 
     for task in tasks {
-        let _ = task.await??;
+        task.await??;
         // All should succeed as UserPrivate is allowed
     }
     Ok(())

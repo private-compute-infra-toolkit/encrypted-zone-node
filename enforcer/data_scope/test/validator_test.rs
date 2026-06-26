@@ -16,6 +16,7 @@ use data_scope::data_scope_validator::{
     get_strictest_scope, replace_and_enforce_invoke_isolate_resp_scopes,
     replace_and_validate_invoke_ez_request_scopes, validate_external_call,
 };
+use data_scope::error::DataScopeError;
 use data_scope_proto::enforcer::v1::DataScopeType;
 use enforcer_proto::enforcer::v1::{
     EzPayloadIsolateScope, InvokeEzRequest, InvokeIsolateResponse, IsolateDataScope,
@@ -78,7 +79,11 @@ async fn test_replace_and_enforce_invoke_isolate_resp_scopes() {
         DataScopeType::UserPrivate,
         false,
     );
-    assert!(result.is_err());
+    assert!(matches!(
+        result,
+        Err(DataScopeError::PayloadExceedsCurrentDataScope { emitted, current })
+        if emitted == "DATA_SCOPE_TYPE_PUBLIC" && current == "DATA_SCOPE_TYPE_USER_PRIVATE"
+    ));
 
     // 3. Public API Restriction: UserPrivate -> Error if from public API
     let mut resp = InvokeIsolateResponse {
@@ -95,7 +100,32 @@ async fn test_replace_and_enforce_invoke_isolate_resp_scopes() {
         DataScopeType::UserPrivate,
         true, // is_from_public_api
     );
-    assert!(result.is_err());
+    assert!(matches!(
+        result,
+        Err(DataScopeError::PublicApiScopeViolation { emitted })
+        if emitted == "DATA_SCOPE_TYPE_USER_PRIVATE"
+    ));
+
+    // 4. Public API Restriction: DomainOwned -> Error if from public API
+    let mut resp = InvokeIsolateResponse {
+        isolate_output_iscope: Some(EzPayloadIsolateScope {
+            datagram_iscopes: vec![IsolateDataScope {
+                scope_type: DataScopeType::DomainOwned.into(),
+                ..Default::default()
+            }],
+        }),
+        ..Default::default()
+    };
+    let result = replace_and_enforce_invoke_isolate_resp_scopes(
+        &mut resp,
+        DataScopeType::DomainOwned,
+        true, // is_from_public_api
+    );
+    assert!(matches!(
+        result,
+        Err(DataScopeError::PublicApiScopeViolation { emitted })
+        if emitted == "DATA_SCOPE_TYPE_DOMAIN_OWNED"
+    ));
 }
 
 #[tokio::test]
@@ -144,9 +174,9 @@ async fn test_validate_external_call() {
         ..Default::default()
     };
     let result = validate_external_call(&req);
-    assert!(result.is_err());
+    assert!(matches!(result, Err(DataScopeError::InvalidDataScopeType)));
 
-    // 2. UserPrivate Scope -> Error
+    // 2. UserPrivate Scope (>= UserPrivate) -> Error
     let req = InvokeEzRequest {
         isolate_request_iscope: Some(EzPayloadIsolateScope {
             datagram_iscopes: vec![IsolateDataScope {
@@ -157,13 +187,30 @@ async fn test_validate_external_call() {
         ..Default::default()
     };
     let result = validate_external_call(&req);
-    assert!(result.is_err());
+    assert!(matches!(
+        result,
+        Err(DataScopeError::PublicApiScopeViolation { emitted })
+        if emitted == "DATA_SCOPE_TYPE_USER_PRIVATE"
+    ));
 
     // 3. Public Scope -> OK
     let req = InvokeEzRequest {
         isolate_request_iscope: Some(EzPayloadIsolateScope {
             datagram_iscopes: vec![IsolateDataScope {
                 scope_type: DataScopeType::Public.into(),
+                ..Default::default()
+            }],
+        }),
+        ..Default::default()
+    };
+    let result = validate_external_call(&req);
+    assert!(result.is_ok());
+
+    // 4. DomainOwned Scope -> OK
+    let req = InvokeEzRequest {
+        isolate_request_iscope: Some(EzPayloadIsolateScope {
+            datagram_iscopes: vec![IsolateDataScope {
+                scope_type: DataScopeType::DomainOwned.into(),
                 ..Default::default()
             }],
         }),

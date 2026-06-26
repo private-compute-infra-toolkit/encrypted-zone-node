@@ -102,6 +102,7 @@ async fn test_health_manager() {
                         virt_bytes,
                         shared_bytes,
                         data_bytes,
+                        restart_count: if status == ContainerRunStatus::Running { 0 } else { 3 },
                     }));
                 }
                 ContainerManagerRequest::ResetIsolateRequest { req, resp } => {
@@ -139,6 +140,7 @@ async fn test_health_manager() {
             Some(500_000_000),
             Some(50_000_000),
             Some(10_000_000),
+            Some(0),
         ),
         (
             isolate_id_2,
@@ -152,6 +154,7 @@ async fn test_health_manager() {
             None,
             None,
             None,
+            Some(3),
         ),
         (
             isolate_id_3,
@@ -165,6 +168,7 @@ async fn test_health_manager() {
             None,
             None,
             None,
+            Some(3),
         ),
         (
             isolate_id_4,
@@ -178,6 +182,7 @@ async fn test_health_manager() {
             None,
             None,
             None,
+            Some(3),
         ),
     ];
 
@@ -194,6 +199,7 @@ async fn test_health_manager() {
         virt_memory,
         shared_memory,
         data_memory,
+        restart_count,
     ) in &expected_isolates
     {
         let isolate = isolates_by_id.get(&id.to_string()).unwrap();
@@ -207,6 +213,7 @@ async fn test_health_manager() {
         assert_eq!(isolate.container_virt_memory_bytes, *virt_memory);
         assert_eq!(isolate.container_shared_memory_bytes, *shared_memory);
         assert_eq!(isolate.container_data_memory_bytes, *data_memory);
+        assert_eq!(isolate.container_restart_count, *restart_count);
         if *reset_requested {
             assert_eq!(counts.get(id), Some(&1));
         } else {
@@ -272,6 +279,7 @@ async fn test_health_manager_exposes_services() {
                     virt_bytes: None,
                     shared_bytes: None,
                     data_bytes: None,
+                    restart_count: 0,
                 }));
             }
         }
@@ -319,6 +327,7 @@ async fn test_health_report_includes_current_scope() {
                     virt_bytes: None,
                     shared_bytes: None,
                     data_bytes: None,
+                    restart_count: 0,
                 }));
             }
         }

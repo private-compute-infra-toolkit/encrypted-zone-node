@@ -14,10 +14,8 @@
 
 use crate::error::DataScopeError;
 use crate::request::{
-    AddBackendDependenciesRequest, AddBackendDependenciesResponse, AddManifestScopeRequest,
-    AddManifestScopeResponse, ValidateBackendDependencyRequest, ValidateBackendDependencyResponse,
-    ValidateManifestInputScopeRequest, ValidateManifestInputScopeResponse,
-    ValidateManifestOutputScopeRequest, ValidateManifestOutputScopeResponse,
+    AddBackendDependenciesRequest, AddManifestScopeRequest, ValidateBackendDependencyRequest,
+    ValidateManifestInputScopeRequest, ValidateManifestOutputScopeRequest,
 };
 use data_scope_proto::enforcer::v1::DataScopeType;
 use isolate_info::{BinaryServicesIndex, IsolateServiceIndex};
@@ -48,10 +46,7 @@ impl ManifestValidator {
     /// This information is extracted from the manifest and used for subsequent validation.
     /// Returns [DataScopeError::DuplicateBinaryServiceIndex] if the binary is already registered.
     /// Returns [DataScopeError::InvalidDataScopeType] if either scope is `Unspecified`.
-    pub async fn add_scope_info(
-        &self,
-        req: AddManifestScopeRequest,
-    ) -> Result<AddManifestScopeResponse, DataScopeError> {
+    pub async fn add_scope_info(&self, req: AddManifestScopeRequest) -> Result<(), DataScopeError> {
         let mut scope_info = self.scope_info.write().await;
         if let Entry::Vacant(entry) = scope_info.entry(req.binary_services_index) {
             if req.max_input_scope == DataScopeType::Unspecified
@@ -67,7 +62,7 @@ impl ManifestValidator {
             return Err(DataScopeError::DuplicateBinaryServiceIndex);
         }
 
-        Ok(AddManifestScopeResponse {})
+        Ok(())
     }
 
     /// Registers a backend dependency for a given binary.
@@ -76,14 +71,14 @@ impl ManifestValidator {
     pub async fn add_backend_dependencies(
         &self,
         req: AddBackendDependenciesRequest,
-    ) -> Result<AddBackendDependenciesResponse, DataScopeError> {
+    ) -> Result<(), DataScopeError> {
         let mut backend_dependencies = self.backend_dependencies.write().await;
         backend_dependencies
             .entry(req.binary_services_index)
             .or_insert_with(HashSet::new)
             .insert(req.dependency_index);
 
-        Ok(AddBackendDependenciesResponse {})
+        Ok(())
     }
 
     /// Validates if a binary is allowed to call a specific backend dependency.
@@ -93,11 +88,11 @@ impl ManifestValidator {
     pub async fn validate_backend_dependency(
         &self,
         req: ValidateBackendDependencyRequest,
-    ) -> Result<ValidateBackendDependencyResponse, DataScopeError> {
+    ) -> Result<(), DataScopeError> {
         let backend_dependencies = self.backend_dependencies.read().await;
         if let Some(dependencies) = backend_dependencies.get(&req.binary_services_index) {
             if dependencies.contains(&req.destination_isolate_service) {
-                return Ok(ValidateBackendDependencyResponse {});
+                return Ok(());
             } else {
                 return Err(DataScopeError::BackendDependencyNotAllowed);
             }
@@ -113,13 +108,13 @@ impl ManifestValidator {
     pub async fn validate_input_scope(
         &self,
         req: ValidateManifestInputScopeRequest,
-    ) -> Result<ValidateManifestInputScopeResponse, DataScopeError> {
+    ) -> Result<(), DataScopeError> {
         let scope_info = self.scope_info.read().await;
         if let Some(manifest_scope_info) = scope_info.get(&req.binary_services_index) {
             if req.requested_scope != DataScopeType::Unspecified
                 && req.requested_scope <= manifest_scope_info.max_input_scope
             {
-                return Ok(ValidateManifestInputScopeResponse {});
+                return Ok(());
             } else {
                 return Err(DataScopeError::DisallowedByManifest);
             }
@@ -135,13 +130,13 @@ impl ManifestValidator {
     pub async fn validate_output_scope(
         &self,
         req: ValidateManifestOutputScopeRequest,
-    ) -> Result<ValidateManifestOutputScopeResponse, DataScopeError> {
+    ) -> Result<(), DataScopeError> {
         let scope_info = self.scope_info.read().await;
         if let Some(manifest_scope_info) = scope_info.get(&req.binary_services_index) {
             if req.emitted_scope != DataScopeType::Unspecified
                 && req.emitted_scope <= manifest_scope_info.max_output_scope
             {
-                return Ok(ValidateManifestOutputScopeResponse {});
+                return Ok(());
             } else {
                 return Err(DataScopeError::DisallowedByManifest);
             }

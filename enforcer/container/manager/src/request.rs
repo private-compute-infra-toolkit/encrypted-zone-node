@@ -118,4 +118,5 @@ pub struct GetRunStatusResponse {
     pub virt_bytes: Option<u64>,
     pub shared_bytes: Option<u64>,
     pub data_bytes: Option<u64>,
+    pub restart_count: u32,
 }
