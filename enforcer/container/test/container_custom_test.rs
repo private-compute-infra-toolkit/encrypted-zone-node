@@ -70,6 +70,7 @@ fn default_container_opts(operation: &str, mount_src: Option<PathBuf>) -> Contai
                     source: m,
                     destination: PathBuf::from("/ez"),
                     apply_restrictive_flags: false,
+                    optional: false,
                 }]
             }
             None => vec![],
@@ -206,12 +207,14 @@ async fn container_fs_mounts() {
                 source: uds_dir.path().to_path_buf(),
                 destination: PathBuf::from("/ez"),
                 apply_restrictive_flags: false,
+                optional: false,
             },
             // Mount a file inside a directory that does not exist.
             MountOptions {
                 source: PathBuf::from("/dev/random"),
                 destination: PathBuf::from("/a/b"),
                 apply_restrictive_flags: false,
+                optional: false,
             },
         ],
         ..default_container_opts("inspect-fs-root", None)
@@ -402,6 +405,7 @@ async fn container_prevents_symlink_file_truncation() {
             source: PathBuf::from("/dev/null"),
             destination: PathBuf::from("/malicious_link"),
             apply_restrictive_flags: false,
+            optional: false,
         }],
         ..default_container_opts("sleep", None)
     };
@@ -439,6 +443,7 @@ async fn container_prevents_intermediate_symlink_traversal() {
             source: PathBuf::from("/dev/null"),
             destination: PathBuf::from("/malicious_dir/created_by_container"),
             apply_restrictive_flags: false,
+            optional: false,
         }],
         ..default_container_opts("sleep", None)
     };

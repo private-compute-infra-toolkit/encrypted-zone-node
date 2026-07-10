@@ -42,7 +42,7 @@ use tokio::sync::mpsc::Sender;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status, Streaming};
-use trace_context::get_trace_context;
+use traces::context::{get_trace_context, TonicHeaderExtractor};
 use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
@@ -90,8 +90,13 @@ impl EzPublicApiService {
 impl EzPublicApi for EzPublicApiService {
     type StreamCallStream = ReceiverStream<Result<CallResponse, Status>>;
 
-    #[tracing::instrument(name = "Enforcer.EzPublicApi.call")]
+    #[tracing::instrument(name = "EzPublicApi.dispatch_unary")]
     async fn call(&self, request: Request<CallRequest>) -> CallResponseResult {
+        let parent_context = opentelemetry::global::get_text_map_propagator(|propagator| {
+            propagator.extract(&TonicHeaderExtractor::new(&request))
+        });
+        let _ = tracing::Span::current().set_parent(parent_context);
+
         let timeout = try_parse_grpc_timeout(request.metadata()).unwrap_or(None);
         tracing::debug!("after parsing timeout");
 
@@ -145,7 +150,7 @@ impl EzPublicApi for EzPublicApiService {
         }
     }
 
-    #[tracing::instrument(name = "Enforcer.EzPublicApi.stream_call")]
+    #[tracing::instrument(name = "Enforcer.EzPublicApi/StreamCall")]
     async fn stream_call(
         &self,
         request: Request<Streaming<CallRequest>>,
@@ -189,7 +194,7 @@ impl EzPublicApi for EzPublicApiService {
         Ok(Response::new(ReceiverStream::new(api_to_client_response_rx)))
     }
 
-    #[tracing::instrument(name = "Enforcer.EzPublicApi.get_health_report")]
+    #[tracing::instrument(name = "Enforcer.EzPublicApi/GetHealthReport")]
     async fn get_health_report(
         &self,
         _request: Request<GetHealthReportRequest>,
@@ -241,7 +246,7 @@ async fn process_call_request_stream(
 
         let parent_context = extract_trace_context(&initial_call_request);
 
-        let span = tracing::info_span!("Enforcer.EzPublicApi.StreamCall.handle_first_request");
+        let span = tracing::info_span!("Enforcer.EzPublicApi/StreamCall/HandleFirstRequest");
         let _ = span.set_parent(parent_context);
 
         let res = send_to_junction(
@@ -266,7 +271,7 @@ async fn process_call_request_stream(
             let parent_context = extract_trace_context(&call_request);
 
             let span =
-                tracing::info_span!("Enforcer.EzPublicApi.StreamCall.handle_subsequent_request");
+                tracing::info_span!("Enforcer.EzPublicApi/StreamCall/HandleSubsequentRequest");
             let _ = span.set_parent(parent_context);
 
             let res = send_to_junction(
@@ -345,7 +350,7 @@ fn extract_trace_context(call_request: &CallRequest) -> opentelemetry::Context {
         .unwrap_or_default();
 
     opentelemetry::global::get_text_map_propagator(|propagator| {
-        propagator.extract(&trace_context::HashMapExtractor(&trace_headers))
+        propagator.extract(&traces::context::HashMapExtractor(&trace_headers))
     })
 }
 
@@ -370,16 +375,19 @@ async fn send_to_junction(
     Status::ok("call request sent")
 }
 
-#[tracing::instrument(name = "Enforcer.EzPublicApi.create_invoke_isolate_request")]
 fn create_invoke_isolate_request(
     mut call_request: CallRequest,
     session_id: u64,
 ) -> InvokeIsolateRequest {
-    let request_metadata = if let Some(ref mut input_params) = call_request.input_params {
-        std::mem::take(&mut input_params.request_metadata)
-    } else {
-        HashMap::new()
-    };
+    let (request_metadata, extensions) =
+        if let Some(ref mut input_params) = call_request.input_params {
+            (
+                std::mem::take(&mut input_params.request_metadata),
+                std::mem::take(&mut input_params.request_extensions),
+            )
+        } else {
+            (HashMap::new(), Vec::new())
+        };
 
     let (isolate_input_iscope, isolate_input) =
         convert_isolate_input_to_iscope_and_payload(call_request.input_params);
@@ -409,6 +417,7 @@ fn create_invoke_isolate_request(
             fileshare_handles: Vec::new(),
             metadata_headers,
             request_metadata,
+            extensions,
         }),
         isolate_input_iscope,
         isolate_input: isolate_input.map(|data| EzHybridPayload {
@@ -421,6 +430,8 @@ fn create_call_response(
     invoke_isolate_response: InvokeIsolateResponse,
     session_metadata: Option<SessionMetadata>,
 ) -> CallResponse {
+    let extensions = invoke_isolate_response.response_extensions;
+
     let (public_output, encrypted_output) = convert_isolate_output_to_public_and_encrypted(
         invoke_isolate_response.isolate_output_iscope,
         invoke_isolate_response.isolate_output,
@@ -431,6 +442,7 @@ fn create_call_response(
         public_output,
         encrypted_output,
         response_metadata: HashMap::new(),
+        response_extensions: extensions,
     }
 }
 

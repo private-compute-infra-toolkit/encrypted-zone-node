@@ -35,7 +35,7 @@ load("//:build_flavors.bzl", "flavors")
             "//enforcer/junction",
             "//enforcer/junction:junction_trait",
             "//enforcer/metrics",
-            "//enforcer/trace_context",
+            "//enforcer/traces",
             "//enforcer/v1:data_scope_rust",
             "//enforcer/v1:enforcer_rust",
             "//enforcer/v1:ez_service_rust",

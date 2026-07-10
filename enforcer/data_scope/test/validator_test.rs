@@ -13,13 +13,17 @@
 // limitations under the License.
 
 use data_scope::data_scope_validator::{
-    get_strictest_scope, replace_and_enforce_invoke_isolate_resp_scopes,
-    replace_and_validate_invoke_ez_request_scopes, validate_external_call,
+    enforce_public_api_invoke_isolate_resp_scopes, get_strictest_scope,
+    replace_and_enforce_invoke_isolate_resp_scopes, replace_and_validate_invoke_ez_request_scopes,
+    validate_external_call,
 };
 use data_scope::error::DataScopeError;
 use data_scope_proto::enforcer::v1::DataScopeType;
 use enforcer_proto::enforcer::v1::{
     EzPayloadIsolateScope, InvokeEzRequest, InvokeIsolateResponse, IsolateDataScope,
+};
+use payload_proto::enforcer::v1::{
+    ez_hybrid_payload::DeliveryMethod, EzHybridPayload, EzPayloadData,
 };
 
 #[tokio::test]
@@ -218,4 +222,68 @@ async fn test_validate_external_call() {
     };
     let result = validate_external_call(&req);
     assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn test_internal_validation_missing_scopes_bypass() {
+    let mut req = InvokeEzRequest {
+        isolate_request_iscope: None, // Missing scopes completely!
+        isolate_request_payload: Some(EzHybridPayload {
+            delivery_method: Some(DeliveryMethod::InlineData(EzPayloadData {
+                datagrams: vec![vec![1, 2, 3]],
+            })),
+        }),
+        ..Default::default()
+    };
+
+    // Requests without datascope are blocked.
+    let status =
+        replace_and_validate_invoke_ez_request_scopes(&mut req, DataScopeType::UserPrivate);
+    assert_eq!(status.code(), tonic::Code::PermissionDenied);
+}
+
+#[tokio::test]
+async fn test_external_validation_missing_scopes_bypass() {
+    let req = InvokeEzRequest {
+        isolate_request_iscope: None, // Missing scopes completely!
+        isolate_request_payload: Some(EzHybridPayload {
+            delivery_method: Some(DeliveryMethod::InlineData(EzPayloadData {
+                datagrams: vec![vec![1, 2, 3]],
+            })),
+        }),
+        ..Default::default()
+    };
+    // Requests without datascope are not allowed to exit to an external
+    // service.
+    let result = validate_external_call(&req);
+    assert!(matches!(result, Err(DataScopeError::InvalidDataScopeType)));
+}
+
+#[tokio::test]
+async fn test_internal_response_validation_missing_scopes_bypass() {
+    let mut resp = InvokeIsolateResponse {
+        isolate_output: None,
+        isolate_output_iscope: None,
+        response_extensions: vec![1, 2, 3],
+        ..Default::default()
+    };
+
+    // block requests that have no payload and scopes but extensions.
+    let result =
+        replace_and_enforce_invoke_isolate_resp_scopes(&mut resp, DataScopeType::UserPrivate, true);
+    assert!(matches!(result, Err(DataScopeError::InvalidDataScopeType)));
+}
+
+#[tokio::test]
+async fn test_public_api_response_validation_missing_scopes_bypass() {
+    let mut resp = InvokeIsolateResponse {
+        isolate_output: None,
+        isolate_output_iscope: None,
+        response_extensions: vec![1, 2, 3],
+        ..Default::default()
+    };
+
+    // block requests that have no payload and scopes but extensions.
+    let result = enforce_public_api_invoke_isolate_resp_scopes(&mut resp);
+    assert!(matches!(result, Err(DataScopeError::InvalidDataScopeType)));
 }

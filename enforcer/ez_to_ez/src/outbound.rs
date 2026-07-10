@@ -300,5 +300,6 @@ fn ez_call_response_to_invoke_ez_response(
                 delivery_method: Some(DeliveryMethod::InlineData(data)),
             }
         }),
+        response_extensions: response.response_extensions,
     })
 }

@@ -61,6 +61,7 @@ rust_library(
         "//enforcer/junction:junction_trait",
         "//enforcer/metrics",
         "//enforcer/state:state_manager",
+        "//enforcer/traces",
         "//enforcer/v1:data_scope_rust",
         "//enforcer/v1:enforcer_rust",
         "//enforcer/v1:payload_rust",
@@ -73,6 +74,8 @@ rust_library(
         "@crates//:tokio",
         "@crates//:tokio-stream",
         "@crates//:tonic",
+        "@crates//:tracing",
+        "@crates//:tracing-opentelemetry",
     ],
 )
 

@@ -67,9 +67,8 @@ impl<'a> Injector for HashMapInjector<'a> {
     }
 }
 
-/// Injects the current span's context for propagation.
-pub fn get_trace_context() -> HashMap<String, String> {
-    let mut headers = HashMap::new();
+/// Injects the current span's context directly into the provided trace headers map.
+pub fn inject_trace_context(headers: &mut HashMap<String, String>) {
     let propagator = TraceContextPropagator::new();
 
     let mut context = tracing::Span::current().context();
@@ -80,11 +79,29 @@ pub fn get_trace_context() -> HashMap<String, String> {
     if context.span().span_context().is_valid() {
         // This will create the `traceparent` and `tracestate` headers
         // with the correct values for the downstream service.
-        propagator.inject_context(&context, &mut HashMapInjector(&mut headers));
+        propagator.inject_context(&context, &mut HashMapInjector(headers));
         log::info!("Injected trace context for propagation: {:?}", headers);
     } else {
         log::debug!("No valid trace context to propagate.");
     }
+}
 
+/// Injects the current span's context for propagation.
+pub fn get_trace_context() -> HashMap<String, String> {
+    let mut headers = HashMap::new();
+    inject_trace_context(&mut headers);
     headers
+}
+
+/// Extracts the trace parent context from a trace headers map.
+///
+/// If no map is provided (`None`) or no valid trace context is found in the map,
+/// returns the current context (`opentelemetry::Context::current()`).
+pub fn extract_parent_context(headers: Option<&HashMap<String, String>>) -> opentelemetry::Context {
+    if let Some(headers) = headers {
+        let propagator = TraceContextPropagator::new();
+        propagator.extract(&HashMapExtractor(headers))
+    } else {
+        opentelemetry::Context::current()
+    }
 }

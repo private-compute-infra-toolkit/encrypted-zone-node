@@ -51,6 +51,11 @@ pub enum ShmSlabPoolError {
 pub type Result<T> = std::result::Result<T, ShmSlabPoolError>;
 
 const SHM_HEADER: &str = "atomic-hdr";
+// Constants for slot allocation retry strategy.
+const ALLOCATE_RETRY_INITIAL_DELAY_US: u64 = 1;
+const ALLOCATE_RETRY_MAX_DELAY_US: u64 = 10000;
+const ALLOCATE_RETRY_MAX_ATTEMPTS: usize = 50;
+const CAS_FAILURE_LIMIT: u32 = 5;
 
 // This enum wraps both read-only (Mmap) and read-write (MmapMut) memory mappings.
 // It is required because Rust struct fields must have a single concrete type at compile
@@ -208,16 +213,21 @@ impl ShmSlabPool {
             });
         }
 
-        let mut delay = std::time::Duration::from_micros(1);
-        let max_delay = std::time::Duration::from_micros(10000);
+        let mut delay = std::time::Duration::from_micros(ALLOCATE_RETRY_INITIAL_DELAY_US);
+        let max_delay = std::time::Duration::from_micros(ALLOCATE_RETRY_MAX_DELAY_US);
         let retry_strategy = std::iter::from_fn(move || {
             let current = delay;
             delay = std::cmp::min(delay * 2, max_delay);
             Some(current)
         })
-        .take(50);
+        .take(ALLOCATE_RETRY_MAX_ATTEMPTS);
 
-        let action = || async { self.try_allocate_slots(slots_needed) };
+        let attempt = std::sync::atomic::AtomicU32::new(1);
+        let action = || {
+            let attempt_val = attempt.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            log::info!("Attempting slot allocation: {}", attempt_val);
+            async move { self.try_allocate_slots(slots_needed) }
+        };
 
         Retry::spawn(retry_strategy, action).await.map_err(|e| {
             log::warn!("Slot allocation failed: {:?}", e);
@@ -319,7 +329,8 @@ impl ShmSlabPool {
                         // CAS failure returns the current mask, we update our local copy so we try again.
                         Err(actual_mask) => {
                             cas_failures += 1;
-                            if cas_failures >= 5 {
+                            log::warn!("CAS failure #{} for current bitmask", cas_failures);
+                            if cas_failures >= CAS_FAILURE_LIMIT {
                                 log::warn!("CAS failure limit reached for current bitmask, moving on to next bitmask");
                                 break;
                             }

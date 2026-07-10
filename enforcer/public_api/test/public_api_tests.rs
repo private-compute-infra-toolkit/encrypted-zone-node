@@ -292,6 +292,7 @@ async fn test_call_succeeds_with_empty_call_parameters() {
             public_input: vec![],
             encrypted_input: vec![],
             request_metadata: HashMap::new(),
+            request_extensions: vec![],
         }),
         ..Default::default()
     };
@@ -310,6 +311,7 @@ async fn test_call_succeeds_with_empty_call_parameters() {
         public_output: vec![],
         encrypted_output: vec![],
         response_metadata: HashMap::new(),
+        response_extensions: vec![],
     };
 
     let _ = shutdown_tx.send(());
@@ -676,4 +678,43 @@ async fn test_request_metadata_propagated() {
 
     assert_eq!(cpm.request_metadata.get(key_for_string).unwrap(), valid_utf8.as_bytes());
     assert_eq!(cpm.request_metadata.get(key_for_bytes).unwrap(), &invalid_utf8);
+}
+
+#[tokio::test]
+async fn test_extensions_propagated() {
+    let (port, shutdown_tx, fake_junction) = start_api_server().await;
+
+    let session_metadata = SessionMetadata { session_id: port as u64, ..Default::default() };
+
+    let ext_bytes = vec![1, 2, 3, 4];
+
+    let valid_request = CallRequest {
+        operator_domain: "test_domain".to_string(),
+        service_name: "test_service".to_string(),
+        method_name: "test_method".to_string(),
+        session_metadata: Some(session_metadata.clone()),
+        input_params: Some(CallParameters {
+            request_extensions: ext_bytes.clone(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let response_result = tokio::spawn(async move {
+        let mut client = EzPublicApiClient::connect(format!("http://localhost:{}", port))
+            .await
+            .expect("failed to connect to EzPublicApi");
+        client.call(valid_request).await.unwrap().into_inner()
+    })
+    .await
+    .unwrap();
+
+    let _ = shutdown_tx.send(());
+
+    // In this test, the fake junction echo's the request back, including the extensions into response_extensions.
+    let invoke_isolate_req = fake_junction.invoked_isolate_requests.lock().unwrap()[0].clone();
+    let cpm = invoke_isolate_req.control_plane_metadata.unwrap();
+
+    assert_eq!(cpm.extensions, ext_bytes);
+    assert_eq!(response_result.response_extensions, ext_bytes);
 }

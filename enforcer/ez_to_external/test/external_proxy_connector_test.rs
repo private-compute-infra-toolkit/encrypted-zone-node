@@ -74,6 +74,7 @@ impl EzExternalProxyService for MockProxyService {
         let response = EzExternalProxyResponse {
             external_response_payload: req.external_request_payload,
             response_metadata: HashMap::new(),
+            response_extensions: req.request_extensions,
         };
         Ok(tonic::Response::new(response))
     }
@@ -97,6 +98,7 @@ impl EzExternalProxyService for MockProxyService {
                 let response = EzExternalProxyResponse {
                     external_response_payload: req.external_request_payload,
                     response_metadata: HashMap::new(),
+                    response_extensions: req.request_extensions,
                 };
                 if tx.send(Ok(response)).await.is_err() {
                     break;
@@ -220,7 +222,12 @@ pub fn create_generic_test_request(datagrams: Vec<Vec<u8>>) -> InvokeEzRequest {
         isolate_request_payload: Some(EzHybridPayload {
             delivery_method: Some(DeliveryMethod::InlineData(EzPayloadData { datagrams })),
         }),
-        isolate_request_iscope: Some(EzPayloadIsolateScope::default()),
+        isolate_request_iscope: Some(EzPayloadIsolateScope {
+            datagram_iscopes: vec![IsolateDataScope {
+                scope_type: DataScopeType::Public.into(),
+                ..Default::default()
+            }],
+        }),
     }
 }
 
@@ -353,6 +360,24 @@ async fn test_proxy_external_end_to_end_unary() {
             .scope_type,
         i32::from(DataScopeType::Public)
     );
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn test_proxy_external_end_to_end_none_datascope_bypass() {
+    let isolate_id = IsolateId::new(BinaryServicesIndex::new(true));
+    let (server_address, shutdown_tx) = setup_tcp_server(MockProxyService::default()).await;
+
+    let connector = build_test_connector(server_address).await.unwrap();
+    let test_datagrams = vec![vec![1, 3, 3, 7]];
+    let mut request = create_generic_test_request(test_datagrams.clone());
+
+    // Omit the isolate_request_iscope entirely.
+    request.isolate_request_iscope = None;
+
+    // Validation are enforced against requests with no datascopes.
+    let response_result = connector.proxy_external(isolate_id, request.clone(), None).await;
+    assert!(response_result.is_err());
     let _ = shutdown_tx.send(());
 }
 
@@ -686,7 +711,12 @@ async fn unary_returns_transformed_metadata_in_response() {
                 datagrams: vec![vec![10, 20]],
             })),
         }),
-        ..Default::default()
+        isolate_request_iscope: Some(EzPayloadIsolateScope {
+            datagram_iscopes: vec![IsolateDataScope {
+                scope_type: DataScopeType::Public.into(),
+                ..Default::default()
+            }],
+        }),
     };
 
     let response_result = connector.proxy_external(isolate_id, test_request, None).await;
@@ -721,7 +751,12 @@ async fn unary_fails_on_missing_control_plane_metadata() {
                 datagrams: vec![vec![10, 20]],
             })),
         }),
-        ..Default::default()
+        isolate_request_iscope: Some(EzPayloadIsolateScope {
+            datagram_iscopes: vec![IsolateDataScope {
+                scope_type: DataScopeType::Public.into(),
+                ..Default::default()
+            }],
+        }),
     };
 
     let response_result = connector.proxy_external(isolate_id, test_request, None).await;
@@ -794,7 +829,12 @@ async fn stream_returns_transformed_metadata_in_response() {
                 datagrams: vec![vec![1, 2, 3]],
             })),
         }),
-        ..Default::default()
+        isolate_request_iscope: Some(EzPayloadIsolateScope {
+            datagram_iscopes: vec![IsolateDataScope {
+                scope_type: DataScopeType::Public.into(),
+                ..Default::default()
+            }],
+        }),
     };
 
     req_tx.send(test_request).await.unwrap();

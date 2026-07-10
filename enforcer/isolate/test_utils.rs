@@ -274,8 +274,12 @@ pub fn create_echo_invoke_isolate_response(
     invoke_isolate_request: InvokeIsolateRequest,
 ) -> InvokeIsolateResponse {
     InvokeIsolateResponse {
-        control_plane_metadata: invoke_isolate_request.control_plane_metadata,
+        control_plane_metadata: invoke_isolate_request.control_plane_metadata.clone(),
         isolate_output_iscope: invoke_isolate_request.isolate_input_iscope,
         isolate_output: invoke_isolate_request.isolate_input,
+        response_extensions: invoke_isolate_request
+            .control_plane_metadata
+            .map(|m| m.extensions)
+            .unwrap_or_default(),
     }
 }

@@ -401,6 +401,7 @@ pub fn translate_to_proxy_request(
     Ok(EzExternalProxyRequest {
         resource: Some(resource),
         external_request_payload: payload_bytes,
+        request_extensions: metadata.extensions,
         request_metadata: HashMap::new(),
     })
 }
@@ -424,5 +425,6 @@ fn translate_from_proxy_response(
                 mapped_scope_owner: None,
             }],
         }),
+        response_extensions: res.response_extensions,
     }
 }

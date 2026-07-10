@@ -97,21 +97,29 @@ impl ContainerCustom {
         self.mount_tmp_fs()?;
         // Mount the requested files and dirs in the new root.
         for mount in opts.mounts.iter() {
-            self.mount_safe(
+            let res = self.mount_safe(
                 &mount.source,
                 &mount.destination,
                 None::<&str>,
                 MsFlags::MS_BIND | MsFlags::MS_REC,
                 mount.apply_restrictive_flags,
-            )
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to mount {} to {}: {}",
-                    mount.source.display(),
-                    mount.destination.display(),
-                    e
-                )
-            })?;
+            );
+            if let Err(e) = res {
+                if mount.optional {
+                    log::warn!(
+                        "Optional mount failed (skipping): Failed to mount {} to {}: {}",
+                        mount.source.display(),
+                        mount.destination.display(),
+                        e
+                    );
+                } else {
+                    return Err(e).context(format!(
+                        "Failed to mount {} to {}",
+                        mount.source.display(),
+                        mount.destination.display()
+                    ));
+                }
+            }
         }
         // Unmount the old root.
         mount::umount2(

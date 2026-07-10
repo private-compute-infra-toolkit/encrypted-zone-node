@@ -637,14 +637,17 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             source: sharing_dir.path().to_path_buf(),
             destination: PathBuf::from(SHARING_DIR_NAME),
             apply_restrictive_flags: true,
+            optional: false,
         }];
 
         for mount in container_startup_args.bind_mounts {
             if let Some((source, destination)) = mount.split_once(':') {
+                let source_path = PathBuf::from(source);
                 mounts.push(MountOptions {
-                    source: PathBuf::from(source),
+                    source: source_path,
                     destination: PathBuf::from(destination),
                     apply_restrictive_flags: false,
+                    optional: false,
                 });
             } else {
                 log::warn!("Malformed bind mount ignored: {mount}");
@@ -657,6 +660,7 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
                     source: source_path,
                     destination: PathBuf::from(SHARING_DIR_NAME).join(OTEL_TRACES_UDS),
                     apply_restrictive_flags: false,
+                    optional: true,
                 });
             }
         }

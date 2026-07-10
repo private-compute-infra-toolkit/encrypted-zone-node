@@ -29,7 +29,7 @@ rust_library(
         "//enforcer/grpc_connector",
         "//enforcer/isolate:isolate_info",
         "//enforcer/metrics",
-        "//enforcer/trace_context",
+        "//enforcer/traces",
         "//enforcer/v1:enforcer_rust",
         "//enforcer/v1:external_proxy_rust",
         "//enforcer/v1:payload_rust",

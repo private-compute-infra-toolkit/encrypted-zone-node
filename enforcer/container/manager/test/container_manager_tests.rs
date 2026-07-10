@@ -119,6 +119,34 @@ impl TestHarness {
         otel_endpoint: Option<String>,
         operator_role: String,
     ) -> Result<Self> {
+        Self::new_impl(manifest_path, isolate_runtime_configs, otel_endpoint, None, operator_role)
+            .await
+    }
+
+    async fn new_with_otel_traces(
+        manifest_path: &str,
+        isolate_runtime_configs: &IsolateRuntimeConfigs,
+        otel_endpoint: Option<String>,
+        otel_traces_endpoint: Option<String>,
+        operator_role: String,
+    ) -> Result<Self> {
+        Self::new_impl(
+            manifest_path,
+            isolate_runtime_configs,
+            otel_endpoint,
+            otel_traces_endpoint,
+            operator_role,
+        )
+        .await
+    }
+
+    async fn new_impl(
+        manifest_path: &str,
+        isolate_runtime_configs: &IsolateRuntimeConfigs,
+        otel_endpoint: Option<String>,
+        otel_traces_endpoint: Option<String>,
+        operator_role: String,
+    ) -> Result<Self> {
         // Clear the tracker for test isolation.
         FakeContainer::clear_tracker();
 
@@ -175,7 +203,7 @@ impl TestHarness {
             max_decoding_message_size: MAX_DECODING_SIZE,
             isolate_runtime_configs: isolate_runtime_configs.clone(),
             interceptor: interceptor.clone(),
-            otel_traces_endpoint: None,
+            otel_traces_endpoint,
             run_isolate_as_unprivileged: false,
             shm_num_slots: SHM_NUM_SLOTS,
             shm_slot_size: SHM_SLOT_SIZE,
@@ -984,9 +1012,13 @@ fn create_random_request(isolate_service_info: &IsolateServiceInfo) -> InvokeEzR
 // `InvokeEzRequest`, simulating an echo service for tests.
 fn create_echo_invoke_ez_response(invoke_isolate_request: InvokeEzRequest) -> InvokeEzResponse {
     InvokeEzResponse {
-        control_plane_metadata: invoke_isolate_request.control_plane_metadata,
+        control_plane_metadata: invoke_isolate_request.control_plane_metadata.clone(),
         ez_response_iscope: invoke_isolate_request.isolate_request_iscope,
         ez_response_payload: invoke_isolate_request.isolate_request_payload,
+        response_extensions: invoke_isolate_request
+            .control_plane_metadata
+            .map(|m| m.extensions)
+            .unwrap_or_default(),
     }
 }
 
@@ -1520,4 +1552,33 @@ fn test_sanitize_path_component() {
     assert_eq!(sanitize_path_component("name:with:colons"), "name_with_colons");
     assert_eq!(sanitize_path_component("wildcard*and?query"), "wildcard_and_query");
     assert_eq!(sanitize_path_component("null\0byte"), "null_byte");
+}
+
+#[tokio::test]
+async fn test_non_existent_otel_traces_uds() {
+    let non_existent_socket = "unix:///non/existent/path/otel.socket";
+    let mut harness = TestHarness::new_with_otel_traces(
+        JSON_MANIFEST_PATH_ONE_ISOLATE,
+        &IsolateRuntimeConfigs::default(),
+        /* otel_endpoint= */ None,
+        /* otel_traces_endpoint= */ Some(non_existent_socket.to_string()),
+        /* operator_role= */ "operator".to_string(),
+    )
+    .await
+    .expect("Should succeed even if otel traces UDS socket does not exist");
+
+    let tracker = FakeContainer::get_tracker();
+    assert_eq!(tracker.len(), 1);
+    let tracked_container = tracker.iter().next().unwrap();
+
+    let traces_mount = tracked_container.value().boot_mounts.iter().find(|m| {
+        m.destination == std::path::PathBuf::from("/enforcer-isolate-shared/traces-otlp.sock")
+    });
+
+    assert!(traces_mount.is_some(), "Traces socket mount option should be present");
+    assert!(traces_mount.unwrap().optional, "Traces socket mount should be optional");
+
+    drop(tracked_container);
+    drop(tracker);
+    harness.stop().await;
 }

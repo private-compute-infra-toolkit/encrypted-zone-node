@@ -81,6 +81,11 @@ message CallParameters {
   repeated EncryptedField encrypted_input = 2;
   // Opaque metadata entries forwarded alongside the payload.
   map<string, bytes> request_metadata = 3;
+
+  // Serialized RPC extensions.
+  // Note: this is different than request_metadata intended for HTTP-style
+  // headers which are naturally key-value pairs.
+  bytes request_extensions = 4;
 }
 
 message CallRequest {
@@ -113,4 +118,8 @@ message CallResponse {
   // Opaque metadata entries forwarded alongside the payload.
   // Enables transport of context-specific properties between client and server.
   map<string, bytes> response_metadata = 4;
+  // Serialized RPC extensions.
+  // Note: this is different than request_metadata intended for HTTP-style
+  // headers which are naturally key-value pairs.
+  bytes response_extensions = 5;
 }

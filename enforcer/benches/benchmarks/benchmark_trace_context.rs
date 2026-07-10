@@ -18,7 +18,7 @@ use opentelemetry::{
     Context,
 };
 use opentelemetry_sdk::trace as sdktrace;
-use trace_context::get_trace_context;
+use traces::context::get_trace_context;
 
 fn benchmark_get_trace_context(c: &mut Criterion) {
     let mut group = c.benchmark_group("benchmark_get_trace_context");

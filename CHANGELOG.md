@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## 0.16.0 (2026-07-10)
+
+
+### Dependencies
+
+* **deps:** Update DevKit to release-3.10.0
+
+
+### EZ Policy Enforcer
+
+* **enforcer:** Add opaque extension fields to enforcer proto
+* **enforcer:** check UDS socket existence before mounting
+* **enforcer:** Enforce data scopes for response extensions
+* **enforcer:** Propagate arbitrary RPC extensions across boundaries
+* **enforcer:** propagate trace context and remove trace_fn
+* **enforcer:** Remove default uds for traces
+* **enforcer:** Strictly validate missing data scopes in enforcer
+
+
+### Features
+
+* add allocation error logs to ShmSlabPool
+* add const(s) for allocation retry strategy values
+* **traces:** Create extract_parent_context to avoid code repetition
+* **traces:** Instrument first message block
+* **traces:** Instrument next received streaming messages
+* **traces:** Make spans names consistent
+* **traces:** Remove incorrect span
+* **traces:** Set context and instrumentation invoke_ez
+* **traces:** Set context from first received streaming message
+* **traces:** Set context from next received streaming messages
+* **traces:** When forwarding requests update trace context
+
 ## 0.15.0 (2026-06-26)
 
 

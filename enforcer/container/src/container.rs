@@ -48,6 +48,8 @@ pub struct MountOptions {
     pub destination: PathBuf,
     /// Apply noexec, nosuid, nodev to the mount.
     pub apply_restrictive_flags: bool,
+    /// Whether this mount is optional (ignore if the source path does not exist).
+    pub optional: bool,
 }
 
 /// Options for configuring the network namespace of the container.

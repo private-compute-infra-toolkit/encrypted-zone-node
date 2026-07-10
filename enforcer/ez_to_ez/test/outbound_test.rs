@@ -60,6 +60,10 @@ impl EzToEzApi for FakeEzToEzProxy {
         Ok(Response::new(EzCallResponse {
             payload_scope: req.payload_scope,
             payload_data: req.payload_data,
+            response_extensions: req
+                .control_plane_metadata
+                .map(|m| m.extensions)
+                .unwrap_or_default(),
         }))
     }
 
@@ -79,6 +83,10 @@ impl EzToEzApi for FakeEzToEzProxy {
                         let resp = EzCallResponse {
                             payload_scope: req.payload_scope,
                             payload_data: req.payload_data,
+                            response_extensions: req
+                                .control_plane_metadata
+                                .map(|m| m.extensions)
+                                .unwrap_or_default(),
                         };
                         tx.send(Ok(resp)).await.unwrap();
                     }
@@ -242,6 +250,23 @@ async fn test_outbound_streaming_flow() {
 
     drop(local_to_outbound);
     assert!(outbound_to_local.recv().await.is_none());
+
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn test_outbound_extensions_propagated() {
+    let (port, shutdown_tx) = start_fake_proxy_server(None).await;
+    let server_address = format!("http://localhost:{}", port);
+    let handler =
+        OutboundEzToEzHandler::new(server_address, TestMetrics::default(), None).await.unwrap();
+
+    let mut request = create_test_request(Some("ext test"));
+    request.control_plane_metadata.as_mut().unwrap().extensions = vec![9, 9, 9];
+
+    let response = handler.remote_invoke(request, None).await.unwrap();
+
+    assert_eq!(response.response_extensions, vec![9, 9, 9]);
 
     let _ = shutdown_tx.send(());
 }

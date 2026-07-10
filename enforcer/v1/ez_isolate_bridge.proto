@@ -62,6 +62,10 @@ message InvokeIsolateResponse {
   ControlPlaneMetadata control_plane_metadata = 1;
   EzPayloadIsolateScope isolate_output_iscope = 2;
   EzHybridPayload isolate_output = 4;
+  // Serialized RPC extensions.
+  // Note: this is different than request_metadata intended for HTTP-style
+  // headers which are naturally key-value pairs.
+  bytes response_extensions = 5;
 }
 
 message UpdateIsolateStateRequest {

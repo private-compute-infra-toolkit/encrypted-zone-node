@@ -75,12 +75,12 @@ impl EzToEzApi for InboundEzToEzHandler {
         let metric_attr = MetricAttributes::from(&ez_call_request);
         let _call_tracker = self.metrics.track_call(metric_attr.base());
 
-        let span = tracing::info_span!("Enforcer.EzToEzApi.Inbound.ez_call");
+        let span = tracing::info_span!("Enforcer.EzToEzApi/InboundEzCall");
 
         if let Some(ref metadata) = ez_call_request.control_plane_metadata {
             log::info!("EzCall Inbound Request headers: {:#?}", metadata.metadata_headers);
             let parent_context = global::get_text_map_propagator(|propagator| {
-                propagator.extract(&trace_context::HashMapExtractor(&metadata.metadata_headers))
+                propagator.extract(&traces::context::HashMapExtractor(&metadata.metadata_headers))
             });
 
             let _ = span.set_parent(parent_context);
@@ -238,7 +238,7 @@ async fn proxy_to_remote_response(
 
 /// Converts an InvokeIsolateResponse to an EzCallResponse.
 #[tracing::instrument(
-    name = "Enforcer.EzToEzApi.Inbound.invoke_isolate_response_to_ez_call_response",
+    name = "Enforcer.EzToEzApi.Inbound/InvokeIsolateResponseToEzCallResponse",
     skip(response)
 )]
 fn invoke_isolate_response_to_ez_call_response(response: InvokeIsolateResponse) -> EzCallResponse {
@@ -272,7 +272,11 @@ fn invoke_isolate_response_to_ez_call_response(response: InvokeIsolateResponse) 
         })
     });
 
-    EzCallResponse { payload_scope, payload_data }
+    EzCallResponse {
+        payload_scope,
+        payload_data,
+        response_extensions: response.response_extensions,
+    }
 }
 
 pub struct InboundTlsConfig {

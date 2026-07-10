@@ -61,6 +61,7 @@ rust_test(
         ":data_scope",
         "//enforcer/v1:data_scope_rust",
         "//enforcer/v1:enforcer_rust",
+        "//enforcer/v1:payload_rust",
         "@crates//:tokio",
         "@crates//:tonic",
     ],

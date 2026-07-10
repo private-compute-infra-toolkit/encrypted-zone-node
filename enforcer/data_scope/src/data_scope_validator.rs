@@ -41,6 +41,15 @@ pub fn replace_and_enforce_invoke_isolate_resp_scopes(
     current_scope: DataScopeType,
     is_from_public_api: bool,
 ) -> Result<(), DataScopeError> {
+    let is_missing_scope = invoke_isolate_resp.isolate_output_iscope.is_none();
+    let has_data = invoke_isolate_resp.isolate_output.is_some()
+        || !invoke_isolate_resp.response_extensions.is_empty();
+
+    // TODO: use the `current_scope` instead.
+    if is_missing_scope && has_data {
+        return Err(DataScopeError::InvalidDataScopeType);
+    }
+
     if let Some(ref mut iscopes) = &mut invoke_isolate_resp.isolate_output_iscope {
         for iscope in iscopes.datagram_iscopes.iter_mut() {
             if iscope.scope_type == DataScopeType::Unspecified.into() {
@@ -82,6 +91,15 @@ pub fn replace_and_enforce_invoke_isolate_resp_scopes(
 pub fn enforce_public_api_invoke_isolate_resp_scopes(
     invoke_isolate_resp: &mut InvokeIsolateResponse,
 ) -> Result<(), DataScopeError> {
+    let is_missing_scope = invoke_isolate_resp.isolate_output_iscope.is_none();
+    let has_data = invoke_isolate_resp.isolate_output.is_some()
+        || !invoke_isolate_resp.response_extensions.is_empty();
+
+    // TODO: use the `current_scope` instead.
+    if is_missing_scope && has_data {
+        return Err(DataScopeError::InvalidDataScopeType);
+    }
+
     if let Some(ref mut iscopes) = &mut invoke_isolate_resp.isolate_output_iscope {
         for iscope in iscopes.datagram_iscopes.iter() {
             if iscope.scope_type >= DataScopeType::DomainOwned.into() {
@@ -121,19 +139,28 @@ pub fn replace_and_validate_invoke_ez_request_scopes(
     invoke_ez_req: &mut InvokeEzRequest,
     current_scope: DataScopeType,
 ) -> Status {
-    if let Some(ref mut iscopes) = &mut invoke_ez_req.isolate_request_iscope {
-        for iscope in iscopes.datagram_iscopes.iter_mut() {
-            if iscope.scope_type == DataScopeType::Unspecified.into() {
-                iscope.scope_type = current_scope.into();
-            } else if iscope.scope_type < current_scope.into() {
-                return Status::permission_denied(format!(
-                    "Cannot emit scope {} while being in scope {}",
-                    DataScopeType::try_from(iscope.scope_type)
-                        .unwrap_or(DataScopeType::Unspecified)
-                        .as_str_name(),
-                    current_scope.as_str_name()
-                ));
-            }
+    let iscopes = match &mut invoke_ez_req.isolate_request_iscope {
+        Some(s) => s,
+        None => return Status::permission_denied("isolate_request_iscope is missing"),
+    };
+
+    // TODO: use the `current_scope` instead of checking
+    // if the scope `is_empty()`.
+    if iscopes.datagram_iscopes.is_empty() {
+        return Status::permission_denied("datagram_iscopes cannot be empty");
+    }
+
+    for iscope in iscopes.datagram_iscopes.iter_mut() {
+        if iscope.scope_type == DataScopeType::Unspecified.into() {
+            iscope.scope_type = current_scope.into();
+        } else if iscope.scope_type < current_scope.into() {
+            return Status::permission_denied(format!(
+                "Cannot emit scope {} while being in scope {}",
+                DataScopeType::try_from(iscope.scope_type)
+                    .unwrap_or(DataScopeType::Unspecified)
+                    .as_str_name(),
+                current_scope.as_str_name()
+            ));
         }
     }
 
@@ -181,18 +208,25 @@ pub fn get_strictest_scope(iscopes: &EzPayloadIsolateScope) -> DataScopeType {
 /// # Returns
 /// A `Result` which is `Ok` if validation passes, or an `Error` if a scope violation is detected.
 pub fn validate_external_call(req: &InvokeEzRequest) -> std::result::Result<(), DataScopeError> {
-    if let Some(ref iscopes) = &req.isolate_request_iscope {
-        for iscope in iscopes.datagram_iscopes.iter() {
-            if iscope.scope_type == DataScopeType::Unspecified.into() {
-                return Err(DataScopeError::InvalidDataScopeType);
-            } else if iscope.scope_type >= DataScopeType::UserPrivate.into() {
-                return Err(DataScopeError::PublicApiScopeViolation {
-                    emitted: DataScopeType::try_from(iscope.scope_type)
-                        .unwrap_or(DataScopeType::Unspecified)
-                        .as_str_name()
-                        .to_string(),
-                });
-            }
+    let iscopes =
+        req.isolate_request_iscope.as_ref().ok_or(DataScopeError::InvalidDataScopeType)?;
+
+    // TODO: use the `current_scope` instead of checking
+    // if the scope `is_empty()`.
+    if iscopes.datagram_iscopes.is_empty() {
+        return Err(DataScopeError::InvalidDataScopeType);
+    }
+
+    for iscope in iscopes.datagram_iscopes.iter() {
+        if iscope.scope_type == DataScopeType::Unspecified.into() {
+            return Err(DataScopeError::InvalidDataScopeType);
+        } else if iscope.scope_type >= DataScopeType::UserPrivate.into() {
+            return Err(DataScopeError::PublicApiScopeViolation {
+                emitted: DataScopeType::try_from(iscope.scope_type)
+                    .unwrap_or(DataScopeType::Unspecified)
+                    .as_str_name()
+                    .to_string(),
+            });
         }
     }
 

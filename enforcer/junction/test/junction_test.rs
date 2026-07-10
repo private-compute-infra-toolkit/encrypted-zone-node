@@ -1254,6 +1254,139 @@ async fn test_junction_unary_timeout_internal_route() {
 
 // TODO: Add metric tests
 
+struct DataScopeTestIsolate;
+
+#[tonic::async_trait]
+impl EzIsolateBridge for DataScopeTestIsolate {
+    type StreamInvokeIsolateStream =
+        tokio_stream::wrappers::ReceiverStream<Result<InvokeIsolateResponse, Status>>;
+
+    async fn stream_invoke_isolate(
+        &self,
+        _request: Request<Streaming<InvokeIsolateRequest>>,
+    ) -> Result<Response<Self::StreamInvokeIsolateStream>, Status> {
+        unimplemented!()
+    }
+
+    async fn invoke_isolate(
+        &self,
+        request: Request<InvokeIsolateRequest>,
+    ) -> Result<Response<InvokeIsolateResponse>, Status> {
+        let response = InvokeIsolateResponse {
+            control_plane_metadata: request.into_inner().control_plane_metadata,
+            isolate_output_iscope: None,           // Empty scope.
+            isolate_output: None,                  // Empty payload.
+            response_extensions: vec![1, 3, 3, 7], // Data in extensions.
+        };
+        Ok(Response::new(response))
+    }
+
+    async fn update_isolate_state(
+        &self,
+        _request: Request<enforcer_proto::enforcer::v1::UpdateIsolateStateRequest>,
+    ) -> Result<Response<enforcer_proto::enforcer::v1::UpdateIsolateStateResponse>, Status> {
+        unimplemented!()
+    }
+}
+
+async fn start_datascope_test_isolate_server(
+    test_isolate_id: IsolateId,
+) -> tokio::sync::oneshot::Sender<()> {
+    let fake_isolate = DataScopeTestIsolate;
+    let unix_listener =
+        UnixListener::bind(format!("{}{}", DEFAULT_ISOLATE_UNIX_SOCKET, test_isolate_id)).unwrap();
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+    tokio::spawn(async move {
+        Server::builder()
+            .add_service(EzIsolateBridgeServer::new(fake_isolate))
+            .serve_with_incoming_shutdown(UnixListenerStream::new(unix_listener), async {
+                shutdown_rx.await.ok();
+            })
+            .await
+    });
+    shutdown_tx
+}
+
+#[tokio::test]
+async fn test_junction_unary_datascope_bypass() {
+    let isolate_service_mapper = IsolateServiceMapper::default();
+    let (container_manager_request_tx, _container_manager_request_rx) =
+        tokio::sync::mpsc::channel(JUNCTION_TEST_CHANNEL_SIZE);
+    let container_manager_requester = ContainerManagerRequester::new(container_manager_request_tx);
+    let shared_memory_manager = SharedMemManager::new(container_manager_requester.clone(), 0, 0);
+    let fileshare_manager = FileshareManager::new(container_manager_requester.clone());
+    let data_scope_requester = DataScopeRequester::new(u64::MAX);
+    let manifest_validator = ManifestValidator::default();
+    let isolate_state_manager =
+        IsolateStateManager::new(data_scope_requester.clone(), container_manager_requester.clone());
+
+    let isolate_junction = IsolateJunction::new(
+        data_scope_requester.clone(),
+        isolate_service_mapper.clone(),
+        shared_memory_manager.clone(),
+        fileshare_manager.clone(),
+        isolate_state_manager.clone(),
+        manifest_validator.clone(),
+        100 * 1024 * 1024,
+    );
+
+    let isolate_service_info = IsolateServiceInfo {
+        operator_domain: "scope.test".to_string(),
+        service_name: "ScopeTestIervice".to_string(),
+        ..Default::default()
+    };
+
+    let binary_services_index = isolate_service_mapper
+        .new_binary_index(
+            vec![isolate_service_info.clone()],
+            false,
+            "publisher_id".to_string(),
+            "isolate_name".to_string(),
+        )
+        .await
+        .unwrap();
+
+    manifest_validator
+        .add_scope_info(AddManifestScopeRequest {
+            binary_services_index,
+            max_input_scope: DataScopeType::UserPrivate,
+            max_output_scope: DataScopeType::UserPrivate,
+        })
+        .await
+        .unwrap();
+
+    let isolate_id = IsolateId::new(binary_services_index);
+    let isolate_server_shutdown_tx = start_datascope_test_isolate_server(isolate_id).await;
+
+    let add_isolate_request = create_add_isolate_request(isolate_id);
+    isolate_state_manager.add_isolate(add_isolate_request).await;
+    isolate_state_manager.update_state(isolate_id, IsolateState::Ready).await.unwrap();
+
+    assert!(isolate_junction
+        .connect_isolate(isolate_id, format!("{}{}", DEFAULT_ISOLATE_UNIX_SOCKET, isolate_id))
+        .await
+        .is_ok());
+
+    let mut invoke_isolate_request = create_random_request(&isolate_service_info);
+    invoke_isolate_request.isolate_input_iscope = Some(EzPayloadIsolateScope {
+        datagram_iscopes: vec![IsolateDataScope {
+            scope_type: DataScopeType::UserPrivate.into(),
+            mapped_scope_owner: None,
+        }],
+    });
+
+    // Isolate returning an empty payload and scope with extensions payload
+    // to the public API is blocked.
+    let invoke_result =
+        isolate_junction.invoke_isolate(None, invoke_isolate_request, true, None).await;
+
+    let _ = isolate_server_shutdown_tx.send(());
+
+    assert!(invoke_result.is_err());
+}
+
 #[derive(Clone)]
 struct DeadlockTestingIsolate;
 

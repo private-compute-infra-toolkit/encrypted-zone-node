@@ -53,6 +53,9 @@ use state_manager::IsolateStateManager;
 use tokio::sync::mpsc::{channel, Sender};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
+use traces::context::inject_trace_context;
+use tracing::Instrument;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 type InvokeEzResult = Result<Response<InvokeEzResponse>, Status>;
 
@@ -140,84 +143,18 @@ impl IsolateEzBridge for IsolateEzBridgeService {
 
     async fn invoke_ez(&self, request: Request<InvokeEzRequest>) -> InvokeEzResult {
         let timeout = try_parse_grpc_timeout(request.metadata()).unwrap_or(None);
-        let mut req = request.into_inner();
+        let req = request.into_inner();
 
-        if let Some(hybrid) = &mut req.isolate_request_payload {
-            if let Some(DeliveryMethod::ShmData(shm_data)) = &hybrid.delivery_method {
-                let data = self
-                    .shared_memory_manager
-                    .read_from_isolate(self.isolate_id, &shm_data.slots)
-                    .map_err(|e| Status::internal(format!("Failed to read from SHM: {}", e)))?;
+        let parent_context = traces::context::extract_parent_context(
+            req.control_plane_metadata.as_ref().map(|m| &m.metadata_headers),
+        );
 
-                hybrid.delivery_method =
-                    Some(DeliveryMethod::InlineData(EzPayloadData { datagrams: vec![data] }));
-            }
+        let span = tracing::info_span!("Enforcer.IsolateEzBridge/InvokeEz");
+        if let Err(e) = span.set_parent(parent_context) {
+            tracing::warn!("Failed to set parent span: {e:?}");
         }
 
-        if !self.isolate_id.is_ratified_isolate() {
-            self.interceptor.replace_with_interceptor(&mut req, RequestType::Unary).await;
-        }
-
-        let restrictions_enforcer = RestrictionsEnforcer {
-            isolate_id: self.isolate_id,
-            isolate_service_mapper: self.isolate_service_mapper.clone(),
-            manifest_validator: self.manifest_validator.clone(),
-            data_scope_requester: self.data_scope_requester.clone(),
-            response_tx: None,
-            shared_memory_manager: self.shared_memory_manager.clone(),
-            shm_payload_threshold: self.shm_payload_threshold,
-        };
-
-        let route_result = restrictions_enforcer.validate_invoke_ez_req(&mut req).await;
-
-        let metric_attr = MetricAttributes::from(req.control_plane_metadata.as_ref())
-            .with_attribute(
-                "route_type",
-                route_result.as_ref().unwrap_or(&Route::Unknown).as_str_name(),
-            );
-
-        let _call_tracker = self.metrics.track_call(metric_attr.base());
-
-        let mut result = match route_result {
-            Ok(route) => {
-                let mut result: InvokeEzResult = match route {
-                    Route::External => {
-                        self.handle_external_request(req, &metric_attr, timeout).await
-                    }
-                    Route::Internal => {
-                        self.handle_internal_request(req, &metric_attr, timeout).await
-                    }
-                    Route::Remote => self.handle_remote_request(req, &metric_attr, timeout).await,
-                    Route::Unknown => {
-                        self.metrics.record_error(&metric_attr.base(), "unknown_route");
-                        Err(Status::not_found(
-                            "The requested service is not registered or the request is malformed.",
-                        ))
-                    }
-                };
-                if let Ok(response) = &result {
-                    if let Err(e) =
-                        restrictions_enforcer.validate_invoke_ez_resp(response.get_ref()).await
-                    {
-                        self.metrics
-                            .record_error(&metric_attr.base(), "response_validation_failed");
-                        result = Err(e);
-                    }
-                }
-                result
-            }
-            Err(status) => {
-                self.metrics.record_error(&metric_attr.base(), "validation_failed");
-                Err(status)
-            }
-        };
-
-        // If response payload is > threshold, convert to shared memory payload
-        if let Ok(ref mut response) = result {
-            self.maybe_convert_to_shm(response.get_mut()).await;
-        }
-
-        result
+        self.handle_unary_invoke(req, timeout).instrument(span).await
     }
 
     type CreateMemshareStream = ReceiverStream<Result<CreateMemshareResponse, Status>>;
@@ -439,27 +376,92 @@ impl IsolateEzBridgeService {
             status.clone()
         })
     }
-    /// Attempts to convert the response payload to a shared memory payload if its size is greater
-    /// than or equal to the `shm_payload_threshold`.
-    ///
-    /// If writing to shared memory fails, the system logs an error and falls back to sending the
-    /// payload over inline data (i.e., gRPC over UDS).
-    async fn maybe_convert_to_shm(&self, invoke_ez_response: &mut InvokeEzResponse) {
-        let Some(hybrid) = &mut invoke_ez_response.ez_response_payload else { return };
-        let Some(DeliveryMethod::InlineData(inline)) = &mut hybrid.delivery_method else { return };
-        let Some(first_datagram) = inline.datagrams.first() else { return };
 
-        let payload_bytes = &first_datagram[..];
-        if (payload_bytes.len() as u64) < self.shm_payload_threshold {
-            return;
+    async fn handle_unary_invoke(
+        &self,
+        mut req: InvokeEzRequest,
+        timeout: Option<std::time::Duration>,
+    ) -> InvokeEzResult {
+        if let Some(ref mut control_plane_metadata) = req.control_plane_metadata {
+            inject_trace_context(&mut control_plane_metadata.metadata_headers);
         }
 
-        match self.shared_memory_manager.write_to_isolate(self.isolate_id, payload_bytes).await {
-            Ok(slots) => {
-                hybrid.delivery_method = Some(DeliveryMethod::ShmData(ShmSlotData { slots }));
+        read_request_shm_payload(&self.shared_memory_manager, self.isolate_id, &mut req)?;
+
+        if !self.isolate_id.is_ratified_isolate() {
+            self.interceptor.replace_with_interceptor(&mut req, RequestType::Unary).await;
+        }
+
+        let restrictions_enforcer = RestrictionsEnforcer {
+            isolate_id: self.isolate_id,
+            isolate_service_mapper: self.isolate_service_mapper.clone(),
+            manifest_validator: self.manifest_validator.clone(),
+            data_scope_requester: self.data_scope_requester.clone(),
+            response_tx: None,
+            shared_memory_manager: self.shared_memory_manager.clone(),
+            shm_payload_threshold: self.shm_payload_threshold,
+        };
+
+        let route_result = restrictions_enforcer.validate_invoke_ez_req(&mut req).await;
+
+        let metric_attr = MetricAttributes::from(req.control_plane_metadata.as_ref())
+            .with_attribute(
+                "route_type",
+                route_result.as_ref().unwrap_or(&Route::Unknown).as_str_name(),
+            );
+
+        let _call_tracker = self.metrics.track_call(metric_attr.base());
+
+        let mut result = match route_result {
+            Ok(route) => {
+                let mut result = self.execute_route(route, req, &metric_attr, timeout).await;
+                if let Ok(response) = &result {
+                    if let Err(e) =
+                        restrictions_enforcer.validate_invoke_ez_resp(response.get_ref()).await
+                    {
+                        self.metrics
+                            .record_error(&metric_attr.base(), "response_validation_failed");
+                        result = Err(e);
+                    }
+                }
+                result
             }
-            Err(e) => {
-                log::error!("Failed to write to SHM, falling back to sending payload over inline data: {:?}", e);
+            Err(status) => {
+                self.metrics.record_error(&metric_attr.base(), "validation_failed");
+                Err(status)
+            }
+        };
+
+        // If response payload is > threshold, convert to shared memory payload
+        if let Ok(ref mut response) = result {
+            maybe_convert_to_shm(
+                &self.shared_memory_manager,
+                self.isolate_id,
+                self.shm_payload_threshold,
+                response.get_mut(),
+            )
+            .await;
+        }
+
+        result
+    }
+
+    async fn execute_route(
+        &self,
+        route: Route,
+        req: InvokeEzRequest,
+        metric_attr: &MetricAttributes,
+        timeout: Option<std::time::Duration>,
+    ) -> InvokeEzResult {
+        match route {
+            Route::External => self.handle_external_request(req, metric_attr, timeout).await,
+            Route::Internal => self.handle_internal_request(req, metric_attr, timeout).await,
+            Route::Remote => self.handle_remote_request(req, metric_attr, timeout).await,
+            Route::Unknown => {
+                self.metrics.record_error(&metric_attr.base(), "unknown_route");
+                Err(Status::not_found(
+                    "The requested service is not registered or the request is malformed.",
+                ))
             }
         }
     }
@@ -506,31 +508,6 @@ impl StreamHandler {
         }
     }
 
-    // Helper to read payload out of SHM and into the InvokeEzRequest to possibly
-    // forward to the proxies. If a SHM payload is received, but cannot be read, we will
-    // return an error
-    async fn read_request_shm_payload(&self, req: &mut InvokeEzRequest) -> Result<(), Status> {
-        // No payload or unknown delivery method, nothing to do.
-        let Some(hybrid) = &mut req.isolate_request_payload else {
-            return Ok(());
-        };
-        // If the delivery method is not shared memory, nothing to do, leave as inline
-        let Some(DeliveryMethod::ShmData(shm_data)) = &mut hybrid.delivery_method else {
-            return Ok(());
-        };
-
-        // Read the payload out of SHM, return an error if the read fails.
-        let data = self
-            .shared_memory_manager
-            .read_from_isolate(self.isolate_id, &shm_data.slots)
-            .map_err(|e| Status::internal(format!("Failed to read from SHM: {e:#?}")))?;
-
-        // Convert delivery method from shared memory back to inline data to forward to the proxies.
-        hybrid.delivery_method =
-            Some(DeliveryMethod::InlineData(EzPayloadData { datagrams: vec![data] }));
-        Ok(())
-    }
-
     async fn process_invoke_ez_requests<S>(
         &self,
         mut invoke_req_stream: observed_stream::ObservedRequestStream<S, IsolateEzServiceMetrics>,
@@ -546,7 +523,9 @@ impl StreamHandler {
             return;
         };
 
-        if let Err(status) = self.read_request_shm_payload(&mut first_req).await {
+        if let Err(status) =
+            read_request_shm_payload(&self.shared_memory_manager, self.isolate_id, &mut first_req)
+        {
             let _ = self.response_tx.send(Err(status)).await.inspect_err(|_| {
                 log::error!(
                     "Failed to send error to StreamInvokeEz for isolate {}",
@@ -641,7 +620,11 @@ impl StreamHandler {
             // Send the rest of the requests from the stream.
             while let Some(mut req) = invoke_req_stream.next().await {
                 let _timer = metrics.track_message_processing(metric_attr_req.request());
-                if let Err(status) = stream_handler.read_request_shm_payload(&mut req).await {
+                if let Err(status) = read_request_shm_payload(
+                    &stream_handler.shared_memory_manager,
+                    stream_handler.isolate_id,
+                    &mut req,
+                ) {
                     let _ = stream_handler.response_tx.send(Err(status)).await.inspect_err(|_| {
                         log::error!(
                             "Failed to send error to StreamInvokeEz for isolate {}",
@@ -751,7 +734,11 @@ impl StreamHandler {
             // Send the rest of the requests from the stream.
             while let Some(mut req) = invoke_req_stream.next().await {
                 let _timer = metrics.track_message_processing(metric_attr_req.request());
-                if let Err(status) = stream_handler.read_request_shm_payload(&mut req).await {
+                if let Err(status) = read_request_shm_payload(
+                    &stream_handler.shared_memory_manager,
+                    stream_handler.isolate_id,
+                    &mut req,
+                ) {
                     let _ = stream_handler.response_tx.send(Err(status)).await.inspect_err(|_| {
                         log::error!(
                             "Failed to send error to StreamInvokeEz for isolate {}",
@@ -840,9 +827,11 @@ impl StreamHandler {
             // Handle the rest of the streaming requests.
             while let Some(mut invoke_ez_req) = invoke_req_stream.next().await {
                 let _timer = metrics.track_message_processing(metric_attr_req.request());
-                if let Err(status) =
-                    stream_handler.read_request_shm_payload(&mut invoke_ez_req).await
-                {
+                if let Err(status) = read_request_shm_payload(
+                    &stream_handler.shared_memory_manager,
+                    stream_handler.isolate_id,
+                    &mut invoke_ez_req,
+                ) {
                     let _ = stream_handler.response_tx.send(Err(status)).await.inspect_err(|_| {
                         log::error!(
                             "Failed to send error to StreamInvokeEz for isolate {}",
@@ -1038,31 +1027,6 @@ impl RestrictionsEnforcer {
         Ok(())
     }
 
-    /// Attempts to convert the response payload to a shared memory payload if its size is greater
-    /// than or equal to the `shm_payload_threshold`.
-    ///
-    /// If writing to shared memory fails, the system logs an error and falls back to sending the
-    /// payload over inline data (i.e., gRPC over UDS).
-    async fn maybe_convert_to_shm(&self, invoke_ez_response: &mut InvokeEzResponse) {
-        let Some(hybrid) = &mut invoke_ez_response.ez_response_payload else { return };
-        let Some(DeliveryMethod::InlineData(inline)) = &mut hybrid.delivery_method else { return };
-        let Some(first_datagram) = inline.datagrams.first() else { return };
-
-        let payload_bytes = &first_datagram[..];
-        if (payload_bytes.len() as u64) < self.shm_payload_threshold {
-            return;
-        }
-
-        match self.shared_memory_manager.write_to_isolate(self.isolate_id, payload_bytes).await {
-            Ok(slots) => {
-                hybrid.delivery_method = Some(DeliveryMethod::ShmData(ShmSlotData { slots }));
-            }
-            Err(e) => {
-                log::error!("Failed to write to SHM, falling back to sending payload over inline data: {:?}", e);
-            }
-        }
-    }
-
     async fn stream_validate_invoke_ez_resp(
         &self,
         response: Result<InvokeEzResponse, Status>,
@@ -1072,10 +1036,19 @@ impl RestrictionsEnforcer {
             return Err(());
         };
 
+        let shared_memory_manager = self.shared_memory_manager.clone();
+        let isolate_id = self.isolate_id;
+        let shm_payload_threshold = self.shm_payload_threshold;
         let final_response = async move {
             let mut resp = response?;
             self.validate_invoke_ez_resp(&resp).await?;
-            self.maybe_convert_to_shm(&mut resp).await;
+            maybe_convert_to_shm(
+                &shared_memory_manager,
+                isolate_id,
+                shm_payload_threshold,
+                &mut resp,
+            )
+            .await;
             Ok(resp)
         }
         .await;
@@ -1098,6 +1071,7 @@ fn convert_to_invoke_ez_response(
         control_plane_metadata: invoke_isolate_response.control_plane_metadata,
         ez_response_iscope: invoke_isolate_response.isolate_output_iscope,
         ez_response_payload: invoke_isolate_response.isolate_output,
+        response_extensions: invoke_isolate_response.response_extensions,
     }
 }
 
@@ -1111,5 +1085,65 @@ fn get_connector(
             "External call for isolate {} failed: No external proxy is configured.",
             isolate_id
         )))),
+    }
+}
+
+/// Reads the shared memory payload from an [`InvokeEzRequest`], converts the delivery method back to
+/// inline data, and returns an error if reading from shared memory fails.
+fn read_request_shm_payload(
+    shared_memory_manager: &SharedMemManager,
+    isolate_id: IsolateId,
+    req: &mut InvokeEzRequest,
+) -> Result<(), Status> {
+    // No payload or unknown delivery method, nothing to do.
+    let Some(hybrid) = &mut req.isolate_request_payload else {
+        return Ok(());
+    };
+    // If the delivery method is not shared memory, nothing to do, leave as inline.
+    let Some(DeliveryMethod::ShmData(shm_data)) = &mut hybrid.delivery_method else {
+        return Ok(());
+    };
+
+    // Read the payload out of SHM, return an error if the read fails.
+    let data = shared_memory_manager
+        .read_from_isolate(isolate_id, &shm_data.slots)
+        .map_err(|e| Status::internal(format!("Failed to read from SHM: {e:#?}")))?;
+
+    // Convert delivery method from shared memory back to inline data to forward to the proxies.
+    hybrid.delivery_method =
+        Some(DeliveryMethod::InlineData(EzPayloadData { datagrams: vec![data] }));
+    Ok(())
+}
+
+/// Attempts to convert the response payload to a shared memory payload if its size is greater
+/// than or equal to the `shm_payload_threshold`.
+///
+/// If writing to shared memory fails, the system logs an error and falls back to sending the
+/// payload over inline data (i.e., gRPC over UDS).
+async fn maybe_convert_to_shm(
+    shared_memory_manager: &SharedMemManager,
+    isolate_id: IsolateId,
+    shm_payload_threshold: u64,
+    invoke_ez_response: &mut InvokeEzResponse,
+) {
+    let Some(hybrid) = &mut invoke_ez_response.ez_response_payload else { return };
+    let Some(DeliveryMethod::InlineData(inline)) = &mut hybrid.delivery_method else { return };
+    let Some(first_datagram) = inline.datagrams.first() else { return };
+
+    let payload_bytes = &first_datagram[..];
+    if (payload_bytes.len() as u64) < shm_payload_threshold {
+        return;
+    }
+
+    match shared_memory_manager.write_to_isolate(isolate_id, payload_bytes).await {
+        Ok(slots) => {
+            hybrid.delivery_method = Some(DeliveryMethod::ShmData(ShmSlotData { slots }));
+        }
+        Err(e) => {
+            log::error!(
+                "Failed to write to SHM, falling back to sending payload over inline data: {:?}",
+                e
+            );
+        }
     }
 }

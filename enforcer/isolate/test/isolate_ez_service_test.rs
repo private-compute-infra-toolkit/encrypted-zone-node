@@ -688,6 +688,51 @@ async fn unary_routes_to_external_proxy() {
 }
 
 #[tokio::test]
+async fn unary_routes_to_external_proxy_bypasses_scopes() {
+    let mut harness = TestHarness::new().await.expect("Harness should start");
+    let junction_calls = harness.mock_junction.call_count.clone();
+    let proxy_calls = harness.mock_proxy.call_count.clone();
+    let service_info = IsolateServiceInfo {
+        operator_domain: TEST_EXTERNAL_OPERATOR_DOMAIN.to_string(),
+        service_name: TEST_SERVICE_NAME.to_string(),
+        ..Default::default()
+    };
+
+    add_backend_dependencies(
+        harness.isolate_id,
+        harness.mapper.clone(),
+        harness.manifest_validator.clone(),
+        &service_info,
+        false,
+        TEST_EXTERNAL_ROUTE_TYPE,
+    )
+    .await
+    .expect("Failed to add backend dependency");
+
+    // Simulate setting up the data scopes.
+    add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
+        .await
+        .expect("Should be able to add to DSM/RIM");
+
+    let mut request =
+        create_test_request(&service_info.operator_domain, &service_info.service_name);
+    // Omit scopes completely!
+    request.isolate_request_iscope = None;
+
+    // Requests without datascopes are validated and blocked.
+    let response = harness.client.invoke_ez(request).await;
+
+    assert!(response.is_err(), "Invoke should be blocked");
+    assert_eq!(response.unwrap_err().code(), tonic::Code::PermissionDenied);
+    assert_eq!(
+        proxy_calls.load(Ordering::SeqCst),
+        0,
+        "External proxy should have been called due to bypass"
+    );
+    assert_eq!(junction_calls.load(Ordering::SeqCst), 0, "Junction should NOT have been called");
+}
+
+#[tokio::test]
 async fn stream_routes_to_remote_handler() {
     let mut harness = TestHarness::new().await.expect("Harness should start");
     let remote_calls = harness.mock_ez_to_ez.call_count.clone();
@@ -1118,7 +1163,7 @@ async fn poll_isolate_state_success() {
         .await
         .expect("Should succeed");
 
-    assert_eq!(response.get_ref().isolate_state, IsolateState::Ready.into());
+    assert_eq!(response.get_ref().isolate_state, IsolateState::Ready as i32);
 }
 
 #[tokio::test]

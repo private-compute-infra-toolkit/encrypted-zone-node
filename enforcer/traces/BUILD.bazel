@@ -18,7 +18,7 @@ package(default_visibility = ["//enforcer:__subpackages__"])
 
 rust_library(
     name = "traces",
-    srcs = ["src/lib.rs"],
+    srcs = glob(["src/*.rs"]),
     visibility = ["//visibility:public"],
     deps = [
         "//enforcer/grpc_connector",
@@ -29,6 +29,7 @@ rust_library(
         "@crates//:opentelemetry-otlp",
         "@crates//:opentelemetry_sdk",
         "@crates//:tokio",
+        "@crates//:tonic",
         "@crates//:tracing",
         "@crates//:tracing-opentelemetry",
         "@crates//:tracing-subscriber",
@@ -84,5 +85,17 @@ rust_test(
     deps = [
         ":traces",
         "@crates//:tokio",
+    ],
+)
+
+rust_test(
+    name = "trace_context_test",
+    size = "small",
+    srcs = ["test/trace_context_test.rs"],
+    deps = [
+        ":traces",
+        "@crates//:opentelemetry",
+        "@crates//:opentelemetry_sdk",
+        "@crates//:tonic",
     ],
 )

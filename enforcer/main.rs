@@ -34,8 +34,6 @@ use junction::IsolateJunction;
 use logging::logger;
 use manifest_parser::{parse_isolate_runtime_configs, parse_manifest};
 use metrics::setup_otel_metrics;
-use opentelemetry::global;
-use opentelemetry_http::HeaderExtractor;
 use outbound_ez_to_ez_client::OutboundEzToEzClient;
 use outbound_ez_to_ez_handler::OutboundEzToEzHandler;
 use public_api::EzPublicApiService;
@@ -51,7 +49,6 @@ use std::sync::Arc;
 use tokio::net::UnixListener;
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server;
-use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 const PUBLIC_API_PORT_ENV_VAR: &str = "EZ_PUBLIC_API_PORT";
 const ISOLATE_MNGR_REQUEST_CHANNEL_SIZE: usize = 1024;
@@ -75,7 +72,7 @@ struct EnforcerInputs {
     #[arg(long)]
     otel_unsafe_endpoint: Option<String>,
     /// OTel traces endpoint
-    #[arg(long, default_value = "unix:///tmp/otlp_dapper_proxy.sock")]
+    #[arg(long)]
     otel_traces_endpoint: Option<String>,
     /// Disable metrics filtering for debugging
     #[arg(long, default_value_t = false)]
@@ -492,19 +489,9 @@ async fn launch_ez_public_api_server(
         panic!("Failed to parse PublicApi socket address '{socket_addr_str}': {e}")
     });
 
-    let mut server_builder = Server::builder()
-        .trace_fn(|req| {
-            let parent_context = global::get_text_map_propagator(|propagator| {
-                propagator.extract(&HeaderExtractor(req.headers()))
-            });
-            let span = tracing::info_span!("Enforcer.EzPublicApi", method = %req.uri().path());
-            let _ = span.set_parent(parent_context);
-            span
-        })
-        .add_service(
-            EzPublicApiServer::new(ez_public_api)
-                .max_decoding_message_size(max_decoding_message_size),
-        );
+    let mut server_builder = Server::builder().add_service(
+        EzPublicApiServer::new(ez_public_api).max_decoding_message_size(max_decoding_message_size),
+    );
 
     if let Some(diag_service) = diagnostics_service {
         server_builder = server_builder.add_service(DiagnosticServiceServer::new(diag_service));

@@ -86,7 +86,7 @@
   "enforcer/state/src/isolate_state_manager.rs": {
     "lines": 80
   },
-  "enforcer/trace_context/src/lib.rs": {
+  "enforcer/traces/src/context.rs": {
     "lines": 80
   }
 }

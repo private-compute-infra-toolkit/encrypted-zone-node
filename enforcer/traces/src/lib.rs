@@ -22,6 +22,8 @@ use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::{trace, Resource};
 use tracing_subscriber::{prelude::*, EnvFilter, Registry};
 
+pub mod context;
+
 pub const ENFORCER_SERVICE_NAME: &str = "enforcer";
 const CONNECT_RETRY_COUNT: usize = 10;
 const CONNECT_RETRY_DELAY_MS: u64 = 5000;

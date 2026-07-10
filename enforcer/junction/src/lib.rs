@@ -36,6 +36,7 @@ use std::time::Instant;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{metadata::MetadataValue, Request, Status, Streaming};
+use traces::context::inject_trace_context;
 pub mod error;
 use dashmap::DashMap;
 use data_scope::data_scope_validator::{
@@ -50,6 +51,8 @@ use opentelemetry::KeyValue;
 use state_manager::IsolateStateManager;
 use std::sync::Arc;
 use tokio::sync::oneshot;
+use tracing::Instrument;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 pub(crate) const CHANNEL_SIZE: usize = 128;
 const RETRY_COUNT: usize = 60;
@@ -88,7 +91,7 @@ impl Junction for IsolateJunction {
     // TODO Support session stickiness for each client based on their preference
     // (either at channel level or at request level)
     #[tracing::instrument(
-        name = "Enforcer.IsolateJunction.invoke_isolate",
+        name = "Enforcer.IsolateJunction/InvokeIsolate",
         skip(invoke_isolate_request),
         fields(
             control_plane_metadata = ?invoke_isolate_request.control_plane_metadata,
@@ -241,7 +244,7 @@ impl Junction for IsolateJunction {
         request_source_isolate_id_option: Option<IsolateId>,
         is_from_public_api: bool,
     ) -> JunctionChannels {
-        let (client_to_junction_tx, mut client_to_junction_rx) = channel(CHANNEL_SIZE);
+        let (client_to_junction_tx, client_to_junction_rx) = channel(CHANNEL_SIZE);
         let (junction_to_client_tx, junction_to_client_rx) = channel(CHANNEL_SIZE);
 
         let junction_channel = JunctionChannels {
@@ -249,138 +252,16 @@ impl Junction for IsolateJunction {
             junction_to_client: junction_to_client_rx,
         };
 
-        let isolate_junction_clone = self.clone();
-        let (metrics_context_tx, metrics_context_rx) = oneshot::channel();
-        // Spawn proxy task to avoid blocking while we wait for first request
+        let self_clone = self.clone();
         tokio::spawn(async move {
-            // receive initial request to setup long lived stream with Isolate
-            let Some(mut initial_invoke_request) = client_to_junction_rx.recv().await else {
-                log::info!("Missing initial invoke request");
-                let _ = junction_to_client_tx
-                    .send(Err(IsolateStatusCode::MissingControlPlaneMetadata.to_ez_error()))
-                    .await;
-                return;
-            };
-
-            let metric_attr =
-                MetricAttributes::from(initial_invoke_request.control_plane_metadata.as_ref());
-            let call_tracker = isolate_junction_clone.metrics.track_call(metric_attr.base());
-
-            // Send base attributes (no direction) to the response task
-            if metrics_context_tx.send((metric_attr.clone(), call_tracker)).is_err() {
-                // The receiver was dropped, so the stream is already dead.
-                return;
-            }
-
-            // use initial request to get IsolateId from DataScopeRequester
-            let destination_isolate_info_result =
-                isolate_junction_clone.get_isolate_id_based_on_scope(&initial_invoke_request).await;
-            let Ok(destination_isolate_info) = destination_isolate_info_result else {
-                let _ = junction_to_client_tx
-                    .send(Err(destination_isolate_info_result.unwrap_err().to_ez_error()))
-                    .await;
-                return;
-            };
-
-            isolate_junction_clone.spawn_isolate_state_update_task(
-                destination_isolate_info.id,
-                destination_isolate_info.new_state,
-            );
-
-            // Mask the initial request msg_id
-            let stream_id = rand::random::<u64>();
-            isolate_junction_clone
-                .write_request_payload_to_shm(
-                    destination_isolate_info.id,
-                    &mut initial_invoke_request,
+            self_clone
+                .run_stream_orchestrator(
+                    client_to_junction_rx,
+                    junction_to_client_tx,
+                    request_source_isolate_id_option,
+                    is_from_public_api,
                 )
                 .await;
-            let original_ipc_message_id =
-                match mask_streaming_msg_id(stream_id, &mut initial_invoke_request) {
-                    Ok(ipc_msg_id) => ipc_msg_id,
-                    Err(e) => {
-                        // Initial request must have an ipc_message_id
-                        let _ = junction_to_client_tx.send(Err(e.to_ez_error())).await;
-                        return;
-                    }
-                };
-            // Todo: Potential optimization. This operation involves a lock and can be run in a separate task to avoid
-            // blocking the critical path of setting up the stream.
-            isolate_junction_clone
-                .state_manager
-                .increment_inflight_counter(destination_isolate_info.id)
-                .await;
-            // Using TonicClient, create a new streaming rpc to Isolate
-            // and send initial request to Isolate
-            let (junction_to_isolate_tx, junction_to_isolate_rx) =
-                channel::<InvokeIsolateRequest>(CHANNEL_SIZE);
-            let outbound_stream = ReceiverStream::new(junction_to_isolate_rx);
-            if let Err(_e) = junction_to_isolate_tx.send(initial_invoke_request).await {
-                let _ = junction_to_client_tx
-                    .send(Err(IsolateStatusCode::DestinationChannelClosed.to_ez_error()))
-                    .await;
-                return;
-            }
-
-            // Spawn proxy task before connecting, to avoid deadlock when
-            // server waits for subsequent requests before sending headers.
-            let junction_to_isolate_tx_clone = junction_to_isolate_tx.clone();
-            let junction_to_client_tx_clone = junction_to_client_tx.clone();
-            let isolate_junction_clone_2 = isolate_junction_clone.clone();
-            let metric_attr_clone = metric_attr.clone();
-            tokio::spawn(async move {
-                isolate_junction_clone_2
-                    .proxy_streaming_isolate_requests(
-                        client_to_junction_rx,
-                        junction_to_isolate_tx_clone,
-                        junction_to_client_tx_clone,
-                        destination_isolate_info.id,
-                        stream_id,
-                        metric_attr_clone,
-                    )
-                    .await;
-            });
-
-            let connect_result = isolate_junction_clone
-                .establish_isolate_streaming_rpc(destination_isolate_info.id, outbound_stream)
-                .await;
-            let Ok(invoke_isolate_response_stream) = connect_result else {
-                let connect_error = connect_result.unwrap_err();
-                let connect_ez_error =
-                    EzError::Status(match connect_error.downcast_ref::<Status>() {
-                        Some(status) => status.clone(),
-                        _ => Status::internal(format!(
-                            "Error initiating stream with Isolate: {connect_error:#?}"
-                        )),
-                    });
-                // If send fails, decrement the counter we just incremented.
-                isolate_junction_clone
-                    .state_manager
-                    .decrement_inflight_counter(destination_isolate_info.id)
-                    .await;
-                let _ = junction_to_client_tx.send(Err(connect_ez_error)).await;
-                return;
-            };
-
-            let junction_clone = isolate_junction_clone.clone();
-            let junction_to_client_clone = junction_to_client_tx.clone();
-            let request_context = RequestContext {
-                isolate_id: destination_isolate_info.id,
-                request_source_isolate_id: request_source_isolate_id_option,
-                original_msg_id: original_ipc_message_id,
-                is_from_public_api,
-            };
-            // spawn response processing task
-            tokio::spawn(async move {
-                junction_clone
-                    .proxy_streaming_isolate_responses(
-                        invoke_isolate_response_stream,
-                        junction_to_client_clone,
-                        request_context,
-                        metrics_context_rx,
-                    )
-                    .await;
-            });
         });
 
         junction_channel
@@ -409,6 +290,198 @@ impl Junction for IsolateJunction {
 }
 
 impl IsolateJunction {
+    async fn run_stream_orchestrator(
+        &self,
+        mut client_to_junction_rx: Receiver<InvokeIsolateRequest>,
+        junction_to_client_tx: Sender<Result<InvokeIsolateResponse, EzError>>,
+        request_source_isolate_id_option: Option<IsolateId>,
+        is_from_public_api: bool,
+    ) {
+        // receive initial request to setup long lived stream with Isolate
+        let Some(mut initial_invoke_request) = client_to_junction_rx.recv().await else {
+            log::info!("Missing initial invoke request");
+            let _ = junction_to_client_tx
+                .send(Err(IsolateStatusCode::MissingControlPlaneMetadata.to_ez_error()))
+                .await;
+            return;
+        };
+
+        // Set parent context from the received streaming message
+        let parent_context = traces::context::extract_parent_context(
+            initial_invoke_request.control_plane_metadata.as_ref().map(|m| &m.metadata_headers),
+        );
+
+        let span = tracing::info_span!("Enforcer.IsolateJunction/StreamInvokeIsolate/FirstMessage");
+        if let Err(e) = span.set_parent(parent_context) {
+            tracing::warn!("Failed to set parent span: {e:?}");
+        }
+
+        let self_clone = self.clone();
+        async move {
+            let (metrics_context_tx, metrics_context_rx) = oneshot::channel();
+            let metric_attr =
+                MetricAttributes::from(initial_invoke_request.control_plane_metadata.as_ref());
+            let call_tracker = self_clone.metrics.track_call(metric_attr.base());
+
+            // Send base attributes (no direction) to the response task
+            if metrics_context_tx.send((metric_attr.clone(), call_tracker)).is_err() {
+                // The receiver was dropped, so the stream is already dead.
+                return;
+            }
+
+            // Phase 1: Resolve destination
+            let destination_isolate_id =
+                match self_clone.resolve_destination_isolate(&initial_invoke_request).await {
+                    Ok(id) => id,
+                    Err(e) => {
+                        let _ = junction_to_client_tx.send(Err(e)).await;
+                        return;
+                    }
+                };
+
+            // Phase 2: Prepare initial request
+            let (stream_id, original_ipc_message_id) = match self_clone
+                .prepare_initial_request(destination_isolate_id, &mut initial_invoke_request)
+                .await
+            {
+                Ok(res) => res,
+                Err(e) => {
+                    let _ = junction_to_client_tx.send(Err(e)).await;
+                    return;
+                }
+            };
+
+            // Phase 3: Start proxies and initiate RPC
+            let request_context = RequestContext {
+                isolate_id: destination_isolate_id,
+                request_source_isolate_id: request_source_isolate_id_option,
+                original_msg_id: original_ipc_message_id,
+                is_from_public_api,
+            };
+
+            self_clone
+                .start_streaming_proxies(
+                    destination_isolate_id,
+                    initial_invoke_request,
+                    client_to_junction_rx,
+                    junction_to_client_tx,
+                    stream_id,
+                    metric_attr,
+                    request_context,
+                    metrics_context_rx,
+                )
+                .await;
+        }
+        .instrument(span)
+        .await;
+    }
+
+    async fn resolve_destination_isolate(
+        &self,
+        initial_invoke_request: &InvokeIsolateRequest,
+    ) -> Result<IsolateId, EzError> {
+        let destination_isolate_info = self
+            .get_isolate_id_based_on_scope(initial_invoke_request)
+            .await
+            .map_err(|e| e.to_ez_error())?;
+
+        self.spawn_isolate_state_update_task(
+            destination_isolate_info.id,
+            destination_isolate_info.new_state,
+        );
+        Ok(destination_isolate_info.id)
+    }
+
+    async fn prepare_initial_request(
+        &self,
+        destination_isolate_id: IsolateId,
+        initial_invoke_request: &mut InvokeIsolateRequest,
+    ) -> Result<(u64, u64), EzError> {
+        let stream_id = rand::random::<u64>();
+        self.write_request_payload_to_shm(destination_isolate_id, initial_invoke_request).await;
+        let original_ipc_message_id = mask_streaming_msg_id(stream_id, initial_invoke_request)
+            .map_err(|e| e.to_ez_error())?;
+
+        if let Some(ref mut control_plane_metadata) = initial_invoke_request.control_plane_metadata
+        {
+            inject_trace_context(&mut control_plane_metadata.metadata_headers);
+        }
+
+        self.state_manager.increment_inflight_counter(destination_isolate_id).await;
+
+        Ok((stream_id, original_ipc_message_id))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn start_streaming_proxies(
+        &self,
+        destination_isolate_id: IsolateId,
+        initial_invoke_request: InvokeIsolateRequest,
+        client_to_junction_rx: Receiver<InvokeIsolateRequest>,
+        junction_to_client_tx: Sender<Result<InvokeIsolateResponse, EzError>>,
+        stream_id: u64,
+        metric_attr: MetricAttributes,
+        request_context: RequestContext,
+        metrics_context_rx: oneshot::Receiver<(
+            MetricAttributes,
+            metrics::common::CallTracker<JunctionMetrics>,
+        )>,
+    ) {
+        let (junction_to_isolate_tx, junction_to_isolate_rx) =
+            channel::<InvokeIsolateRequest>(CHANNEL_SIZE);
+        let outbound_stream = ReceiverStream::new(junction_to_isolate_rx);
+        if let Err(_e) = junction_to_isolate_tx.send(initial_invoke_request).await {
+            let _ = junction_to_client_tx
+                .send(Err(IsolateStatusCode::DestinationChannelClosed.to_ez_error()))
+                .await;
+            return;
+        }
+
+        let junction_to_isolate_tx_clone = junction_to_isolate_tx.clone();
+        let junction_to_client_tx_clone = junction_to_client_tx.clone();
+        let self_clone = self.clone();
+        let metric_attr_clone = metric_attr.clone();
+        tokio::spawn(async move {
+            self_clone
+                .proxy_streaming_isolate_requests(
+                    client_to_junction_rx,
+                    junction_to_isolate_tx_clone,
+                    junction_to_client_tx_clone,
+                    destination_isolate_id,
+                    stream_id,
+                    metric_attr_clone,
+                )
+                .await;
+        });
+
+        let connect_result =
+            self.establish_isolate_streaming_rpc(destination_isolate_id, outbound_stream).await;
+        let Ok(invoke_isolate_response_stream) = connect_result else {
+            let connect_error = connect_result.unwrap_err();
+            let connect_ez_error = EzError::Status(match connect_error.downcast_ref::<Status>() {
+                Some(status) => status.clone(),
+                _ => Status::internal(format!(
+                    "Error initiating stream with Isolate: {connect_error:#?}"
+                )),
+            });
+            self.state_manager.decrement_inflight_counter(destination_isolate_id).await;
+            let _ = junction_to_client_tx.send(Err(connect_ez_error)).await;
+            return;
+        };
+
+        let self_clone2 = self.clone();
+        tokio::spawn(async move {
+            self_clone2
+                .proxy_streaming_isolate_responses(
+                    invoke_isolate_response_stream,
+                    junction_to_client_tx,
+                    request_context,
+                    metrics_context_rx,
+                )
+                .await;
+        });
+    }
+
     async fn establish_isolate_streaming_rpc(
         &self,
         isolate_id: IsolateId,
@@ -566,39 +639,65 @@ impl IsolateJunction {
         metric_attr: MetricAttributes,
     ) {
         while let Some(mut invoke_isolate_request) = client_to_junction_rx.recv().await {
-            let _timer = self.metrics.track_message_processing(metric_attr.request());
-            let validate_scope_result =
-                self.validate_streaming_request_scope(&invoke_isolate_request, isolate_id).await;
-            let Ok(_) = validate_scope_result else {
-                if junction_to_client_tx
-                    .send(Err(validate_scope_result.unwrap_err().to_ez_error()))
-                    .await
-                    .is_err()
-                {
-                    // Break the stream if junction fails to send the error response
-                    log::warn!("Failed to send error response from the junction to the client");
-                    break;
-                }
-                continue;
-            };
-            self.write_request_payload_to_shm(isolate_id, &mut invoke_isolate_request).await;
-            match mask_streaming_msg_id(stream_id, &mut invoke_isolate_request) {
-                Ok(_) => {}
-                Err(e) => {
-                    // This case is only hit when ControlPlaneMetadata is empty which
-                    // is expected on initial connect when we send an empty request
-                    log::info!("failed to mask msg_id: {:?}", e);
-                }
+            let parent_context = traces::context::extract_parent_context(
+                invoke_isolate_request.control_plane_metadata.as_ref().map(|m| &m.metadata_headers),
+            );
+
+            let span = tracing::info_span!("Enforcer.IsolateJunction/StreamInvokeIsolate/Message");
+            if let Err(e) = span.set_parent(parent_context) {
+                tracing::warn!("Failed to set parent span: {e:?}");
             }
-            let send_result = junction_to_isolate_tx.send(invoke_isolate_request).await;
-            // break if we are unable to route request to Isolate
-            if send_result.is_err() {
-                let _ = junction_to_client_tx
-                    .send(Err(IsolateStatusCode::DestinationChannelClosed.to_ez_error()))
+
+            let result = async {
+                let _timer = self.metrics.track_message_processing(metric_attr.request());
+                let validate_scope_result = self
+                    .validate_streaming_request_scope(&invoke_isolate_request, isolate_id)
                     .await;
-                // TODO add retry send and reset
+                let Ok(_) = validate_scope_result else {
+                    if junction_to_client_tx
+                        .send(Err(validate_scope_result.unwrap_err().to_ez_error()))
+                        .await
+                        .is_err()
+                    {
+                        // Break the stream if junction fails to send the error response
+                        log::warn!("Failed to send error response from the junction to the client");
+                        return Err(());
+                    }
+                    return Ok(());
+                };
+                self.write_request_payload_to_shm(isolate_id, &mut invoke_isolate_request).await;
+                match mask_streaming_msg_id(stream_id, &mut invoke_isolate_request) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        // This case is only hit when ControlPlaneMetadata is empty which
+                        // is expected on initial connect when we send an empty request
+                        log::info!("failed to mask msg_id: {:?}", e);
+                    }
+                }
+
+                if let Some(ref mut control_plane_metadata) =
+                    invoke_isolate_request.control_plane_metadata
+                {
+                    inject_trace_context(&mut control_plane_metadata.metadata_headers);
+                }
+
+                let send_result = junction_to_isolate_tx.send(invoke_isolate_request).await;
+                // break if we are unable to route request to Isolate
+                if send_result.is_err() {
+                    let _ = junction_to_client_tx
+                        .send(Err(IsolateStatusCode::DestinationChannelClosed.to_ez_error()))
+                        .await;
+                    // TODO add retry send and reset
+                    return Err(());
+                };
+                Ok(())
+            }
+            .instrument(span)
+            .await;
+
+            if result.is_err() {
                 break;
-            };
+            }
         }
     }
 
@@ -747,6 +846,14 @@ impl IsolateJunction {
         } else if is_from_public_api {
             enforce_public_api_invoke_isolate_resp_scopes(resp).map_err(|e| e.to_ez_error())?;
         }
+        let is_missing_scope = resp.isolate_output_iscope.is_none();
+        let has_data = resp.isolate_output.is_some() || !resp.response_extensions.is_empty();
+
+        // TODO: use the `current_scope` instead.
+        if is_missing_scope && has_data {
+            return Err(DataScopeError::InvalidDataScopeType.to_ez_error());
+        }
+
         if let Some(response_iscopes) = &resp.isolate_output_iscope {
             self.manifest_validator
                 .validate_output_scope(ValidateManifestOutputScopeRequest {
@@ -755,9 +862,6 @@ impl IsolateJunction {
                 })
                 .await
                 .map_err(|e| e.to_ez_error())?;
-        } else if resp.isolate_output.is_some() {
-            // Only return an error if there are no scopes, but there is a payload
-            return Err(DataScopeError::InvalidDataScopeType.to_ez_error());
         };
         Ok(())
     }

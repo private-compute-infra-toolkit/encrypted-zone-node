@@ -43,4 +43,8 @@ message EzCallResponse {
   // Outputs to be returned to the caller. Required.
   enforcer.v1.EzPayloadScope payload_scope = 1;
   enforcer.v1.EzPayloadData payload_data = 2;
+  // Serialized RPC extensions.
+  // Note: this is different than request_metadata intended for HTTP-style
+  // headers which are naturally key-value pairs.
+  bytes response_extensions = 3;
 }
