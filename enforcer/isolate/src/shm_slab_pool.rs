@@ -133,6 +133,8 @@ pub struct ShmSlabPool {
     // slots. We start at the last bitmask with successful allocations, skipping
     // previously full bitmasks
     search_index: AtomicU64,
+    // Global counter for the total number of CAS failures encountered by this pool
+    cas_failures: std::sync::atomic::AtomicUsize,
 }
 
 impl ShmSlabPool {
@@ -195,6 +197,7 @@ impl ShmSlabPool {
             header_mmap,
             data_mmap,
             search_index: AtomicU64::new(0),
+            cas_failures: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -328,6 +331,7 @@ impl ShmSlabPool {
                         }
                         // CAS failure returns the current mask, we update our local copy so we try again.
                         Err(actual_mask) => {
+                            self.cas_failures.fetch_add(1, Ordering::Relaxed);
                             cas_failures += 1;
                             log::warn!("CAS failure #{} for current bitmask", cas_failures);
                             if cas_failures >= CAS_FAILURE_LIMIT {
@@ -426,6 +430,12 @@ impl ShmSlabPool {
             atomic_mask.fetch_and(!(1 << bit_idx), Ordering::SeqCst);
         }
         Ok(())
+    }
+
+    /// Returns the total number of CAS (Compare-And-Swap) failures encountered during allocations.
+    /// TODO: b/517588932 - remove public method once fine tuning of allocation strategy is complete
+    pub fn get_cas_failures(&self) -> usize {
+        self.cas_failures.load(Ordering::Relaxed)
     }
 }
 

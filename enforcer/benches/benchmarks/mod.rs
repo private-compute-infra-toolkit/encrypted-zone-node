@@ -15,4 +15,5 @@
 pub mod benchmark_data_scope;
 pub mod benchmark_example_addition;
 pub mod benchmark_example_sleep;
+pub mod benchmark_shm_slab_pool;
 pub mod benchmark_trace_context;

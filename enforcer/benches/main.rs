@@ -21,5 +21,6 @@ criterion_main! {
     benchmarks::benchmark_example_addition::benchmark_example_addition,
     benchmarks::benchmark_example_sleep::benchmark_example_sleep,
     benchmarks::benchmark_data_scope::benchmark_data_scope,
+    benchmarks::benchmark_shm_slab_pool::benchmark_shm_slab_pool,
     benchmarks::benchmark_trace_context::benchmark_trace_context,
 }
