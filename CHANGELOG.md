@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## 0.17.1 (2026-07-20)
+
+
+### EZ Policy Enforcer
+
+* **enforcer:** drop junction_to_isolate_tx to avoid half-close deadlock ([ef31222]( )), closes [/depot/google3/security/oak/tools/pricli/commands/session.cc#11]( ) [/depot/google3/security/oak/tools/pricli/commands/session.cc#11]( )
+
 ## 0.17.0 (2026-07-15)
 
 

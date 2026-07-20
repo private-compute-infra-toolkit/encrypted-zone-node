@@ -1978,3 +1978,168 @@ async fn test_junction_streaming_response_shm_payload() {
         _ => panic!("Expected InlineData delivery method"),
     }
 }
+
+#[derive(Clone)]
+struct DelayedHeaderIsolate {
+    cancellation_tx: mpsc::Sender<()>,
+    first_request_tx: std::sync::Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+}
+
+#[tonic::async_trait]
+impl EzIsolateBridge for DelayedHeaderIsolate {
+    type StreamInvokeIsolateStream =
+        tokio_stream::wrappers::ReceiverStream<Result<InvokeIsolateResponse, Status>>;
+
+    async fn stream_invoke_isolate(
+        &self,
+        request: Request<Streaming<InvokeIsolateRequest>>,
+    ) -> Result<Response<Self::StreamInvokeIsolateStream>, Status> {
+        use tokio_stream::StreamExt;
+        let mut stream = request.into_inner();
+
+        if let Some(_msg) = stream.next().await {
+            // Signal the test that the stream is open and the first message arrived
+            if let Some(tx) = self.first_request_tx.lock().unwrap().take() {
+                let _ = tx.send(());
+            } // else it was already consumed
+        }
+
+        // Deliberately refuse to return `Response::new()` (which sends HTTP/2 headers).
+        // We sit in a loop draining the stream until we see EOF (client dropped).
+        // Without the fix, the `END_STREAM` frame will never arrive because Tonic
+        // won't unblock the proxy task's sender until headers are received.
+        while let Some(msg) = stream.next().await {
+            match msg {
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+
+        let _ = self.cancellation_tx.send(()).await;
+
+        Err(Status::cancelled("cancelled"))
+    }
+
+    async fn invoke_isolate(
+        &self,
+        _request: Request<InvokeIsolateRequest>,
+    ) -> Result<Response<InvokeIsolateResponse>, Status> {
+        unimplemented!()
+    }
+
+    async fn update_isolate_state(
+        &self,
+        _request: Request<enforcer_proto::enforcer::v1::UpdateIsolateStateRequest>,
+    ) -> Result<Response<enforcer_proto::enforcer::v1::UpdateIsolateStateResponse>, Status> {
+        unimplemented!()
+    }
+}
+
+async fn start_delayed_header_isolate_server(
+    test_isolate_id: IsolateId,
+    cancellation_tx: mpsc::Sender<()>,
+    first_request_tx: tokio::sync::oneshot::Sender<()>,
+) -> tokio::sync::oneshot::Sender<()> {
+    let fake_isolate = DelayedHeaderIsolate {
+        cancellation_tx,
+        first_request_tx: std::sync::Arc::new(std::sync::Mutex::new(Some(first_request_tx))),
+    };
+    let unix_listener =
+        UnixListener::bind(format!("{}{}", DEFAULT_ISOLATE_UNIX_SOCKET, test_isolate_id)).unwrap();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+    tokio::spawn(async move {
+        Server::builder()
+            .add_service(EzIsolateBridgeServer::new(fake_isolate))
+            .serve_with_incoming_shutdown(UnixListenerStream::new(unix_listener), async {
+                shutdown_rx.await.ok();
+            })
+            .await
+    });
+
+    shutdown_tx
+}
+
+#[tokio::test]
+async fn test_junction_streaming_half_close_without_http2_headers() {
+    let isolate_service_mapper = IsolateServiceMapper::default();
+    let (container_manager_request_tx, _container_manager_request_rx) =
+        mpsc::channel(JUNCTION_TEST_CHANNEL_SIZE);
+    let container_manager_requester = ContainerManagerRequester::new(container_manager_request_tx);
+    let shared_memory_manager = SharedMemManager::new(container_manager_requester.clone(), 0, 0);
+    let fileshare_manager = FileshareManager::new(container_manager_requester.clone());
+    let data_scope_requester = DataScopeRequester::new(u64::MAX);
+    let manifest_validator = ManifestValidator::default();
+    let isolate_state_manager =
+        IsolateStateManager::new(data_scope_requester.clone(), container_manager_requester.clone());
+    let isolate_junction = IsolateJunction::new(
+        data_scope_requester.clone(),
+        isolate_service_mapper.clone(),
+        shared_memory_manager.clone(),
+        fileshare_manager.clone(),
+        isolate_state_manager.clone(),
+        manifest_validator.clone(),
+        100 * 1024 * 1024,
+    );
+
+    let isolate_service_info = IsolateServiceInfo {
+        operator_domain: ECHO_ISOLATE_OPERATOR_DOMAIN.to_string(),
+        service_name: ECHO_ISOLATE_SERVICE_NAME.to_string(),
+        ..Default::default()
+    };
+
+    let binary_services_index = isolate_service_mapper
+        .new_binary_index(vec![isolate_service_info.clone()], false, "".to_string(), "".to_string())
+        .await
+        .expect("Should be a valid binary services index");
+
+    manifest_validator
+        .add_scope_info(AddManifestScopeRequest {
+            binary_services_index,
+            max_input_scope: DataScopeType::UserPrivate,
+            max_output_scope: DataScopeType::UserPrivate,
+        })
+        .await
+        .expect("Should succeed to add input output scopes in manifest validator");
+
+    let isolate_id = IsolateId::new(binary_services_index);
+
+    let (cancellation_tx, mut cancellation_rx) = mpsc::channel(1);
+    let (first_request_tx, first_request_rx) = tokio::sync::oneshot::channel();
+
+    let shutdown_tx =
+        start_delayed_header_isolate_server(isolate_id, cancellation_tx, first_request_tx).await;
+
+    let add_isolate_request = create_add_isolate_request(isolate_id);
+    isolate_state_manager.add_isolate(add_isolate_request).await;
+    isolate_state_manager.update_state(isolate_id, IsolateState::Ready).await.unwrap();
+
+    assert!(isolate_junction
+        .connect_isolate(isolate_id, format!("{}{}", DEFAULT_ISOLATE_UNIX_SOCKET, isolate_id))
+        .await
+        .is_ok());
+
+    let client_junction_channels = isolate_junction.stream_invoke_isolate(None, false).await;
+
+    // Send the first request (which initiates the gRPC stream).
+    // The server will intentionally NOT send HTTP/2 response headers back.
+    let invoke_isolate_request = create_random_request(&isolate_service_info);
+    assert!(client_junction_channels.client_to_junction.send(invoke_isolate_request).await.is_ok());
+
+    // Wait deterministically for the Isolate to acknowledge the first message
+    first_request_rx.await.expect("Server failed to receive first request!");
+
+    // Drop the client-side sender! This mimics the upstream ATS/client abruptly
+    // half-closing the stream.
+    drop(client_junction_channels.client_to_junction);
+
+    // Wait for the mock server to signal that it successfully received the EOF
+    // and exited its loop.
+    // Without the fix, this times out and panics because Tonic keeps the
+    // stream open indefinitely.
+    let _ = timeout(Duration::from_secs(4), cancellation_rx.recv())
+        .await
+        .expect("Test deadlocked! The isolate server never observed a stream half-close sent by the client.");
+
+    let _ = shutdown_tx.send(());
+}
