@@ -158,6 +158,7 @@ struct ContainerStartupArgs {
     publisher_id: String,
     metrics_policy: IsolateMetricsPolicy,
     run_isolate_as_unprivileged: bool,
+    number_of_isolates: i32,
 }
 
 impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
@@ -199,6 +200,26 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             .post_process_manifest(ez_manifest)
             .await
             .context("Failed to post-process manifest")?;
+
+        let boot_requests: Vec<_> = isolate_mngr
+            .container_startup_args_map
+            .iter()
+            .map(|entry| {
+                let args = entry.value();
+                (*entry.key(), args.number_of_isolates, args.strictest_scope)
+            })
+            .collect();
+
+        for (binary_services_index, num_isolates, strictest_scope) in boot_requests {
+            for _ in 0..num_isolates {
+                let add_req = AddIsolateRequest {
+                    isolate_id: IsolateId::new(binary_services_index),
+                    current_data_scope_type: DataScopeType::Public,
+                    allowed_data_scope_type: strictest_scope,
+                };
+                isolate_mngr.add_new_isolate(add_req, /*restart_count=*/ 0).await?;
+            }
+        }
 
         // Spawn to avoid blocking the constructor
         let mut isolate_mngr_clone = isolate_mngr.clone();
@@ -370,6 +391,7 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             // Use an empty metrics policy if nothing is specified
             metrics_policy: args.binary_manifest.metrics_policy.unwrap_or_default(),
             run_isolate_as_unprivileged: self.run_isolate_as_unprivileged,
+            number_of_isolates: args.binary_manifest.number_of_isolates,
         };
 
         self.container_startup_args_map
@@ -381,18 +403,6 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
                 "number_of_isolates is 0 for package {:#?}, no isolates will be launched.",
                 args.publisher_id
             );
-        } else {
-            for _ in 0..number_of_isolates {
-                self.add_new_isolate(
-                    AddIsolateRequest {
-                        isolate_id: IsolateId::new(binary_services_index),
-                        current_data_scope_type: DataScopeType::Public,
-                        allowed_data_scope_type: strictest_scope,
-                    },
-                    0,
-                )
-                .await?;
-            }
         }
         Ok(())
     }
