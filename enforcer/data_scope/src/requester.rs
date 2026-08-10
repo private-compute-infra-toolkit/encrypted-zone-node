@@ -61,6 +61,24 @@ impl DataScopeRequester {
         }
     }
 
+    /// Pre-registers an Isolate's `BinaryServicesIndex` and maximum allowed data scope.
+    ///
+    /// For Ratified Isolates, this ensures `get_isolate_set` returns `NoMatchingIsolates`
+    /// (retryable) instead of `InvalidIsolateServiceIndex` (non-retryable) before `IsolateState::Ready`.
+    /// For Opaque Isolates, this is a no-op as `DataScopeManager` already returns `NoMatchingIsolates`
+    /// when queried before any instance is ready.
+    pub async fn register_isolate_scope(
+        &self,
+        binary_services_index: isolate_info::BinaryServicesIndex,
+        allowed_data_scope_type: data_scope_proto::enforcer::v1::DataScopeType,
+    ) {
+        if binary_services_index.is_ratified_binary() {
+            self.ratified_isolate_manager
+                .register_isolate_scope(binary_services_index, allowed_data_scope_type)
+                .await;
+        }
+    }
+
     /// Removes the Isolate from DataScopeManager. Returns
     /// [DataScopeError::UnknownIsolateId] if Isolate is not registered with DataScopeManager.
     pub async fn remove_isolate(

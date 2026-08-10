@@ -205,6 +205,7 @@ impl TestHarness {
             interceptor: interceptor.clone(),
             otel_traces_endpoint,
             run_isolate_as_unprivileged: false,
+            enable_syscall_filtering: false,
             shm_num_slots: SHM_NUM_SLOTS,
             shm_slot_size: SHM_SLOT_SIZE,
             shm_payload_threshold: SHM_PAYLOAD_THRESHOLD,

@@ -184,6 +184,13 @@ struct EnforcerInputs {
 
     #[arg(
         long,
+        default_value_t = false,
+        help = "Enable syscall filtering for Isolates. Note: This argument will be deprecated in the future as syscall filtering will be enabled by default for all workloads."
+    )]
+    enable_syscall_filtering: bool,
+
+    #[arg(
+        long,
         default_value_t = 1.0 / ((1_u32 << 17) as f64),
         help = "Sampler probability for traces."
     )]
@@ -218,6 +225,12 @@ fn main() -> anyhow::Result<()> {
     rt.block_on(async {
         let enforcer_inputs = EnforcerInputs::parse();
         logger::setup_logging()?;
+
+        // TODO: This flag affects both Opaque and Ratified Isolates today.
+        // In the future, it may be applied to just Opaque Isolates.
+        if enforcer_inputs.enable_syscall_filtering {
+            container_custom::seccomp::pre_initialize_default_profile();
+        }
 
         let _otel_providers = setup_otel_metrics(
             enforcer_inputs.otel_safe_endpoint.clone(),
@@ -445,6 +458,7 @@ fn main() -> anyhow::Result<()> {
             interceptor,
             otel_traces_endpoint: enforcer_inputs.otel_traces_endpoint.clone(),
             run_isolate_as_unprivileged: enforcer_inputs.run_isolate_as_unprivileged,
+            enable_syscall_filtering: enforcer_inputs.enable_syscall_filtering,
             shm_num_slots: enforcer_inputs.shm_num_slots,
             shm_slot_size: enforcer_inputs.shm_slot_size,
             shm_payload_threshold: enforcer_inputs.shm_payload_threshold,

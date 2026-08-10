@@ -14,6 +14,7 @@
 
 use container::{
     Container, ContainerOptions, ContainerRoot, ContainerRunStatus, MountOptions, NetworkOptions,
+    SeccompAction, SeccompProfile, SeccompRule,
 };
 use container_custom::ContainerCustom;
 use std::collections::HashSet;
@@ -22,7 +23,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
-use tokio::io::Interest;
+use tokio::io::{AsyncReadExt, Interest};
 use tokio::net::UnixListener;
 use tokio::time::{self, sleep, Duration};
 
@@ -78,6 +79,7 @@ fn default_container_opts(operation: &str, mount_src: Option<PathBuf>) -> Contai
         network: NetworkOptions::default(),
         env: vec![],
         run_isolate_as_unprivileged: false,
+        seccomp_profile: Default::default(),
     }
 }
 
@@ -461,4 +463,45 @@ async fn container_prevents_intermediate_symlink_traversal() {
     // 6. Verify that the file was NOT created on the host
     let created_file_path = host_path.join("created_by_container");
     assert!(!created_file_path.exists(), "The host file should not be created!");
+}
+
+async fn run_seccomp_test(action: SeccompAction) -> (ContainerRunStatus, String) {
+    let (uds_dir, listener) = setup();
+
+    let opts = ContainerOptions {
+        seccomp_profile: SeccompProfile::Custom {
+            rules: vec![SeccompRule { syscall_number: libc::SYS_mkdir, action }],
+            default_action: SeccompAction::Allow,
+        },
+        ..default_container_opts("try-mkdir", Some(uds_dir.path().to_path_buf()))
+    };
+
+    let mut container = default_container();
+    container.start(&opts).await.unwrap();
+
+    let mut response = String::new();
+    if let Ok(Ok((mut socket, _))) = time::timeout(Duration::from_secs(2), listener.accept()).await
+    {
+        let _ = socket.read_to_string(&mut response).await;
+    }
+
+    sleep(Duration::from_millis(500)).await;
+    (container.get_run_status().unwrap(), response)
+}
+
+#[tokio::test]
+async fn container_seccomp_kill() {
+    let (status, _) = run_seccomp_test(SeccompAction::KillProcess).await;
+    assert_eq!(status, ContainerRunStatus::Signaled(libc::SIGSYS));
+}
+
+#[tokio::test]
+async fn container_seccomp_errno() {
+    let (status, response) = run_seccomp_test(SeccompAction::Errno(libc::EPERM)).await;
+    assert_eq!(
+        response,
+        libc::EPERM.to_string(),
+        "Container should have reported EPERM from seccomp"
+    );
+    assert_eq!(status, ContainerRunStatus::Exited(0));
 }

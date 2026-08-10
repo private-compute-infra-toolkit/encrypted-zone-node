@@ -66,6 +66,38 @@ pub struct NetworkOptions {
     pub bring_up_loopback_interface: bool,
 }
 
+/// The action to take when a system call matches a seccomp rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SeccompAction {
+    /// Allow the system call.
+    Allow,
+    /// Terminate the process.
+    KillProcess,
+    /// Return the specified error number.
+    Errno(i32),
+}
+
+/// A rule specifying an action for a specific system call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeccompRule {
+    /// The system call number.
+    pub syscall_number: i64,
+    /// The action to take.
+    pub action: SeccompAction,
+}
+
+/// A seccomp profile applied to the container.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum SeccompProfile {
+    /// No seccomp filtering is applied.
+    #[default]
+    Unconfined,
+    /// Apply a default Docker-like profile blocking dangerous syscalls.
+    Default,
+    /// Apply custom rules. Syscalls not matching any rule will use the default action.
+    Custom { rules: Vec<SeccompRule>, default_action: SeccompAction },
+}
+
 /// Options for configuring a container instance.
 #[derive(Debug, Default)]
 pub struct ContainerOptions {
@@ -83,6 +115,8 @@ pub struct ContainerOptions {
     pub env: Vec<String>,
     /// If true, the container will run as an unprivileged user (UID 1000).
     pub run_isolate_as_unprivileged: bool,
+    /// The seccomp profile to apply to the container.
+    pub seccomp_profile: SeccompProfile,
 }
 
 /// Represents the memory statistics of a container.

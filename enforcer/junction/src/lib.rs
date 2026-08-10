@@ -437,7 +437,6 @@ impl IsolateJunction {
             return;
         }
 
-        let junction_to_isolate_tx_clone = junction_to_isolate_tx.clone();
         let junction_to_client_tx_clone = junction_to_client_tx.clone();
         let self_clone = self.clone();
         let metric_attr_clone = metric_attr.clone();
@@ -445,7 +444,7 @@ impl IsolateJunction {
             self_clone
                 .proxy_streaming_isolate_requests(
                     client_to_junction_rx,
-                    junction_to_isolate_tx_clone,
+                    junction_to_isolate_tx,
                     junction_to_client_tx_clone,
                     destination_isolate_id,
                     stream_id,

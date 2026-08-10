@@ -1,0 +1,37 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package enforcer.v2;
+
+import "enforcer/v2/data_scope_type.proto";
+
+// Describes a service implemented in the binary, to run as an EZ Isolate.
+// The domain of the service will be the same as the publisher_id of the
+// manifest that directly describes the service binary (that is, if the binary
+// is included via a bundle, only the binary's publisher_id matters and not
+// the publisher_id of the containing bundle.)
+message EzServiceSpec {
+  // Public (redacted) service name, as will be surfaced by monitoring metrics
+  string service_name = 1;
+  // Generic (redacted) method name and input/output types
+  repeated EzMethodSpec method_specs = 2;
+}
+
+message EzMethodSpec {
+  string method_name = 1;
+  repeated enforcer.v2.DataScopeType input_scope_types = 2;
+  repeated enforcer.v2.DataScopeType output_scope_types = 3;
+}

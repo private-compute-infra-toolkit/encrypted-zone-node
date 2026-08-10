@@ -47,6 +47,7 @@ enum Operation {
     VerifyTmpfsMount,
     VerifyEzMount,
     GetUid,
+    TryMkdir,
 }
 
 #[derive(Parser)]
@@ -242,6 +243,16 @@ fn main() -> anyhow::Result<()> {
             let mut stream = UnixStream::connect(UDS_PATH)?;
             let uid = users::get_current_uid();
             stream.write_all(uid.to_string().as_bytes())?;
+        }
+        Operation::TryMkdir => {
+            let mut stream = UnixStream::connect(UDS_PATH)?;
+            let ret = unsafe { libc::mkdir(c"/test_mkdir".as_ptr(), 0o777) };
+            if ret == 0 {
+                stream.write_all(b"success")?;
+            } else {
+                let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+                stream.write_all(err.to_string().as_bytes())?;
+            }
         }
     }
     Ok(())

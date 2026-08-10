@@ -130,6 +130,46 @@ async fn test_get_isolate_no_matching_isolates() -> Result<(), Box<dyn std::erro
 }
 
 #[tokio::test]
+async fn test_get_isolate_registered_unready_returns_no_matching_isolates(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let data_scope_requester = DataScopeRequester::new(u64::MAX);
+    let binary_services_index = BinaryServicesIndex::new(true);
+    data_scope_requester.register_isolate_scope(binary_services_index, DataScopeType::Public).await;
+
+    let mut get_isolate_request = create_get_isolate_request(true);
+    get_isolate_request.binary_services_index = binary_services_index;
+    get_isolate_request.data_scope_type = DataScopeType::Public;
+    assert!(matches!(
+        data_scope_requester.get_isolate(get_isolate_request).await,
+        Err(DataScopeError::NoMatchingIsolates)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_register_isolate_scope_noop_for_opaque_isolate(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let data_scope_requester = DataScopeRequester::new(u64::MAX);
+    // Ensure we are using an opaque isolate index so `is_ratified_binary()` returns false
+    let binary_services_index = isolate_info::BinaryServicesIndex::new(false);
+
+    // This should act as a no-op internally, yielding `is_ratified_binary() == false` branch
+    data_scope_requester.register_isolate_scope(binary_services_index, DataScopeType::Public).await;
+
+    let mut get_isolate_request = create_get_isolate_request(false);
+    get_isolate_request.binary_services_index = binary_services_index;
+    get_isolate_request.data_scope_type = DataScopeType::Public;
+
+    // Because it was an unmapped opaque isolate that was rightfully ignored by register_isolate_scope,
+    // the system should return NoMatchingIsolates.
+    assert!(matches!(
+        data_scope_requester.get_isolate(get_isolate_request).await,
+        Err(DataScopeError::NoMatchingIsolates)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_get_isolate_invalid_data_scope_type() -> Result<(), Box<dyn std::error::Error>> {
     let data_scope_requester = DataScopeRequester::new(u64::MAX);
     for is_ratified in [true, false] {

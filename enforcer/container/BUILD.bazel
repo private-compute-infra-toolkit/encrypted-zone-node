@@ -46,6 +46,7 @@ rust_library(
     name = "container_custom",
     srcs = [
         "src/container_custom.rs",
+        "src/seccomp.rs",
     ],
     visibility = ["//visibility:public"],
     deps = [
@@ -77,6 +78,7 @@ rust_test(
         ":container_custom",
         ":utils",
         "@crates//:anyhow",
+        "@crates//:libc",
         "@crates//:tempfile",
         "@crates//:tokio",
     ],

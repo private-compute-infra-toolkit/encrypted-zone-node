@@ -97,6 +97,7 @@ pub struct ContainerManager<ContainerT: Container> {
     interceptor: Interceptor,
     otel_traces_endpoint: Option<String>,
     run_isolate_as_unprivileged: bool,
+    enable_syscall_filtering: bool,
     operator_role: String,
 }
 
@@ -118,6 +119,7 @@ pub struct ContainerManagerArgs {
     pub isolate_runtime_configs: IsolateRuntimeConfigs,
     pub otel_traces_endpoint: Option<String>,
     pub run_isolate_as_unprivileged: bool,
+    pub enable_syscall_filtering: bool,
     pub shm_num_slots: u64,
     pub shm_slot_size: u64,
     pub shm_payload_threshold: u64,
@@ -158,6 +160,7 @@ struct ContainerStartupArgs {
     publisher_id: String,
     metrics_policy: IsolateMetricsPolicy,
     run_isolate_as_unprivileged: bool,
+    number_of_isolates: i32,
 }
 
 impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
@@ -176,6 +179,7 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             interceptor: args.interceptor,
             otel_traces_endpoint: args.otel_traces_endpoint,
             run_isolate_as_unprivileged: args.run_isolate_as_unprivileged,
+            enable_syscall_filtering: args.enable_syscall_filtering,
             operator_role: args.operator_role.clone(),
         };
 
@@ -199,6 +203,35 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             .post_process_manifest(ez_manifest)
             .await
             .context("Failed to post-process manifest")?;
+
+        let boot_requests: Vec<_> = isolate_mngr
+            .container_startup_args_map
+            .iter()
+            .map(|entry| {
+                let args = entry.value();
+                (*entry.key(), args.number_of_isolates, args.strictest_scope)
+            })
+            .collect();
+
+        // Register all intended Ratified Isolates globally *before* spawning any containers
+        // to ensure concurrent dependants gracefully retry with NoMatchingIsolates (ResourceExhausted).
+        for (binary_services_index, _num_isolates, strictest_scope) in boot_requests.iter() {
+            isolate_mngr
+                .state_manager
+                .register_isolate_scope(*binary_services_index, *strictest_scope)
+                .await;
+        }
+
+        for (binary_services_index, num_isolates, strictest_scope) in boot_requests {
+            for _ in 0..num_isolates {
+                let add_req = AddIsolateRequest {
+                    isolate_id: IsolateId::new(binary_services_index),
+                    current_data_scope_type: DataScopeType::Public,
+                    allowed_data_scope_type: strictest_scope,
+                };
+                isolate_mngr.add_new_isolate(add_req, /*restart_count=*/ 0).await?;
+            }
+        }
 
         // Spawn to avoid blocking the constructor
         let mut isolate_mngr_clone = isolate_mngr.clone();
@@ -370,6 +403,7 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             // Use an empty metrics policy if nothing is specified
             metrics_policy: args.binary_manifest.metrics_policy.unwrap_or_default(),
             run_isolate_as_unprivileged: self.run_isolate_as_unprivileged,
+            number_of_isolates: args.binary_manifest.number_of_isolates,
         };
 
         self.container_startup_args_map
@@ -381,18 +415,6 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
                 "number_of_isolates is 0 for package {:#?}, no isolates will be launched.",
                 args.publisher_id
             );
-        } else {
-            for _ in 0..number_of_isolates {
-                self.add_new_isolate(
-                    AddIsolateRequest {
-                        isolate_id: IsolateId::new(binary_services_index),
-                        current_data_scope_type: DataScopeType::Public,
-                        allowed_data_scope_type: strictest_scope,
-                    },
-                    0,
-                )
-                .await?;
-            }
         }
         Ok(())
     }
@@ -687,6 +709,11 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             #[cfg(not(feature = "disable_netns"))]
             network: NetworkOptions::default(),
             run_isolate_as_unprivileged: container_startup_args.run_isolate_as_unprivileged,
+            seccomp_profile: if self.enable_syscall_filtering {
+                container::SeccompProfile::Default
+            } else {
+                container::SeccompProfile::Unconfined
+            },
         };
         self.isolate_ez_service_mngr
             .start_isolate_ez_server(isolate_ez_service_manager::StartIsolateEzServerArgs {

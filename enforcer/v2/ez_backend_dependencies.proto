@@ -1,0 +1,56 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package enforcer.v2;
+
+// EzBackendDependencies wraps a list of backend dependencies.
+// This is used to serialize the dependencies as a top-level textproto.
+message EzBackendDependencies {
+  // The list of backend dependencies.
+  repeated EzBackendDependency ez_backend_dependencies = 1;
+}
+
+message EzBackendDependency {
+  string operator_domain = 1;
+  string publisher_id = 2;
+  string isolate_name = 3;
+
+  string service_name = 4;
+  string method_name = 5;
+
+  // RouteType defines how the dependency service should be routed.
+  enum RouteType {
+    // Unspecified route type. This should not be used.
+    ROUTE_TYPE_UNSPECIFIED = 0;
+    // Should be used when an Isolate needs to reach a service outside of EZ.
+    ROUTE_TYPE_EXTERNAL = 1;
+    // Should be used when an Isolate needs to reach a local Isolate on the same
+    // EZ instance.
+    ROUTE_TYPE_INTERNAL = 2;
+    // Should be used when an Isolate needs to reach an Isolate on a different
+    // EZ instance.
+    ROUTE_TYPE_REMOTE = 3;
+  }
+  // The type of routing to use for this backend dependency.
+  // Currently, this field is only used to distinguish ROUTE_TYPE_EXTERNAL.
+  // It is MANDATORY to set this field to ROUTE_TYPE_EXTERNAL for external
+  // (i.e., outside the encrypted zone) endpoints. For other route types, this
+  // field is optional.
+  RouteType route_type = 6;
+  // TODO: Add additional metadata describing the expected interaction types,
+  // e.g., load balancing strategies, streaming or not, chaffing related
+  // knobs, etc.
+}

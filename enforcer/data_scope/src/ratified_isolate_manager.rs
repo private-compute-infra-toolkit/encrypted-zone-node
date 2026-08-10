@@ -89,6 +89,23 @@ impl RatifiedIsolateManager {
         Ok(())
     }
 
+    /// Pre-registers a Ratified Isolate's `BinaryServicesIndex` and maximum allowed data scope.
+    ///
+    /// This is distinct from `add_isolate` because `add_isolate` inserts a specific active `IsolateId`
+    /// into `self.isolates_map` when an Isolate signals `IsolateState::Ready`. Pre-registering the
+    /// index with an empty `IndexSet<IsolateId>` ensures that queries arriving before `Ready` return
+    /// `DataScopeError::NoMatchingIsolates` (`ResourceExhausted`, retryable) rather than
+    /// `DataScopeError::InvalidIsolateServiceIndex` (`InvalidArgument`, permanent error), without
+    /// prematurely routing traffic to an unready container.
+    pub async fn register_isolate_scope(
+        &self,
+        binary_services_index: BinaryServicesIndex,
+        allowed_data_scope_type: DataScopeType,
+    ) {
+        self.max_data_scope_map.insert(binary_services_index, allowed_data_scope_type);
+        self.isolates_map.entry(binary_services_index).or_default();
+    }
+
     /// Removes a Ratified Isolate from the manager.
     pub async fn remove_isolate(
         &self,
@@ -181,7 +198,11 @@ impl RatifiedIsolateManager {
         binary_services_index: &BinaryServicesIndex,
     ) -> Result<Ref<'a, BinaryServicesIndex, IndexSet<IsolateId>>, DataScopeError> {
         let Some(isolate_set) = self.isolates_map.get(binary_services_index) else {
-            return Err(DataScopeError::InvalidIsolateServiceIndex);
+            if self.max_data_scope_map.contains_key(binary_services_index) {
+                return Err(DataScopeError::NoMatchingIsolates);
+            } else {
+                return Err(DataScopeError::InvalidIsolateServiceIndex);
+            }
         };
         if isolate_set.is_empty() {
             return Err(DataScopeError::NoMatchingIsolates);

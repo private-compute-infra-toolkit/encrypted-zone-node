@@ -33,6 +33,7 @@ use std::sync::{Arc, Once};
 use std::{ffi::CString, fs};
 use tempfile::TempDir;
 
+pub mod seccomp;
 const OLD_ROOT: &str = "old_root";
 const ROOTFS: &str = "rootfs";
 
@@ -143,6 +144,9 @@ impl ContainerCustom {
         let env: Result<Vec<CString>, NulError> =
             opts.env.iter().map(|s| CString::new(s.as_str())).collect();
         let env = env?;
+
+        seccomp::set_profile(&opts.seccomp_profile)?;
+
         unistd::execve(bin_path_c.as_c_str(), &cmd_args, &env).map_err(|e| {
             anyhow::anyhow!("Failed to execute binary {}: {}", opts.binary_filename, e)
         })?;

@@ -1,0 +1,37 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package enforcer.v2;
+
+message IsolateRuntimeConfigs {
+  repeated IsolateRuntimeConfig configs = 1;
+}
+
+// IsolateRuntimeConfig provides runtime configurations to matching
+// BinaryManifests to allow different configuration on every run.
+// TODO: Move out of ez_manifest.proto along with Ratified Isolates protos.
+message IsolateRuntimeConfig {
+  // To match certain binary manifests.
+  string publisher_id = 1;
+  string binary_filename = 2;
+  // TODO: Make this a map<string,string> instead of repeated string.
+  repeated string command_line_arguments = 3;
+  repeated string environment_variables = 4;
+  // Override /etc/hosts file inside the container for routing.
+  string etc_hosts = 5;
+  // Disambiguate when multiple isolates share the same binary
+  string isolate_name = 6;
+}

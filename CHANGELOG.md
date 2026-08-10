@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## 0.18.0 (2026-08-10)
+
+
+### Dependencies
+
+* **deps:** Update DevKit to release-3.11.0
+
+
+### EZ Policy Enforcer
+
+* **enforcer:** defer isolate boot loop to fix startup race condition
+* **enforcer:** drop junction_to_isolate_tx to avoid half-close deadlock ([d443d28]( )), closes [/depot/google3/security/oak/tools/pricli/commands/session.cc#11]( ) [/depot/google3/security/oak/tools/pricli/commands/session.cc#11]( )
+* **enforcer:** return retryable error for unready ratified isolates
+* **enforcer:** Support syscall filtering
+
+
+### Features
+
+* split up manifest proto by isolate type (manifest v2)
+
 ## 0.17.0 (2026-07-15)
 
 

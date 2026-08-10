@@ -86,6 +86,17 @@ impl IsolateStateManager {
         self.unready_isolate_map.insert(add_isolate_request.isolate_id, add_isolate_request);
     }
 
+    /// Pre-registers an Isolate's `BinaryServicesIndex` and maximum allowed data scope.
+    pub async fn register_isolate_scope(
+        &self,
+        binary_services_index: isolate_info::BinaryServicesIndex,
+        allowed_data_scope_type: data_scope_proto::enforcer::v1::DataScopeType,
+    ) {
+        self.data_scope_requester
+            .register_isolate_scope(binary_services_index, allowed_data_scope_type)
+            .await;
+    }
+
     /// Increments the in-flight request counter for a given Isolate.
     ///
     /// This is called on the request path before forwarding a request to an Isolate,

@@ -1,0 +1,301 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+load("@com_google_protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
+load("@rules_buf//buf:defs.bzl", "buf_lint_test")
+load("@rules_pkg//pkg:mappings.bzl", "pkg_attributes", "pkg_files")
+load("@rules_proto//proto:defs.bzl", "proto_descriptor_set")
+load("@rules_rust_prost//:defs.bzl", "rust_prost_library")
+
+proto_library(
+    name = "data_scope_proto",
+    srcs = ["data_scope_type.proto"],
+    visibility = ["//visibility:public"],
+)
+
+cc_proto_library(
+    name = "data_scope_cc_proto",
+    visibility = ["//visibility:public"],
+    deps = [":data_scope_proto"],
+)
+
+rust_prost_library(
+    name = "data_scope_rust_proto",
+    proto = ":data_scope_proto",
+    visibility = ["//visibility:public"],
+)
+
+buf_lint_test(
+    name = "data_scope_proto_lint",
+    size = "small",
+    config = ":buf.yaml",
+    targets = [":data_scope_proto"],
+)
+
+proto_library(
+    name = "isolate_metrics_policy_proto",
+    srcs = ["isolate_metrics_policy.proto"],
+    visibility = ["//visibility:public"],
+)
+
+cc_proto_library(
+    name = "isolate_metrics_policy_cc_proto",
+    visibility = ["//visibility:public"],
+    deps = [":isolate_metrics_policy_proto"],
+)
+
+rust_prost_library(
+    name = "isolate_metrics_policy_rust_proto",
+    proto = ":isolate_metrics_policy_proto",
+    visibility = ["//visibility:public"],
+)
+
+buf_lint_test(
+    name = "isolate_metrics_policy_proto_lint",
+    size = "small",
+    config = ":buf.yaml",
+    targets = [":isolate_metrics_policy_proto"],
+)
+
+proto_library(
+    name = "isolate_runtime_config_proto",
+    srcs = ["isolate_runtime_config.proto"],
+    visibility = ["//visibility:public"],
+)
+
+cc_proto_library(
+    name = "isolate_runtime_config_cc_proto",
+    visibility = ["//visibility:public"],
+    deps = [":isolate_runtime_config_proto"],
+)
+
+rust_prost_library(
+    name = "isolate_runtime_config_rust_proto",
+    proto = ":isolate_runtime_config_proto",
+    visibility = ["//visibility:public"],
+)
+
+proto_descriptor_set(
+    name = "isolate_runtime_config_descriptor_set",
+    visibility = ["//visibility:public"],
+    deps = [":isolate_runtime_config_proto"],
+)
+
+buf_lint_test(
+    name = "isolate_runtime_config_proto_lint",
+    size = "small",
+    config = ":buf.yaml",
+    targets = [":isolate_runtime_config_proto"],
+)
+
+proto_library(
+    name = "ez_service_spec_proto",
+    srcs = ["ez_service_spec.proto"],
+    visibility = ["//visibility:public"],
+    deps = [":data_scope_proto"],
+)
+
+cc_proto_library(
+    name = "ez_service_spec_cc_proto",
+    visibility = ["//visibility:public"],
+    deps = [":ez_service_spec_proto"],
+)
+
+rust_prost_library(
+    name = "ez_service_spec_rust_proto",
+    proto = ":ez_service_spec_proto",
+    visibility = ["//visibility:public"],
+)
+
+buf_lint_test(
+    name = "ez_service_spec_proto_lint",
+    size = "small",
+    config = ":buf.yaml",
+    targets = [":ez_service_spec_proto"],
+)
+
+proto_library(
+    name = "ez_backend_dependencies_proto",
+    srcs = ["ez_backend_dependencies.proto"],
+    visibility = ["//visibility:public"],
+)
+
+cc_proto_library(
+    name = "ez_backend_dependencies_cc_proto",
+    visibility = ["//visibility:public"],
+    deps = [":ez_backend_dependencies_proto"],
+)
+
+rust_prost_library(
+    name = "ez_backend_dependencies_rust_proto",
+    proto = ":ez_backend_dependencies_proto",
+    visibility = ["//visibility:public"],
+)
+
+buf_lint_test(
+    name = "ez_backend_dependencies_proto_lint",
+    size = "small",
+    config = ":buf.yaml",
+    targets = [":ez_backend_dependencies_proto"],
+)
+
+proto_library(
+    name = "intercepting_services_proto",
+    srcs = ["intercepting_services.proto"],
+    visibility = ["//visibility:public"],
+)
+
+cc_proto_library(
+    name = "intercepting_services_cc_proto",
+    visibility = ["//visibility:public"],
+    deps = [":intercepting_services_proto"],
+)
+
+rust_prost_library(
+    name = "intercepting_services_rust_proto",
+    proto = ":intercepting_services_proto",
+    visibility = ["//visibility:public"],
+)
+
+buf_lint_test(
+    name = "intercepting_services_proto_lint",
+    size = "small",
+    config = ":buf.yaml",
+    targets = [":intercepting_services_proto"],
+)
+
+proto_library(
+    name = "setup_isolate_manifest_proto",
+    srcs = ["setup_isolate_manifest.proto"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ez_backend_dependencies_proto",
+        ":ez_service_spec_proto",
+        ":intercepting_services_proto",
+        ":isolate_metrics_policy_proto",
+    ],
+)
+
+cc_proto_library(
+    name = "setup_isolate_manifest_cc_proto",
+    visibility = ["//visibility:public"],
+    deps = [":setup_isolate_manifest_proto"],
+)
+
+rust_prost_library(
+    name = "setup_isolate_manifest_rust_proto",
+    proto = ":setup_isolate_manifest_proto",
+    visibility = ["//visibility:public"],
+)
+
+proto_descriptor_set(
+    name = "setup_isolate_manifest_descriptor_set",
+    visibility = ["//visibility:public"],
+    deps = [":setup_isolate_manifest_proto"],
+)
+
+buf_lint_test(
+    name = "setup_isolate_manifest_proto_lint",
+    size = "small",
+    config = ":buf.yaml",
+    targets = [":setup_isolate_manifest_proto"],
+)
+
+proto_library(
+    name = "ratified_isolate_manifest_proto",
+    srcs = ["ratified_isolate_manifest.proto"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ez_backend_dependencies_proto",
+        ":ez_service_spec_proto",
+        ":intercepting_services_proto",
+        ":isolate_metrics_policy_proto",
+    ],
+)
+
+cc_proto_library(
+    name = "ratified_isolate_manifest_cc_proto",
+    visibility = ["//visibility:public"],
+    deps = [":ratified_isolate_manifest_proto"],
+)
+
+rust_prost_library(
+    name = "ratified_isolate_manifest_rust_proto",
+    proto = ":ratified_isolate_manifest_proto",
+    visibility = ["//visibility:public"],
+)
+
+proto_descriptor_set(
+    name = "ratified_isolate_manifest_descriptor_set",
+    visibility = ["//visibility:public"],
+    deps = [":ratified_isolate_manifest_proto"],
+)
+
+buf_lint_test(
+    name = "ratified_isolate_manifest_proto_lint",
+    size = "small",
+    config = ":buf.yaml",
+    targets = [":ratified_isolate_manifest_proto"],
+)
+
+proto_library(
+    name = "opaque_isolate_manifest_proto",
+    srcs = ["opaque_isolate_manifest.proto"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ez_backend_dependencies_proto",
+        ":ez_service_spec_proto",
+        ":intercepting_services_proto",
+        ":isolate_metrics_policy_proto",
+    ],
+)
+
+cc_proto_library(
+    name = "opaque_isolate_manifest_cc_proto",
+    visibility = ["//visibility:public"],
+    deps = [":opaque_isolate_manifest_proto"],
+)
+
+rust_prost_library(
+    name = "opaque_isolate_manifest_rust_proto",
+    proto = ":opaque_isolate_manifest_proto",
+    visibility = ["//visibility:public"],
+)
+
+proto_descriptor_set(
+    name = "opaque_isolate_manifest_descriptor_set",
+    visibility = ["//visibility:public"],
+    deps = [":opaque_isolate_manifest_proto"],
+)
+
+buf_lint_test(
+    name = "opaque_isolate_manifest_proto_lint",
+    size = "small",
+    config = ":buf.yaml",
+    targets = [":opaque_isolate_manifest_proto"],
+)
+
+pkg_files(
+    name = "enforcer_proto_pkg",
+    srcs = [
+        ":isolate_runtime_config_descriptor_set",
+        ":opaque_isolate_manifest_descriptor_set",
+        ":ratified_isolate_manifest_descriptor_set",
+        ":setup_isolate_manifest_descriptor_set",
+    ],
+    attributes = pkg_attributes(mode = "0400"),
+    prefix = "/enforcer/proto/v2",
+    visibility = ["//visibility:public"],
+)

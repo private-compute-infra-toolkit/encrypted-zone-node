@@ -23,6 +23,7 @@ rust_library(
         "//enforcer/container/manager:container_manager_requester",
         "//enforcer/data_scope",
         "//enforcer/isolate:isolate_info",
+        "//enforcer/v1:data_scope_rust",
         "//enforcer/v1:enforcer_rust",
         "@crates//:anyhow",
         "@crates//:dashmap",
