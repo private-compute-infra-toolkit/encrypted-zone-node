@@ -22,3 +22,14 @@ genrule(
         "//enforcer/container/manager:__pkg__",
     ],
 )
+
+genrule(
+    name = "test_manifest_v2_descriptor_set",
+    srcs = ["//enforcer/v2:manifest_descriptor_set"],
+    outs = ["v2/manifest_descriptor_set.pb"],
+    cmd = "cp $< $@",
+    visibility = [
+        "//enforcer/benches:__pkg__",
+        "//enforcer/container/manager:__pkg__",
+    ],
+)

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 common --enable_bzlmod
+common --experimental_cc_static_library
 common --repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
 common --experimental_proto_descriptor_sets_include_source_info
 
@@ -23,7 +24,10 @@ build --color=yes
 build --config=cpp
 build --config=rustfmt
 build --config=clippy
+build --incompatible_enable_proto_toolchain_resolution
 build:cpp --verbose_failures
+build:cpp --incompatible_enable_cc_toolchain_resolution
+
 coverage --cache_test_results=no
 coverage --test_tag_filters=-require_privileged
 

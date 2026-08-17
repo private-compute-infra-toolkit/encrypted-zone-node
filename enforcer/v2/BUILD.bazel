@@ -287,13 +287,22 @@ buf_lint_test(
     targets = [":opaque_isolate_manifest_proto"],
 )
 
+proto_descriptor_set(
+    name = "manifest_descriptor_set",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ez_backend_dependencies_proto",
+        ":isolate_runtime_config_proto",
+        ":opaque_isolate_manifest_proto",
+        ":ratified_isolate_manifest_proto",
+        ":setup_isolate_manifest_proto",
+    ],
+)
+
 pkg_files(
     name = "enforcer_proto_pkg",
     srcs = [
-        ":isolate_runtime_config_descriptor_set",
-        ":opaque_isolate_manifest_descriptor_set",
-        ":ratified_isolate_manifest_descriptor_set",
-        ":setup_isolate_manifest_descriptor_set",
+        ":manifest_descriptor_set",
     ],
     attributes = pkg_attributes(mode = "0400"),
     prefix = "/enforcer/proto/v2",

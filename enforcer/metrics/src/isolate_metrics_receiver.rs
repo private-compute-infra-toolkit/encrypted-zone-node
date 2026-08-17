@@ -173,6 +173,7 @@ impl IsolateMetricsReceiver {
                     | "ez_isolate_type"
                     | "ez_enforcer_version"
                     | "ez_component_name"
+                    | "ez_isolate_instance_id"
             )
         };
 
@@ -276,6 +277,8 @@ pub fn get_isolate_attribute_data(
         ("ez_publisher_id", publisher_id.to_string().into()),
         ("ez_isolate_type", isolate_type_str.into()),
         ("ez_enforcer_version", crate::get_enforcer_version().into()),
+        // Placeholder isolate instance ID until dynamic generation is wired.
+        ("ez_isolate_instance_id", "1".into()),
     ]
 }
 

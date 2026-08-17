@@ -111,6 +111,7 @@ pkg_mkdirs(
             ":devshm",
             ":enforcer_bin{}".format(flavor.suffix),
             "//enforcer/v1:enforcer_proto_pkg",
+            "//enforcer/v2:enforcer_proto_pkg",
         ],
         owner = "{}.{}".format(
             user.uid,
@@ -179,11 +180,13 @@ genrule(
         "//enforcer/v1:enforcer_descriptor_set",
         "//enforcer/v1:ez_service_descriptor_set",
         "//enforcer/v1:manifest_descriptor_set",
+        "//enforcer/v2:manifest_descriptor_set",
     ],
     outs = ["copy_to_dist.bin"],
     cmd_bash = """cat <<EOF >'$@'
 set -o errexit
 mkdir -p {dir}/proto
+mkdir -p {dir}/proto/v2
 cp -f $(execpath :enforcer.tar) {dir}/enforcer_oci.tar
 cp -f $(execpath :enforcer_debug) {dir}/enforcer_debug
 cp -f $(execpath :enforcer_debug.tar) {dir}/enforcer_oci_debug.tar
@@ -194,6 +197,7 @@ cp -f $(execpath :enforcer_rootfs_test.tar) {dir}/enforcer_rootfs_test.tar
 cp -f $(execpath //enforcer/v1:ez_service_descriptor_set) \
       $(execpath //enforcer/v1:enforcer_descriptor_set) \
       $(execpath //enforcer/v1:manifest_descriptor_set) {dir}/proto
+cp -f $(execpath //enforcer/v2:manifest_descriptor_set) {dir}/proto/v2
 echo "Successfully copied all artifacts to {dir}"
 EOF""".format(dir = "dist/enforcer"),
     executable = True,

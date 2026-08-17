@@ -19,19 +19,21 @@ module(
     version = "0.0.0",
 )
 
-bazel_dep(name = "aspect_bazel_lib", version = "2.21.0")
-bazel_dep(name = "bazel_skylib", version = "1.7.1")
-bazel_dep(name = "protobuf", version = "31.1", repo_name = "com_google_protobuf")
-bazel_dep(name = "rules_buf", version = "0.5.1")
-bazel_dep(name = "rules_oci", version = "2.0.1")
-bazel_dep(name = "rules_pkg", version = "1.1.0")
+bazel_dep(name = "aspect_bazel_lib", version = "2.22.5")
+bazel_dep(name = "bazel_skylib", version = "1.9.2")
+bazel_dep(name = "platforms", version = "1.1.0")
+bazel_dep(name = "protobuf", version = "35.1", repo_name = "com_google_protobuf")
+bazel_dep(name = "rules_buf", version = "0.5.4")
+bazel_dep(name = "rules_cc", version = "0.2.22")
+bazel_dep(name = "rules_foreign_cc", version = "0.15.1")
+bazel_dep(name = "rules_go", version = "0.62.0")
+bazel_dep(name = "rules_license", version = "1.0.0")
+bazel_dep(name = "rules_oci", version = "2.3.0")
+bazel_dep(name = "rules_pkg", version = "1.3.0")
 bazel_dep(name = "rules_proto", version = "7.1.0")
-bazel_dep(name = "rules_proto_grpc", version = "5.6.0")
-bazel_dep(name = "rules_proto_grpc_cpp", version = "5.6.0")
-bazel_dep(name = "rules_python", version = "1.5.3")
-bazel_dep(name = "rules_rust", version = "0.67.0")
-bazel_dep(name = "rules_rust_prost", version = "0.67.0")
-bazel_dep(name = "toolchains_protoc", version = "0.5.0")
+bazel_dep(name = "rules_python", version = "1.7.0")
+bazel_dep(name = "rules_rust", version = "0.69.0")
+bazel_dep(name = "rules_rust_prost", version = "0.69.0")
 bazel_dep(name = "googleapis", version = "0.0.0-20260130-c0fcb356")
 bazel_dep(name = "boringssl", version = "0.20250415.0")
 
@@ -82,12 +84,7 @@ use_repo(rust, "rust_toolchains")
 register_toolchains("@rust_toolchains//:all")
 
 # Custom Prost toolchain
-register_toolchains(
-    "@//toolchains:prost_toolchain",
-    "@//toolchains:proto_toolchain",
-)
-
-register_toolchains("@rust_toolchains//:all")
+register_toolchains("@//toolchains:prost_toolchain")
 
 # Create a repo for all crates used by Cargo-enabled targets, under "crates"
 crate = use_extension(
@@ -457,6 +454,13 @@ crate.spec(
     package = "time-macros",
     version = "=0.2.18",
 )
+
+# Unpinned transitive Cargo resolution resolved hdrhistogram 7.6.0, which
+# attempted to use the unstable std library feature slice_as_chunks.
+crate.spec(
+    package = "hdrhistogram",
+    version = "=7.5.4",
+)
 crate.from_specs()
 use_repo(crate, "crates")
 
@@ -488,3 +492,20 @@ python.toolchain(
     ignore_root_user_error = True,
     python_version = "3.13",
 )
+
+http_archive(
+    name = "oak",
+    patch_cmds = [
+        "sed -i '/rules_java/d;/rules_cc/d' proto/BUILD proto/attestation/BUILD",
+        "sed -i '1i load(\"@@//third_party:oak_ext.bzl\", \"cc_proto_library\", \"java_proto_library\")' proto/BUILD proto/attestation/BUILD",
+        "sed -i '1i load(\"@rules_proto//proto:defs.bzl\", \"proto_library\")' proto/attestation/BUILD",
+    ],
+    sha256 = "c980e70cb535eac5185aee397fa577874ee37a38955161938cd89784ab5f33de",
+    strip_prefix = "oak-439c15a855fdb42067d4544535f836a19ee9f168",
+    url = "https://github.com/project-oak/oak/archive/439c15a855fdb42067d4544535f836a19ee9f168.tar.gz",
+)
+
+oak_ext = use_extension("//third_party:oak_ext.bzl", "oak_ext")
+use_repo(oak_ext, "umoci_toolchain")
+
+register_toolchains("@umoci_toolchain//:all")

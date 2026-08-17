@@ -5,6 +5,7 @@ build:cpp --copt=-Werror
 build:cpp --copt=-Werror=return-type
 build:cpp --copt=-Werror=thread-safety
 build:cpp --per_file_copt=external/.*@-Wno-error
+build:cpp --per_file_copt=.*\.pb\.cc$@-Wno-deprecated-declarations
 
 build:clang-tidy --aspects @bazel_clang_tidy//clang_tidy:clang_tidy.bzl%clang_tidy_aspect
 build:clang-tidy --output_groups=report

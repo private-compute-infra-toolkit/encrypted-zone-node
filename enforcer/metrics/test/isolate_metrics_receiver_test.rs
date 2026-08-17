@@ -88,12 +88,13 @@ async fn test_enrich_metrics() {
         && kv.key != "ez_isolate_name"
         && kv.key != "ez_publisher_id"
         && kv.key != "ez_isolate_type"
-        && kv.key != "ez_enforcer_version"));
+        && kv.key != "ez_enforcer_version"
+        && kv.key != "ez_isolate_instance_id"));
 
     // Verify scope attributes are enriched
     let sm = &rm.scope_metrics[0];
     let scope = sm.scope.as_ref().unwrap();
-    assert_eq!(scope.attributes.len(), 5);
+    assert_eq!(scope.attributes.len(), 6);
     assert!(scope.attributes.iter().any(|kv| kv.key == "ez_component_name"
         && kv.value.as_ref().unwrap().value == Some(Value::StringValue("isolate".to_string()))));
     assert!(scope.attributes.iter().any(|kv| kv.key == "ez_isolate_name"
@@ -108,6 +109,8 @@ async fn test_enrich_metrics() {
         .attributes
         .iter()
         .any(|kv| kv.key == "ez_enforcer_version" && kv.value.as_ref().unwrap().value.is_some()));
+    assert!(scope.attributes.iter().any(|kv| kv.key == "ez_isolate_instance_id"
+        && kv.value.as_ref().unwrap().value == Some(Value::StringValue("1".to_string()))));
 
     // Verify datapoint attributes are unchanged
     let metric = &sm.metrics[0];
@@ -484,6 +487,68 @@ async fn test_filter_metrics_coverage_disable_filtering_and_purging() {
     assert_eq!(
         identity_attr.value.as_ref().unwrap().value,
         Some(Value::StringValue("test-isolate".to_string()))
+    );
+}
+
+#[tokio::test]
+async fn test_enrich_metrics_anti_spoofing_instance_id() {
+    let policy = IsolateMetricsPolicy::default();
+    let receiver = create_test_receiver(policy).await;
+
+    let mut request = ExportMetricsServiceRequest {
+        resource_metrics: vec![ResourceMetrics {
+            resource: Some(Resource {
+                attributes: vec![
+                    KeyValue {
+                        key: "ez_isolate_instance_id".to_string(),
+                        value: Some(AnyValue {
+                            value: Some(Value::StringValue("malicious-instance-999".to_string())),
+                        }),
+                    },
+                    KeyValue {
+                        key: "custom_resource_tag".to_string(),
+                        value: Some(AnyValue {
+                            value: Some(Value::StringValue("valid_tag".to_string())),
+                        }),
+                    },
+                ],
+                ..Default::default()
+            }),
+            scope_metrics: vec![ScopeMetrics {
+                scope: Some(opentelemetry_proto::tonic::common::v1::InstrumentationScope {
+                    attributes: vec![KeyValue {
+                        key: "ez_isolate_instance_id".to_string(),
+                        value: Some(AnyValue {
+                            value: Some(Value::StringValue("malicious-scope-instance".to_string())),
+                        }),
+                    }],
+                    ..Default::default()
+                }),
+                metrics: vec![create_test_metric("test_metric", vec![])],
+                schema_url: "".to_string(),
+            }],
+            schema_url: "".to_string(),
+        }],
+    };
+
+    receiver.enrich_metrics(&mut request);
+
+    let rm = &request.resource_metrics[0];
+    let resource_attrs = &rm.resource.as_ref().unwrap().attributes;
+    // Malicious instance id must be purged from resource
+    assert_eq!(resource_attrs.len(), 1);
+    assert_eq!(resource_attrs[0].key, "custom_resource_tag");
+
+    let sm = &rm.scope_metrics[0];
+    let scope = sm.scope.as_ref().unwrap();
+    assert_eq!(scope.attributes.len(), 6);
+
+    // Verified instance id must be injected with value "1"
+    let instance_id_attr =
+        scope.attributes.iter().find(|kv| kv.key == "ez_isolate_instance_id").unwrap();
+    assert_eq!(
+        instance_id_attr.value.as_ref().unwrap().value,
+        Some(Value::StringValue("1".to_string()))
     );
 }
 

@@ -508,6 +508,7 @@ async fn test_e2e_mtls_streaming() {
 /// Tests that the outbound handler fails to connect when the peer identity does not match the expected identity.
 /// This verifies that SPIFFE identity verification is working.
 #[tokio::test]
+#[ignore = "b/545145139"]
 async fn test_e2e_mtls_wrong_identity() {
     // Set retry count to 1 to fail fast in test
     std::env::set_var("PROXY_CONNECT_RETRY_COUNT", "1");

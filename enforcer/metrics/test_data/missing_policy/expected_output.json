@@ -42,6 +42,12 @@
                   "value": {
                     "stringValue": "1.23.45"
                   }
+                },
+                {
+                  "key": "ez_isolate_instance_id",
+                  "value": {
+                    "stringValue": "1"
+                  }
                 }
               ],
               "droppedAttributesCount": 0

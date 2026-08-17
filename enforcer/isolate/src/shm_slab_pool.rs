@@ -232,7 +232,7 @@ impl ShmSlabPool {
             async move { self.try_allocate_slots(slots_needed) }
         };
 
-        Retry::spawn(retry_strategy, action).await.map_err(|e| {
+        Retry::start(retry_strategy, action).await.map_err(|e| {
             log::warn!("Slot allocation failed: {:?}", e);
             ShmSlabPoolError::AllocationTimeout
         })

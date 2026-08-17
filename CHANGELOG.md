@@ -2,6 +2,37 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## 0.19.0 (2026-08-17)
+
+
+### Dependencies
+
+* **deps:** Bump rules_oci and rules_pkg versions
+* **deps:** Bump rules_rust* modules to 0.69.0
+* **deps:** Remove rules_proto_grpc bazel deps
+* **deps:** Upgrade Protobuf to 33.4 and remove legacy toolchains
+* **deps:** Upgrade Protobuf to 35.1
+* **deps:** Upgrade to bazel 8.7.0
+* **deps:** Use prebuilt protoc
+
+
+### EZ Policy Enforcer
+
+* **enforcer:** enrich isolate telemetry with ez_isolate_instance_id
+* **enforcer:** export v2 manifest descriptor sets
+
+
+### Features
+
+* Enforce rejection of non-hermetic C++ compilers
+
+
+### Bug Fixes
+
+* Remove incorrect checks on SPIFFE ID
+* Remove unused C++ protobuf and grpc targets
+* Remove unused C++ protobuf and grpc targets
+
 ## 0.18.0 (2026-08-10)
 
 
