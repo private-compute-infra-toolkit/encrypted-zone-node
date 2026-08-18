@@ -1,4 +1,4 @@
-// Copyright 2025 Google LLC
+// Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,16 +19,15 @@ use manifest_proto::enforcer::v1::{
     ez_manifest::ManifestType, BinaryManifest, BundleManifest, EzManifest, EzMethodSpec,
 };
 use prost_reflect::{DescriptorPool, DynamicMessage};
-
-const JSON_MANIFEST_PATH: &str = "enforcer/container/manager/test/testdata/test_manifest.json";
-const JSON_MANIFEST_EMPTY_PATH: &str =
-    "enforcer/container/manager/test/testdata/test_manifest_empty.json";
-const TEXT_PROTO_MANIFEST_PATH: &str =
-    "enforcer/container/manager/test/testdata/test_manifest.txtpb";
-const PROTO_DESCRIPTOR_BYTES: &[u8] = include_bytes!(env!("TEST_MANIFEST_DESCRIPTOR_SET_PATH"));
-const PROTO_DESCRIPTOR_FILE_NAME: &str = "enforcer.v1.EzManifest";
-
 use std::collections::HashMap;
+use std::fs::read_to_string;
+
+const JSON_MANIFEST_PATH: &str = "enforcer/manifest_parser/test/testdata/test_manifest.json";
+const JSON_MANIFEST_EMPTY_PATH: &str =
+    "enforcer/manifest_parser/test/testdata/test_manifest_empty.json";
+const TEXT_PROTO_MANIFEST_PATH: &str = "enforcer/manifest_parser/test/testdata/test_manifest.txtpb";
+const PROTO_DESCRIPTOR_BYTES: &[u8] = include_bytes!(env!("MANIFEST_V1_DESCRIPTOR_SET_PATH"));
+const PROTO_DESCRIPTOR_FILE_NAME: &str = "enforcer.v1.EzManifest";
 
 fn get_manifest_from_text_proto() -> Result<EzManifest> {
     let pool = DescriptorPool::decode(PROTO_DESCRIPTOR_BYTES)
@@ -38,10 +37,10 @@ fn get_manifest_from_text_proto() -> Result<EzManifest> {
         .get_message_by_name(PROTO_DESCRIPTOR_FILE_NAME)
         .context(format!("Couldn't find message descriptor {PROTO_DESCRIPTOR_FILE_NAME}"))?;
 
-    // Parse from manifest text proto into EzManifest
-    let manifest_txtpb_string = std::fs::read_to_string(TEXT_PROTO_MANIFEST_PATH).context(
-        format!("couldn't open manifest text proto file at: {}", TEXT_PROTO_MANIFEST_PATH),
-    )?;
+    let manifest_txtpb_string = read_to_string(TEXT_PROTO_MANIFEST_PATH).context(format!(
+        "couldn't open manifest text proto file at: {}",
+        TEXT_PROTO_MANIFEST_PATH
+    ))?;
 
     let dynamic_message =
         DynamicMessage::parse_text_format(message_descriptor, &manifest_txtpb_string)
@@ -79,15 +78,15 @@ fn get_method_specs_from_manifest(
 #[test]
 fn test_parse_manifest() {
     let result_manifest_proto =
-        parse_manifest(JSON_MANIFEST_PATH.to_string()).expect("Failed to parse JSON manifest file");
+        parse_manifest(JSON_MANIFEST_PATH).expect("Failed to parse JSON manifest file");
 
     let expected_manifest_proto =
         get_manifest_from_text_proto().expect("Failed to parse Text Proto manifest file");
 
     assert_eq!(result_manifest_proto, expected_manifest_proto, "Expected and result are not equal");
 
-    let result = parse_manifest(JSON_MANIFEST_EMPTY_PATH.to_string())
-        .expect("Failed to parse JSON manifest file");
+    let result =
+        parse_manifest(JSON_MANIFEST_EMPTY_PATH).expect("Failed to parse JSON manifest file");
     assert_eq!(result, EzManifest::default(), "Expected and result are not equal");
 }
 
@@ -135,7 +134,7 @@ fn test_parse_isolate_runtime_configs_success() {
             ]
         }
         "#;
-    let result = parse_isolate_runtime_configs(json_str.to_string());
+    let result = parse_isolate_runtime_configs(json_str);
     assert!(result.is_ok());
     let configs = result.unwrap();
     assert_eq!(configs.configs.len(), 1);
@@ -149,7 +148,7 @@ fn test_parse_isolate_runtime_configs_success() {
 #[test]
 fn test_parse_isolate_runtime_configs_empty() {
     let json_str = "";
-    let result = parse_isolate_runtime_configs(json_str.to_string());
+    let result = parse_isolate_runtime_configs(json_str);
     assert!(result.is_ok());
     let configs = result.unwrap();
     assert!(configs.configs.is_empty());
@@ -158,7 +157,7 @@ fn test_parse_isolate_runtime_configs_empty() {
 #[test]
 fn test_parse_isolate_runtime_configs_no_configs() {
     let json_str = r#"{"configs":[]}"#;
-    let result = parse_isolate_runtime_configs(json_str.to_string());
+    let result = parse_isolate_runtime_configs(json_str);
     assert!(result.is_ok());
     let configs = result.unwrap();
     assert!(configs.configs.is_empty());
@@ -176,7 +175,7 @@ fn test_parse_isolate_runtime_configs_partial() {
             ]
         }
         "#;
-    let result = parse_isolate_runtime_configs(json_str.to_string());
+    let result = parse_isolate_runtime_configs(json_str);
     assert!(result.is_ok());
     let configs = result.unwrap();
     assert_eq!(configs.configs.len(), 1);
@@ -204,7 +203,7 @@ fn test_parse_isolate_runtime_configs_multiple() {
             ]
         }
         "#;
-    let result = parse_isolate_runtime_configs(json_str.to_string());
+    let result = parse_isolate_runtime_configs(json_str);
     assert!(result.is_ok());
     let configs = result.unwrap();
     assert_eq!(configs.configs.len(), 2);
@@ -216,7 +215,7 @@ fn test_parse_isolate_runtime_configs_multiple() {
 #[test]
 fn test_parse_isolate_runtime_configs_invalid_json() {
     let json_str = r#"{"configs": [}"#;
-    let result = parse_isolate_runtime_configs(json_str.to_string());
+    let result = parse_isolate_runtime_configs(json_str);
     assert!(result.is_err());
 }
 
@@ -232,6 +231,6 @@ fn test_parse_isolate_runtime_configs_type_mismatch() {
             ]
         }
         "#;
-    let result = parse_isolate_runtime_configs(json_str.to_string());
+    let result = parse_isolate_runtime_configs(json_str);
     assert!(result.is_err());
 }

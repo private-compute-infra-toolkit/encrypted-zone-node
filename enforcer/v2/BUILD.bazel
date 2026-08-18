@@ -13,10 +13,10 @@
 # limitations under the License.
 
 load("@com_google_protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+load("@com_google_protobuf//bazel:proto_descriptor_set.bzl", "proto_descriptor_set")
 load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
 load("@rules_buf//buf:defs.bzl", "buf_lint_test")
 load("@rules_pkg//pkg:mappings.bzl", "pkg_attributes", "pkg_files")
-load("@rules_proto//proto:defs.bzl", "proto_descriptor_set")
 load("@rules_rust_prost//:defs.bzl", "rust_prost_library")
 
 proto_library(
@@ -306,5 +306,29 @@ pkg_files(
     ],
     attributes = pkg_attributes(mode = "0400"),
     prefix = "/enforcer/proto/v2",
+    visibility = ["//visibility:public"],
+)
+
+proto_library(
+    name = "ez_management_proto",
+    srcs = ["ez_management_service.proto"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":opaque_isolate_manifest_proto",
+        ":ratified_isolate_manifest_proto",
+        "//enforcer/v1:isolate_endorsement_proto",
+    ],
+)
+
+buf_lint_test(
+    name = "ez_management_lint",
+    size = "small",
+    config = ":buf.yaml",
+    targets = [":ez_management_proto"],
+)
+
+rust_prost_library(
+    name = "ez_management_rust",
+    proto = ":ez_management_proto",
     visibility = ["//visibility:public"],
 )

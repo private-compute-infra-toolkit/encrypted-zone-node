@@ -1,0 +1,73 @@
+# Copyright 2025 Google LLC#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at#
+#      http://www.apache.org/licenses/LICENSE-2.0#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+isolate_name: "ezpkg://playground.example.com"
+publisher_id: "playground_example"
+package_filename: "/ez/summation_by_lookup_table_with_backend_server_bundle.tar"
+bundle_manifest {
+  manifests {
+    isolate_name: "ezpkg://playground.example.com"
+    publisher_id: "playground_example"
+    package_filename: "/ez/summation_by_lookup_table_with_backend_server_bundle.tar"
+    binary_manifest {
+      binary_filename: "/usr/local/bin/summation_by_lookup_table_with_backend"
+      command_line_arguments: ""
+      service_specs {
+        service_name: "SimpleAdd"
+        method_specs {
+          method_name: "IntegerSequence"
+          input_scope_types: DATA_SCOPE_TYPE_PUBLIC
+          output_scope_types: DATA_SCOPE_TYPE_USER_PRIVATE
+        }
+        method_specs {
+          method_name: "StreamingIntegerSequence"
+          input_scope_types: DATA_SCOPE_TYPE_DOMAIN_OWNED
+          output_scope_types: DATA_SCOPE_TYPE_PUBLIC
+        }
+      }
+      number_of_isolates: 4
+      ez_backend_dependencies {
+        operator_domain: "playground_example"
+        service_name: "PrecomputedBackend"
+        method_name: "FetchTable"
+      }
+      ez_backend_dependencies {
+        operator_domain: "playground_example"
+        service_name: "PrecomputedBackend"
+        method_name: "StreamingFetchTable"
+      }
+    }
+  }
+  manifests {
+    isolate_name: "ezpkg://playground.example.com"
+    publisher_id: "playground_example"
+    package_filename: "/ez/summation_by_lookup_table_with_backend_server_bundle.tar"
+    binary_manifest {
+      binary_filename: "/usr/local/bin/summation_precomputed_backend"
+      command_line_arguments: ""
+      service_specs {
+        service_name: "PrecomputedBackend"
+        method_specs {
+          method_name: "Fetch"
+          input_scope_types: DATA_SCOPE_TYPE_USER_PRIVATE
+          output_scope_types: DATA_SCOPE_TYPE_PUBLIC
+        }
+        method_specs {
+          method_name: "StreamingFetch"
+          input_scope_types: DATA_SCOPE_TYPE_DOMAIN_OWNED
+          output_scope_types: DATA_SCOPE_TYPE_PUBLIC
+        }
+      }
+      number_of_isolates: 1
+      is_ratified_isolate: true
+    }
+  }
+}

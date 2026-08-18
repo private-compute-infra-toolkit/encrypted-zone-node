@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## 0.20.0 (2026-08-18)
+
+
+### Dependencies
+
+* **deps:** Remove rules_proto in favor of protobuf module
+* **deps:** Upgrade Oak repository dependency to 1d4466b
+* **deps:** Upgrade Rust toolchain to 1.97.1
+
+
+### EZ Policy Enforcer
+
+* **enforcer:** add manifest parser for v2 schema
+* **enforcer:** Consolidate test flavor into debug
+* **enforcer:** Introduce EzManagementService with LoadIsolates RPC
+
+
+### Bug Fixes
+
+* Switch to proto_descriptor_set in protobuf from rules_proto
+* Switch to proto_library in protobuf from rules_proto
+
 ## 0.19.0 (2026-08-17)
 
 

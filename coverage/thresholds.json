@@ -11,6 +11,9 @@
   "enforcer/data_scope/src/ratified_isolate_manager.rs": {
     "lines": 80
   },
+  "enforcer/diagnostics/src/pprof.rs": {
+    "lines": 80
+  },
   "enforcer/data_scope/src/requester.rs": {
     "lines": 89
   },

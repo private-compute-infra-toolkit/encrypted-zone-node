@@ -30,10 +30,10 @@ rust_binary(
     ],
     visibility = ["//visibility:public"],
     deps = [
-        "//enforcer/container/manager:manifest_parser",
         "//enforcer/data_scope",
         "//enforcer/isolate:isolate_info",
         "//enforcer/isolate:shm_slab_pool",
+        "//enforcer/manifest_parser",
         "//enforcer/traces",
         "//enforcer/v1:data_scope_rust",
         "//enforcer/v1:manifest_rust",

@@ -452,7 +452,7 @@ fn main() -> anyhow::Result<()> {
             common_bind_mounts: enforcer_inputs.common_bind_mount.clone(),
             max_decoding_message_size,
             isolate_runtime_configs: parse_isolate_runtime_configs(
-                enforcer_inputs.isolate_runtime_configs,
+                &enforcer_inputs.isolate_runtime_configs,
             )
             .context("failed to parse isolate config configs")?,
             interceptor,

@@ -68,7 +68,8 @@ message EzExternalResource {
   // be known to the External Proxy. The External Proxy uses this target to look
   // up the actual endpoint (e.g., 'dns:///foo-service').
   string target = 1; // Required.
-  // An RPC service name including package name. format: package_name.service_name
+  // An RPC service name including package name. format:
+  // package_name.service_name
   string service_name = 2; // Required.
   // An RPC method name on the service named in service_name.
   string method_name = 3; // Required.

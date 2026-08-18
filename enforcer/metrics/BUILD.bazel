@@ -101,7 +101,7 @@ rust_binary(
     visibility = ["//visibility:public"],
     deps = [
         ":metrics",
-        "//enforcer/container/manager:manifest_parser",
+        "//enforcer/manifest_parser",
         "//enforcer/v1:manifest_rust",
         "@crates//:anyhow",
         "@crates//:clap",

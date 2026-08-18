@@ -46,25 +46,6 @@ rust_library(
     ],
 )
 
-rust_library(
-    name = "manifest_parser",
-    srcs = ["src/manifest_parser.rs"],
-    compile_data = ["//enforcer/proto:test_manifest_descriptor_set"],
-    rustc_env = {
-        "TEST_MANIFEST_DESCRIPTOR_SET_PATH": "$(execpath //enforcer/proto:test_manifest_descriptor_set)",
-    },
-    visibility = ["//visibility:public"],
-    deps = [
-        "//enforcer/v1:data_scope_rust",
-        "//enforcer/v1:enforcer_rust",
-        "//enforcer/v1:manifest_rust",
-        "@crates//:anyhow",
-        "@crates//:prost-reflect",
-        "@crates//:serde_json",
-        "@crates//:thiserror",
-    ],
-)
-
 [
     rust_library(
         name = "container_manager{}".format(flavor.suffix),
@@ -77,7 +58,6 @@ rust_library(
         visibility = ["//visibility:public"],
         deps = [
             ":container_manager_request",
-            ":manifest_parser",
             "//enforcer/container",
             "//enforcer/container:utils",
             "//enforcer/data_scope",
@@ -88,6 +68,7 @@ rust_library(
             "//enforcer/isolate:isolate_service_mapper",
             "//enforcer/isolate:shared_memory_manager",
             "//enforcer/junction:junction_trait",
+            "//enforcer/manifest_parser",
             "//enforcer/state:state_manager",
             "//enforcer/v1:data_scope_rust",
             "//enforcer/v1:manifest_rust",
@@ -112,27 +93,6 @@ filegroup(
 )
 
 rust_test(
-    name = "manifest_parser_test",
-    size = "small",
-    srcs = ["test/manifest_parser_test.rs"],
-    compile_data = ["//enforcer/proto:test_manifest_descriptor_set"],
-    data = [
-        ":testdata",
-        "//enforcer/proto:test_manifest_descriptor_set",
-    ],
-    rustc_env = {
-        "TEST_MANIFEST_DESCRIPTOR_SET_PATH": "$(execpath //enforcer/proto:test_manifest_descriptor_set)",
-    },
-    deps = [
-        ":manifest_parser",
-        "//enforcer/v1:data_scope_rust",
-        "//enforcer/v1:manifest_rust",
-        "@crates//:anyhow",
-        "@crates//:prost-reflect",
-    ],
-)
-
-rust_test(
     name = "container_manager_tests",
     size = "small",
     srcs = [
@@ -142,13 +102,19 @@ rust_test(
     # Add this line to enforce sequential execution
     # This is important because we use global states
     args = ["--test-threads=1"],
+    compile_data = [
+        "//enforcer/proto:manifest_v1_descriptor_set",
+        "//enforcer/proto:manifest_v2_descriptor_set",
+    ],
     data = [
         ":testdata",
         "//enforcer/container/test_data:test_binary",
-        "//enforcer/proto:test_manifest_descriptor_set",
+        "//enforcer/proto:manifest_v1_descriptor_set",
+        "//enforcer/proto:manifest_v2_descriptor_set",
     ],
     rustc_env = {
-        "TEST_MANIFEST_DESCRIPTOR_SET_PATH": "$(execpath //enforcer/proto:test_manifest_descriptor_set)",
+        "TEST_MANIFEST_DESCRIPTOR_SET_PATH": "$(execpath //enforcer/proto:manifest_v1_descriptor_set)",
+        "TEST_MANIFEST_V2_DESCRIPTOR_SET_PATH": "$(execpath //enforcer/proto:manifest_v2_descriptor_set)",
     },
     deps = [
         ":container_manager",
@@ -165,6 +131,7 @@ rust_test(
         "//enforcer/isolate:shared_memory_manager",
         "//enforcer/junction:junction_test_utils",
         "//enforcer/junction:junction_trait",
+        "//enforcer/manifest_parser",
         "//enforcer/state:state_manager",
         "//enforcer/v1:data_scope_rust",
         "//enforcer/v1:enforcer_rust",

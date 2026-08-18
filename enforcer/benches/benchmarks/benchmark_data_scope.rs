@@ -185,7 +185,7 @@ fn benchmark_helper(
     treat_as_ratified_isolates: bool,
 ) {
     let ez_manifest =
-        parse_manifest(JSON_MANIFEST_PATH.to_string()).expect("Failed to parse JSON manifest file");
+        parse_manifest(JSON_MANIFEST_PATH).expect("Failed to parse JSON manifest file");
     let manager = DsmBenchmarkManager::start(ez_manifest, rt, treat_as_ratified_isolates)
         .expect("Failed to start DSM Benchmark Manager");
 
@@ -204,7 +204,7 @@ fn benchmark_helper(
             .bench_with_input(
                 BenchmarkId::from_parameter(format!(
                     "get_isolate_api_data_scope_{}",
-                    &data_scope_str
+                    data_scope_str
                 )),
                 &data_scope,
                 |b, &data_scope| {
@@ -223,7 +223,7 @@ fn benchmark_helper(
             .bench_with_input(
                 BenchmarkId::from_parameter(format!(
                     "validate_isolate_api_data_scope_{}",
-                    &data_scope_str
+                    data_scope_str
                 )),
                 &data_scope,
                 |b, &data_scope| {

@@ -30,7 +30,6 @@ bazel_dep(name = "rules_go", version = "0.62.0")
 bazel_dep(name = "rules_license", version = "1.0.0")
 bazel_dep(name = "rules_oci", version = "2.3.0")
 bazel_dep(name = "rules_pkg", version = "1.3.0")
-bazel_dep(name = "rules_proto", version = "7.1.0")
 bazel_dep(name = "rules_python", version = "1.7.0")
 bazel_dep(name = "rules_rust", version = "0.69.0")
 bazel_dep(name = "rules_rust_prost", version = "0.69.0")
@@ -77,7 +76,7 @@ register_toolchains("@cpp_toolchain//:all")
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(
     edition = "2021",
-    versions = ["1.87.0"],
+    versions = ["1.97.1"],
 )
 use_repo(rust, "rust_toolchains")
 
@@ -498,14 +497,14 @@ http_archive(
     patch_cmds = [
         "sed -i '/rules_java/d;/rules_cc/d' proto/BUILD proto/attestation/BUILD",
         "sed -i '1i load(\"@@//third_party:oak_ext.bzl\", \"cc_proto_library\", \"java_proto_library\")' proto/BUILD proto/attestation/BUILD",
-        "sed -i '1i load(\"@rules_proto//proto:defs.bzl\", \"proto_library\")' proto/attestation/BUILD",
     ],
-    sha256 = "c980e70cb535eac5185aee397fa577874ee37a38955161938cd89784ab5f33de",
-    strip_prefix = "oak-439c15a855fdb42067d4544535f836a19ee9f168",
-    url = "https://github.com/project-oak/oak/archive/439c15a855fdb42067d4544535f836a19ee9f168.tar.gz",
+    sha256 = "3fe3284a45626ce72eec71b6133da131974f37bdb0e04b5a4252fe849137d60d",
+    strip_prefix = "oak-1d4466bb8b1a3eec1affaad6f7f5034ca495fd8f",
+    url = "https://github.com/project-oak/oak/archive/1d4466bb8b1a3eec1affaad6f7f5034ca495fd8f.tar.gz",
 )
 
-oak_ext = use_extension("//third_party:oak_ext.bzl", "oak_ext")
-use_repo(oak_ext, "umoci_toolchain")
+umoci_toolchain_repo = use_repo_rule("//third_party:oak_ext.bzl", "umoci_toolchain_repo")
 
-register_toolchains("@umoci_toolchain//:all")
+umoci_toolchain_repo(name = "umoci")
+
+register_toolchains("@umoci//:all")

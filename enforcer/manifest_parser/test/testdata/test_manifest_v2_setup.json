@@ -1,0 +1,23 @@
+{
+  "setup_isolate_descriptor": {
+    "isolate_name": "ezpkg://setup.example.com",
+    "publisher_id": "EZ_Trusted",
+    "package_filename": "enforcer/container/test_data/test_binary.tar",
+    "binary_filename": "/usr/local/bin/setup",
+    "command_line_arguments": ["--init"],
+    "service_specs": [
+      {
+        "service_name": "SetupService",
+        "method_specs": [
+          {
+            "method_name": "Initialize",
+            "input_scope_types": ["DATA_SCOPE_TYPE_PUBLIC"],
+            "output_scope_types": ["DATA_SCOPE_TYPE_PUBLIC"]
+          }
+        ]
+      }
+    ],
+    "number_of_isolates": 1,
+    "ez_backend_dependencies": []
+  }
+}

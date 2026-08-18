@@ -13,23 +13,29 @@
 # limitations under the License.
 
 genrule(
-    name = "test_manifest_descriptor_set",
+    name = "manifest_v1_descriptor_set",
     srcs = ["//enforcer/v1:manifest_descriptor_set"],
     outs = ["v1/manifest_descriptor_set.pb"],
     cmd = "cp $< $@",
-    visibility = [
-        "//enforcer/benches:__pkg__",
-        "//enforcer/container/manager:__pkg__",
-    ],
+    visibility = ["//visibility:public"],
 )
 
 genrule(
-    name = "test_manifest_v2_descriptor_set",
+    name = "manifest_v2_descriptor_set",
     srcs = ["//enforcer/v2:manifest_descriptor_set"],
     outs = ["v2/manifest_descriptor_set.pb"],
     cmd = "cp $< $@",
-    visibility = [
-        "//enforcer/benches:__pkg__",
-        "//enforcer/container/manager:__pkg__",
-    ],
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "test_manifest_descriptor_set",
+    actual = ":manifest_v1_descriptor_set",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "test_manifest_v2_descriptor_set",
+    actual = ":manifest_v2_descriptor_set",
+    visibility = ["//visibility:public"],
 )

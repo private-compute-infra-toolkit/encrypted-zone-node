@@ -74,9 +74,9 @@ impl BuildService {
 
         match rustfmt_result {
             Ok(rustfmt_res) => {
-                info!("rustfmt result {:?}", &rustfmt_res.status.success());
+                info!("rustfmt result {:?}", rustfmt_res.status.success());
                 if !rustfmt_res.status.success() {
-                    info!("rusfmt result {:?}", &rustfmt_res.stderr);
+                    info!("rusfmt result {:?}", rustfmt_res.stderr);
                     let stderr = String::from_utf8_lossy(&rustfmt_res.stderr).to_string();
                     return Ok(CallToolResult::error(vec![Content::text(stderr)]));
                 }
@@ -95,7 +95,7 @@ impl BuildService {
             });
         match bazel_result {
             Ok(bazel_res) => {
-                info!("bazel result {:?}", &bazel_res.status.success());
+                info!("bazel result {:?}", bazel_res.status.success());
                 if bazel_res.status.success() {
                     Ok(CallToolResult::success(vec![Content::text(
                         String::from_utf8_lossy(&bazel_res.stdout).to_string(),

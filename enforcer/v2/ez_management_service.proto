@@ -1,0 +1,118 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package enforcer.v2;
+
+import "enforcer/v1/isolate_endorsement.proto";
+import "enforcer/v2/opaque_isolate_manifest.proto";
+import "enforcer/v2/ratified_isolate_manifest.proto";
+
+// Management API for the Enforcer. This service handles administrative tasks
+// for the Enforcer overall, such as loading isolate packages and loading
+// identities (e.g., operator roles).
+//
+// The Enforcer acts as the gRPC client for this service, while a proxy or
+// sidecar running outside the Trusted Execution Environment (TEE) boundary
+// acts as the gRPC server, providing the necessary resources.
+service EzManagementService {
+  // Loads isolate manifests and packages.
+  // The contract is as follows:
+  // 1. The Enforcer starts the stream by sending a ReadyToLoadPackagesRequest.
+  // 2. The proxy responds by sending two manifests (one RatifiedIsolateManifest
+  // and one OpaqueIsolateManifest), followed by the isolate packages required
+  // by the manifests as IsolatePackageChunks.
+  // 3. For each package successfully loaded, the Enforcer sends a
+  // LoadIsolatesResult.
+  rpc LoadIsolates(stream LoadIsolatesRequest) returns (stream LoadIsolatesResponse) {}
+}
+
+// Request message indicating the Enforcer is ready to load packages.
+message ReadyToLoadPackagesRequest {
+  // Empty for now, but fields can be added safely later.
+}
+
+// Result of processing a package load request.
+message LoadIsolatesResult {
+  // Identifier for the package that this result corresponds to.
+  string package_name = 1;
+  // Indicates whether loading succeeded without any errors.
+  bool success = 2;
+  // Result of validating an isolate endorsement.
+  enforcer.v1.ValidateIsolateEndorsementResponse validate_isolate_endorsement_result = 3;
+  // Error encountered during package loading.
+  LoadIsolatesError load_isolates_error = 4;
+}
+
+// Request message for loading isolates.
+// The Enforcer sends requests on this stream to signal its readiness to receive
+// packages and to report the status of package loading.
+message LoadIsolatesRequest {
+  // The payload sent from the Enforcer to the management service.
+  oneof request {
+    // Signal sent by the Enforcer indicating it is ready to receive packages.
+    ReadyToLoadPackagesRequest ready_to_load_packages = 1;
+    // The result of processing the loaded isolates.
+    LoadIsolatesResult load_isolates_result = 2;
+  }
+}
+
+// Response message for loading isolates.
+// The proxy sends responses on this stream containing the manifests and package
+// chunks.
+message LoadIsolatesResponse {
+  // The payload sent from the management service to the Enforcer.
+  oneof response {
+    // Ratified Isolate Manifest describing the isolate configuration and
+    // packages.
+    enforcer.v2.RatifiedIsolateManifest ratified_isolate_manifest = 1;
+    // Opaque Isolate Manifest describing the isolate configuration and
+    // packages.
+    enforcer.v2.OpaqueIsolateManifest opaque_isolate_manifest = 2;
+    // An individual isolate package chunk to be loaded.
+    // Package endorsements are expected to be part of the overall package tar.
+    IsolatePackageChunk isolate_package_chunk = 3;
+  }
+}
+
+// A chunk of an isolate package containing the filesystem tarball.
+message IsolatePackageChunk {
+  // Identifier for the package being processed. Useful for parallel processing
+  // without relying on strict sequence ordering. Expected to be provided only
+  // in the first chunk.
+  string package_name = 1;
+  // Sequence number for this chunk, starting from 0.
+  int32 chunk_sequence = 2;
+  // Chunk of the isolate package tarball as bytes. oci_bundle must be provided
+  // here.
+  bytes package_tar_chunk = 3;
+  // Indicates if this is the last chunk.
+  bool is_last_chunk = 4;
+}
+
+// Errors that can occur during isolate package or manifest loading.
+enum LoadIsolatesError {
+  // Unspecified package loading error.
+  LOAD_ISOLATES_ERROR_UNSPECIFIED = 0;
+  // Failed to read manifest or package files due to I/O error.
+  LOAD_ISOLATES_ERROR_IO_FAILURE = 1;
+  // Failed to parse the manifest or package JSON/proto.
+  LOAD_ISOLATES_ERROR_MANIFEST_PARSING_FAILURE = 2;
+  // Failed to unpack or extract the isolate filesystem from the tar file.
+  LOAD_ISOLATES_ERROR_UNPACKING_FAILURE = 3;
+  // Failed to resolve or process backend dependencies.
+  LOAD_ISOLATES_ERROR_DEPENDENCY_PROCESSING_FAILURE = 4;
+  // TODO: b/545375949 - Add error cases for Manifest endorsements.
+}

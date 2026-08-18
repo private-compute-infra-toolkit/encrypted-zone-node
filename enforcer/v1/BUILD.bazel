@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+load("@com_google_protobuf//bazel:proto_descriptor_set.bzl", "proto_descriptor_set")
 load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
 load("@rules_buf//buf:defs.bzl", "buf_lint_test")
 load("@rules_pkg//pkg:mappings.bzl", "pkg_attributes", "pkg_files")
-load("@rules_proto//proto:defs.bzl", "proto_descriptor_set")
 load("@rules_rust_prost//:defs.bzl", "rust_prost_library")
 
 proto_library(
@@ -190,6 +190,28 @@ rust_prost_library(
     name = "ez_to_ez_service_rust",
     proto = ":ez_to_ez_service_proto",
     visibility = ["//visibility:public"],
+)
+
+proto_library(
+    name = "isolate_endorsement_proto",
+    srcs = ["isolate_endorsement.proto"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@com_google_protobuf//:timestamp_proto",
+    ],
+)
+
+rust_prost_library(
+    name = "isolate_endorsement_rust",
+    proto = ":isolate_endorsement_proto",
+    visibility = ["//visibility:public"],
+)
+
+buf_lint_test(
+    name = "isolate_endorsement_lint",
+    size = "small",
+    config = ":buf.yaml",
+    targets = [":isolate_endorsement_proto"],
 )
 
 proto_library(
