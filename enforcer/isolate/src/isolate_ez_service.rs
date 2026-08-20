@@ -50,6 +50,7 @@ use payload_proto::enforcer::v1::{ez_hybrid_payload::DeliveryMethod, EzPayloadDa
 use shared_memory_manager::SharedMemManager;
 use simple_tonic_stream::SimpleStreamingWrapper;
 use state_manager::IsolateStateManager;
+use std::time::Instant;
 use tokio::sync::mpsc::{channel, Sender};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
@@ -143,6 +144,7 @@ impl IsolateEzBridge for IsolateEzBridgeService {
 
     async fn invoke_ez(&self, request: Request<InvokeEzRequest>) -> InvokeEzResult {
         let timeout = try_parse_grpc_timeout(request.metadata()).unwrap_or(None);
+        let deadline = timeout.and_then(|t| Instant::now().checked_add(t));
         let req = request.into_inner();
 
         let parent_context = traces::context::extract_parent_context(
@@ -154,7 +156,7 @@ impl IsolateEzBridge for IsolateEzBridgeService {
             tracing::warn!("Failed to set parent span: {e:?}");
         }
 
-        self.handle_unary_invoke(req, timeout).instrument(span).await
+        self.handle_unary_invoke(req, deadline).instrument(span).await
     }
 
     type CreateMemshareStream = ReceiverStream<Result<CreateMemshareResponse, Status>>;
@@ -297,7 +299,7 @@ impl IsolateEzBridgeService {
         &self,
         req: InvokeEzRequest,
         metric_attr: &MetricAttributes,
-        timeout: Option<std::time::Duration>,
+        deadline: Option<Instant>,
     ) -> InvokeEzResult {
         log::debug!("Routing external call for isolate {}", self.isolate_id);
 
@@ -313,7 +315,7 @@ impl IsolateEzBridgeService {
         };
 
         // Forward to the request to the ExternalProxyConnector and to the proxy.
-        match connector.proxy_external(self.isolate_id, req, timeout).await {
+        match connector.proxy_external(self.isolate_id, req, deadline).await {
             Ok(response) => Ok(Response::new(response)),
             Err(e) => {
                 log::error!("External unary call failed: {e:?}");
@@ -331,12 +333,12 @@ impl IsolateEzBridgeService {
         &self,
         req: InvokeEzRequest,
         metric_attr: &MetricAttributes,
-        timeout: Option<std::time::Duration>,
+        deadline: Option<Instant>,
     ) -> InvokeEzResult {
         log::debug!("Routing internal call for isolate {}", self.isolate_id);
         let invoke_isolate_result = self
             .isolate_junction
-            .invoke_isolate(Some(self.isolate_id), convert_to_isolate_request(req), false, timeout)
+            .invoke_isolate(Some(self.isolate_id), convert_to_isolate_request(req), false, deadline)
             .await;
 
         match invoke_isolate_result {
@@ -357,7 +359,7 @@ impl IsolateEzBridgeService {
         &self,
         req: InvokeEzRequest,
         metric_attr: &MetricAttributes,
-        timeout: Option<std::time::Duration>,
+        deadline: Option<Instant>,
     ) -> InvokeEzResult {
         log::debug!("Routing remote call for isolate {}", self.isolate_id);
         let Some(handler) = &self.ez_to_ez_outbound_handler else {
@@ -367,7 +369,7 @@ impl IsolateEzBridgeService {
             ));
         };
 
-        handler.remote_invoke(req, timeout).await.map(Response::new).map_err(|e| {
+        handler.remote_invoke(req, deadline).await.map(Response::new).map_err(|e| {
             self.metrics.record_error(&metric_attr.base(), "remote_invoke_failed");
             let status = match e.downcast_ref::<Status>() {
                 Some(status) => status,
@@ -380,7 +382,7 @@ impl IsolateEzBridgeService {
     async fn handle_unary_invoke(
         &self,
         mut req: InvokeEzRequest,
-        timeout: Option<std::time::Duration>,
+        deadline: Option<Instant>,
     ) -> InvokeEzResult {
         if let Some(ref mut control_plane_metadata) = req.control_plane_metadata {
             inject_trace_context(&mut control_plane_metadata.metadata_headers);
@@ -414,7 +416,7 @@ impl IsolateEzBridgeService {
 
         let mut result = match route_result {
             Ok(route) => {
-                let mut result = self.execute_route(route, req, &metric_attr, timeout).await;
+                let mut result = self.execute_route(route, req, &metric_attr, deadline).await;
                 if let Ok(response) = &result {
                     if let Err(e) =
                         restrictions_enforcer.validate_invoke_ez_resp(response.get_ref()).await
@@ -451,12 +453,12 @@ impl IsolateEzBridgeService {
         route: Route,
         req: InvokeEzRequest,
         metric_attr: &MetricAttributes,
-        timeout: Option<std::time::Duration>,
+        deadline: Option<Instant>,
     ) -> InvokeEzResult {
         match route {
-            Route::External => self.handle_external_request(req, metric_attr, timeout).await,
-            Route::Internal => self.handle_internal_request(req, metric_attr, timeout).await,
-            Route::Remote => self.handle_remote_request(req, metric_attr, timeout).await,
+            Route::External => self.handle_external_request(req, metric_attr, deadline).await,
+            Route::Internal => self.handle_internal_request(req, metric_attr, deadline).await,
+            Route::Remote => self.handle_remote_request(req, metric_attr, deadline).await,
             Route::Unknown => {
                 self.metrics.record_error(&metric_attr.base(), "unknown_route");
                 Err(Status::not_found(

@@ -62,7 +62,7 @@ pub const QUALIFIED_ECHO_ISOLATE_SERVICE_NAME: &str = "qualified_echo_isolate_se
 #[derive(Debug, Clone, Derivative)]
 #[derivative(Default)]
 pub struct FakeJunction {
-    pub last_timeout: Arc<Mutex<Option<std::time::Duration>>>,
+    pub last_deadline: Arc<Mutex<Option<std::time::Instant>>>,
     #[derivative(Default(
         value = "Box::new(DefaultEchoIsolate::new(ScopeDragInstruction::KeepSame, None))"
     ))]
@@ -80,9 +80,9 @@ impl Junction for FakeJunction {
         _client_isolate_id_option: Option<IsolateId>,
         invoke_isolate_request: InvokeIsolateRequest,
         _is_from_public_api: bool,
-        timeout: Option<std::time::Duration>,
+        deadline: Option<std::time::Instant>,
     ) -> Result<InvokeIsolateResponse, ez_error::EzError> {
-        *self.last_timeout.lock().unwrap() = timeout;
+        *self.last_deadline.lock().unwrap() = deadline;
         self.call_count.fetch_add(1, Ordering::SeqCst);
         self.invoked_isolate_requests.lock().unwrap().push(invoke_isolate_request.clone());
         if invoke_isolate_request

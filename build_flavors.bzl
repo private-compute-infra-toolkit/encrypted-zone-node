@@ -25,7 +25,7 @@ prod = struct(
 )
 debug = struct(
     suffix = "_debug",
-    features = ["debug", "disable_netns", "test"],
+    features = ["debug", "test"],
     rustc_flags = [
         "--codegen=opt-level=0",
         "--codegen=debuginfo=full",

@@ -36,6 +36,7 @@ use payload_proto::enforcer::v1::EzPayloadData;
 use prost::Message;
 use std::collections::HashMap;
 use std::env;
+use std::time::Instant;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot;
 use tokio_stream::wrappers::ReceiverStream;
@@ -241,7 +242,7 @@ impl ExternalProxyChannel for ExternalProxyConnector {
         &self,
         isolate_id: IsolateId,
         request: InvokeEzRequest,
-        timeout: Option<std::time::Duration>,
+        deadline: Option<Instant>,
     ) -> Result<InvokeEzResponse, ExternalProxyConnectorError> {
         if let Err(e) = validate_external_call(&request) {
             log::warn!("External call rejected by policy for isolate {}: {}", isolate_id, e);
@@ -274,8 +275,8 @@ impl ExternalProxyChannel for ExternalProxyConnector {
         let _msg_timer = MessageTimerGuard::new(&self.metrics, &base_attrs);
 
         let mut tonic_request = tonic::Request::new(proxy_request);
-        if let Some(duration) = timeout {
-            tonic_request.set_timeout(duration);
+        if let Some(d) = deadline {
+            tonic_request.set_timeout(d.saturating_duration_since(Instant::now()));
         }
         let mut client = EzExternalProxyServiceClient::new(self.client_channel_pool.next_channel())
             .max_decoding_message_size(self.max_decoding_message_size);

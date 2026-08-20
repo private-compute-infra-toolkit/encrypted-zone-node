@@ -99,12 +99,12 @@ impl ExternalProxyChannel for MockExternalProxy {
         &self,
         _: IsolateId,
         request: InvokeEzRequest,
-        timeout: Option<std::time::Duration>,
+        timeout: Option<std::time::Instant>,
     ) -> Result<InvokeEzResponse, ExternalProxyConnectorError> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
         if let Some(t) = timeout {
             let delay = *self.delay.lock().unwrap();
-            if delay > t {
+            if std::time::Instant::now() + delay > t {
                 return Err(ExternalProxyConnectorError::ConnectionFailed(
                     "Mock proxy timeout".to_string(),
                 ));
@@ -175,12 +175,12 @@ impl OutboundEzToEzClient for MockEzToEzOutboundHandler {
     async fn remote_invoke(
         &self,
         request: InvokeEzRequest,
-        timeout: Option<std::time::Duration>,
+        timeout: Option<std::time::Instant>,
     ) -> anyhow::Result<InvokeEzResponse> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
         if let Some(t) = timeout {
             let delay = *self.delay.lock().unwrap();
-            if delay > t {
+            if std::time::Instant::now() + delay > t {
                 return Err(anyhow::anyhow!("Mock remote_invoke timeout"));
             }
         }

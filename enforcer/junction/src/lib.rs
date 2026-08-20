@@ -103,7 +103,7 @@ impl Junction for IsolateJunction {
         client_isolate_id_option: Option<IsolateId>,
         mut invoke_isolate_request: InvokeIsolateRequest,
         is_from_public_api: bool,
-        timeout: Option<std::time::Duration>,
+        deadline: Option<Instant>,
     ) -> Result<InvokeIsolateResponse, EzError> {
         let metric_attr =
             MetricAttributes::from(invoke_isolate_request.control_plane_metadata.as_ref());
@@ -157,8 +157,8 @@ impl Junction for IsolateJunction {
                 self.state_manager.increment_inflight_counter(destination_isolate_info.id).await;
                 let isolate_rpc_start_time = Instant::now();
                 let mut request = Request::new(invoke_isolate_request);
-                if let Some(t) = timeout {
-                    request.set_timeout(t);
+                if let Some(d) = deadline {
+                    request.set_timeout(d.saturating_duration_since(isolate_rpc_start_time));
                 }
                 let request = extract_and_parse_metadata_headers(request);
                 let invoke_isolate_result = client.invoke_isolate(request).await;

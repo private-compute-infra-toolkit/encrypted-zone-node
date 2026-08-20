@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## 0.21.0 (2026-08-20)
+
+
+### EZ Policy Enforcer
+
+* **enforcer:** introduce InstanceIdGenerator interface
+* **enforcer:** move instance_id imports below license header
+* **enforcer:** Rm disable_netns feat from debug
+* **enforcer:** Start Isolates concurrently
+
+
+### Bug Fixes
+
+* account for internal gRPC processing time
+* Pin versions of rustc 1.97.1 toolchains
+
 ## 0.20.0 (2026-08-18)
 
 

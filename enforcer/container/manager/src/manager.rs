@@ -222,6 +222,7 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
                 .await;
         }
 
+        let mut join_set = tokio::task::JoinSet::new();
         for (binary_services_index, num_isolates, strictest_scope) in boot_requests {
             for _ in 0..num_isolates {
                 let add_req = AddIsolateRequest {
@@ -229,8 +230,15 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
                     current_data_scope_type: DataScopeType::Public,
                     allowed_data_scope_type: strictest_scope,
                 };
-                isolate_mngr.add_new_isolate(add_req, /*restart_count=*/ 0).await?;
+                let isolate_mngr = isolate_mngr.clone();
+                join_set.spawn(async move {
+                    isolate_mngr.add_new_isolate(add_req, /*restart_count=*/ 0).await
+                });
             }
+        }
+
+        while let Some(res) = join_set.join_next().await {
+            res.context("Add Isolate failed")??;
         }
 
         // Spawn to avoid blocking the constructor

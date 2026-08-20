@@ -38,6 +38,7 @@ use payload_proto::enforcer::v1::{ez_hybrid_payload::DeliveryMethod, EzHybridPay
 use prost::Message;
 use std::collections::HashMap;
 use std::iter::zip;
+use std::time::Instant;
 use tokio::sync::mpsc::Sender;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
@@ -98,6 +99,7 @@ impl EzPublicApi for EzPublicApiService {
         let _ = tracing::Span::current().set_parent(parent_context);
 
         let timeout = try_parse_grpc_timeout(request.metadata()).unwrap_or(None);
+        let deadline = timeout.and_then(|t| Instant::now().checked_add(t));
         tracing::debug!("after parsing timeout");
 
         let mut call_request = request.into_inner();
@@ -130,8 +132,10 @@ impl EzPublicApi for EzPublicApiService {
             invoke_isolate_request.encoded_len() as u64,
         );
 
-        let invoke_isolate_response_result =
-            self.isolate_junction.invoke_isolate(None, invoke_isolate_request, true, timeout).await;
+        let invoke_isolate_response_result = self
+            .isolate_junction
+            .invoke_isolate(None, invoke_isolate_request, true, deadline)
+            .await;
 
         match invoke_isolate_response_result {
             Ok(invoke_isolate_response) => {

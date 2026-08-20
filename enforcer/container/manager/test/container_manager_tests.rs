@@ -1300,7 +1300,11 @@ async fn test_backend_dependencies_env_var() {
     let isolate_and_uds_vec =
         check_container_started(vec![HELLOWORLD_BINARY]).await.expect("Container should start");
     assert_eq!(isolate_and_uds_vec.len(), 1);
-    let fake_container_id = isolate_and_uds_vec[0].0;
+    let (fake_container_id, isolate_ez_bridge_enforcer_side_uds_path) =
+        isolate_and_uds_vec[0].clone();
+    let _client = notify_isolate_ready(isolate_ez_bridge_enforcer_side_uds_path)
+        .await
+        .expect("Isolate should be ready");
 
     let tracker = FakeContainer::get_tracker();
     let tracked_container = tracker.get(&fake_container_id).unwrap();
@@ -1460,7 +1464,11 @@ async fn test_ratified_isolate_operator_role_env_var() {
     let isolate_and_uds_vec =
         check_container_started(vec![HELLOWORLD_BINARY]).await.expect("Container should start");
     assert_eq!(isolate_and_uds_vec.len(), 1);
-    let fake_container_id = isolate_and_uds_vec[0].0;
+    let (fake_container_id, isolate_ez_bridge_enforcer_side_uds_path) =
+        isolate_and_uds_vec[0].clone();
+    let _client = notify_isolate_ready(isolate_ez_bridge_enforcer_side_uds_path)
+        .await
+        .expect("Isolate should be ready");
 
     let tracker = FakeContainer::get_tracker();
     let tracked_container = tracker.get(&fake_container_id).unwrap();
@@ -1493,7 +1501,11 @@ async fn test_ratified_isolate_missing_operator_role() {
     let isolate_and_uds_vec =
         check_container_started(vec![HELLOWORLD_BINARY]).await.expect("Container should start");
     assert_eq!(isolate_and_uds_vec.len(), 1);
-    let fake_container_id = isolate_and_uds_vec[0].0;
+    let (fake_container_id, isolate_ez_bridge_enforcer_side_uds_path) =
+        isolate_and_uds_vec[0].clone();
+    let _client = notify_isolate_ready(isolate_ez_bridge_enforcer_side_uds_path)
+        .await
+        .expect("Isolate should be ready");
 
     let tracker = FakeContainer::get_tracker();
     let tracked_container = tracker.get(&fake_container_id).unwrap();
@@ -1525,7 +1537,11 @@ async fn test_non_ratified_isolate_missing_operator_role() {
     let isolate_and_uds_vec =
         check_container_started(vec![HELLOWORLD_BINARY]).await.expect("Container should start");
     assert_eq!(isolate_and_uds_vec.len(), 1);
-    let fake_container_id = isolate_and_uds_vec[0].0;
+    let (fake_container_id, isolate_ez_bridge_enforcer_side_uds_path) =
+        isolate_and_uds_vec[0].clone();
+    let _client = notify_isolate_ready(isolate_ez_bridge_enforcer_side_uds_path)
+        .await
+        .expect("Isolate should be ready");
 
     let tracker = FakeContainer::get_tracker();
     let tracked_container = tracker.get(&fake_container_id).unwrap();
@@ -1567,9 +1583,17 @@ async fn test_non_existent_otel_traces_uds() {
     .await
     .expect("Should succeed even if otel traces UDS socket does not exist");
 
+    let isolate_and_uds_vec =
+        check_container_started(vec![HELLOWORLD_BINARY]).await.expect("Container should start");
+    assert_eq!(isolate_and_uds_vec.len(), 1);
+    let (fake_container_id, isolate_ez_bridge_enforcer_side_uds_path) =
+        isolate_and_uds_vec[0].clone();
+    let _client = notify_isolate_ready(isolate_ez_bridge_enforcer_side_uds_path)
+        .await
+        .expect("Isolate should be ready");
+
     let tracker = FakeContainer::get_tracker();
-    assert_eq!(tracker.len(), 1);
-    let tracked_container = tracker.iter().next().unwrap();
+    let tracked_container = tracker.get(&fake_container_id).unwrap();
 
     let traces_mount = tracked_container.value().boot_mounts.iter().find(|m| {
         m.destination == std::path::Path::new("/enforcer-isolate-shared/traces-otlp.sock")
@@ -1581,4 +1605,5 @@ async fn test_non_existent_otel_traces_uds() {
     drop(tracked_container);
     drop(tracker);
     harness.stop().await;
+    ensure_isolate_stopped(fake_container_id).await.expect("Container should stop");
 }

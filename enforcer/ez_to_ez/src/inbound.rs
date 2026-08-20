@@ -34,6 +34,7 @@ use payload_proto::enforcer::v1::{
     ez_hybrid_payload::DeliveryMethod, EzHybridPayload, EzPayloadScope,
 };
 use prost::Message;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_stream::{
     wrappers::{ReceiverStream, UnixListenerStream},
@@ -71,6 +72,8 @@ impl EzToEzApi for InboundEzToEzHandler {
         request: Request<EzCallRequest>,
     ) -> Result<Response<EzCallResponse>, Status> {
         let timeout = try_parse_grpc_timeout(request.metadata()).unwrap_or(None);
+        let deadline = timeout.and_then(|t| Instant::now().checked_add(t));
+
         let ez_call_request = request.into_inner();
         let metric_attr = MetricAttributes::from(&ez_call_request);
         let _call_tracker = self.metrics.track_call(metric_attr.base());
@@ -95,7 +98,7 @@ impl EzToEzApi for InboundEzToEzHandler {
 
             let invoke_isolate_response = self
                 .isolate_junction
-                .invoke_isolate(None, invoke_isolate_request, false, timeout)
+                .invoke_isolate(None, invoke_isolate_request, false, deadline)
                 .await
                 .map_err(|e| {
                     self.metrics.record_error(&metric_attr.base(), "junction_invocation_failed");
@@ -281,7 +284,7 @@ fn invoke_isolate_response_to_ez_call_response(response: InvokeIsolateResponse) 
 
 pub struct InboundTlsConfig {
     pub acceptor: SslAcceptor,
-    pub handshake_timeout: std::time::Duration,
+    pub handshake_timeout: Duration,
     pub max_concurrent_handshakes: usize,
 }
 

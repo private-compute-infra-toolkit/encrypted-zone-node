@@ -29,6 +29,7 @@ use payload_proto::enforcer::v1::ez_hybrid_payload::DeliveryMethod;
 use payload_proto::enforcer::v1::EzPayloadScope;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::sync::OnceCell;
 use tokio::sync::RwLock;
@@ -187,15 +188,15 @@ impl<MetricsImpl: ServiceMetrics> OutboundEzToEzClient for OutboundEzToEzHandler
     async fn remote_invoke(
         &self,
         request: InvokeEzRequest,
-        timeout: Option<std::time::Duration>,
+        deadline: Option<Instant>,
     ) -> Result<InvokeEzResponse> {
         let original_metadata = request.control_plane_metadata.clone();
         let ez_call_request = invoke_ez_request_to_ez_call_request(request);
         let channel = self.get_or_create_channel(original_metadata.as_ref()).await?;
         let mut client = EzToEzApiClient::new(channel);
         let mut tonic_request = tonic::Request::new(ez_call_request);
-        if let Some(duration) = timeout {
-            tonic_request.set_timeout(duration);
+        if let Some(d) = deadline {
+            tonic_request.set_timeout(d.saturating_duration_since(Instant::now()));
         }
         let response = client
             .ez_call(tonic_request)

@@ -147,8 +147,8 @@ async fn test_call_propagates_timeout() {
 
     let _ = shutdown_tx.send(());
 
-    let captured_timeout = fake_junction.last_timeout.lock().unwrap();
-    assert_eq!(*captured_timeout, Some(Duration::from_secs(5)));
+    let captured_deadline = fake_junction.last_deadline.lock().unwrap();
+    assert!(captured_deadline.is_some());
 }
 
 #[tokio::test]

@@ -44,6 +44,7 @@ use shared_memory_manager::SharedMemManager;
 use state_manager::IsolateStateManager;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{timeout, Duration};
@@ -1197,7 +1198,12 @@ async fn test_junction_unary_timeout() {
     // Invoke the isolate with a short timeout
     let invoke_result = test_harness
         .isolate_junction
-        .invoke_isolate(None, invoke_isolate_request, false, Some(Duration::from_millis(100)))
+        .invoke_isolate(
+            None,
+            invoke_isolate_request,
+            false,
+            Some(Instant::now() + Duration::from_millis(100)),
+        )
         .await;
 
     // Shutdown fake Isolate server
@@ -1237,7 +1243,12 @@ async fn test_junction_unary_timeout_internal_route() {
     // Invoke the isolate with a short timeout
     let invoke_result = test_harness
         .isolate_junction
-        .invoke_isolate(None, invoke_isolate_request, false, Some(Duration::from_millis(100)))
+        .invoke_isolate(
+            None,
+            invoke_isolate_request,
+            false,
+            Some(Instant::now() + Duration::from_millis(100)),
+        )
         .await;
 
     // Shutdown fake Isolate server

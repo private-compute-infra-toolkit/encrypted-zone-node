@@ -16,6 +16,7 @@ use dyn_clone::DynClone;
 use enforcer_proto::enforcer::v1::{InvokeIsolateRequest, InvokeIsolateResponse};
 use ez_error::EzError;
 use isolate_info::IsolateId;
+use std::time::Instant;
 use tokio::sync::mpsc::{Receiver, Sender};
 
 #[derive(Debug)]
@@ -35,7 +36,7 @@ pub trait Junction: Send + Sync + DynClone {
         client_isolate_id_option: Option<IsolateId>,
         invoke_isolate_request: InvokeIsolateRequest,
         is_from_public_api: bool,
-        timeout: Option<std::time::Duration>,
+        deadline: Option<Instant>,
     ) -> Result<InvokeIsolateResponse, EzError>;
 
     /// Start streaming connection with IsolateJunction. Returns [JunctionChannels] which holds the

@@ -27,7 +27,7 @@ use payload_proto::enforcer::v1::{
     ez_hybrid_payload::DeliveryMethod, EzHybridPayload, EzPayloadData,
 };
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
@@ -192,8 +192,9 @@ async fn test_outbound_unary_call_timeout_propagation() {
     let request = create_test_request(Some("timeout test"));
     let client_timeout = Duration::from_millis(100);
 
-    let handle =
-        tokio::spawn(async move { handler.remote_invoke(request, Some(client_timeout)).await });
+    let handle = tokio::spawn(async move {
+        handler.remote_invoke(request, Some(Instant::now() + client_timeout)).await
+    });
 
     let result = handle.await.unwrap();
 

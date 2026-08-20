@@ -14,6 +14,7 @@
 
 use enforcer_proto::enforcer::v1::{InvokeEzRequest, InvokeEzResponse};
 use isolate_info::IsolateId;
+use std::time::Instant;
 use tokio::sync::mpsc::Receiver;
 use tonic::{async_trait, Status};
 
@@ -38,7 +39,7 @@ pub trait ExternalProxyChannel: std::fmt::Debug + Send + Sync {
         &self,
         isolate_id: IsolateId,
         request: InvokeEzRequest,
-        timeout: Option<std::time::Duration>,
+        deadline: Option<Instant>,
     ) -> Result<InvokeEzResponse, ExternalProxyConnectorError>;
 
     // Handles streaming requests to the external proxy.

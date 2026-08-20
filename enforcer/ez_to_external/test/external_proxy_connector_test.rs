@@ -33,7 +33,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tempfile::tempdir;
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::mpsc::{self, Sender};
@@ -792,7 +792,7 @@ async fn test_external_proxy_connector_timeout_propagation() {
     // A more thorough test would involve a mock service that respects the timeout.
     let response_result = tokio::time::timeout(
         timeout + Duration::from_secs(1), // Add a little buffer
-        connector.proxy_external(isolate_id, request.clone(), Some(timeout)),
+        connector.proxy_external(isolate_id, request.clone(), Some(Instant::now() + timeout)),
     )
     .await;
 

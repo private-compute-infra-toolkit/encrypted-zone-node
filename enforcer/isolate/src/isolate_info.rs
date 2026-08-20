@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod instance_id;
+pub use instance_id::InstanceIdGenerator;
+
 use anyhow::{ensure, Ok, Result};
 use derivative::Derivative;
 use once_cell::sync::Lazy;

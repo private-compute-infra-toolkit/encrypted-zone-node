@@ -16,7 +16,10 @@ load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 
 rust_library(
     name = "isolate_info",
-    srcs = ["src/isolate_info.rs"],
+    srcs = [
+        "src/instance_id.rs",
+        "src/isolate_info.rs",
+    ],
     proc_macro_deps = ["@crates//:derivative"],
     visibility = ["//visibility:public"],
     deps = [
@@ -336,5 +339,15 @@ rust_test(
         "@crates//:tokio-stream",
         "@crates//:tonic",
         "@crates//:tower",
+    ],
+)
+
+rust_test(
+    name = "instance_id_test",
+    size = "small",
+    srcs = ["test/instance_id_test.rs"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":isolate_info",
     ],
 )
