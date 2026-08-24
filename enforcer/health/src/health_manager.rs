@@ -15,11 +15,13 @@
 use container_manager_requester::ContainerManagerRequester;
 use data_scope::request::GetIsolateScopeRequest;
 use data_scope::requester::DataScopeRequester;
+use data_scope_proto::enforcer::v1::DataScopeType;
+use enforcer_proto::enforcer::v1::ez_isolate_health::container_run_status::Status as RunStatus;
 use enforcer_proto::enforcer::v1::{
     EzIsolateHealth, EzIsolateHealthReport, IsolateServiceInfo, IsolateState,
 };
 use health_ops::get_ops_for_state;
-use isolate_info::IsolateId;
+use isolate_info::{InstanceIdGenerator, IsolateId};
 use isolate_service_mapper::IsolateServiceMapper;
 use opentelemetry::KeyValue;
 use state_manager::IsolateStateManager;
@@ -89,12 +91,26 @@ impl HealthManager {
             start_timestamp: start_time,
             end_timestamp: to_timestamp(std::time::SystemTime::now()),
         };
-        let mut latest = self.latest_report.write().await;
-        if latest.isolates != report.isolates {
-            log::info!("[Health Manager] Report: {:#?}", report);
+        if report.isolates.is_empty() {
+            log::info!("[Health Manager] No Isolates");
         } else {
-            log::info!("[Health Manager] Report: No changes");
+            let changes_detected: bool;
+            {
+                let latest = self.latest_report.read().await;
+                changes_detected = !isolates_equal(&latest.isolates, &report.isolates);
+            }
+            if changes_detected {
+                log::info!("[Health Manager] Isolate changes detected");
+                for isolate in &report.isolates {
+                    log::info!("    {}", format_isolate_health(isolate));
+                }
+            }
+            log::info!(
+                "[Health Manager] All Isolates are Ready: {}",
+                report.isolates.iter().all(|i| i.state == Some(IsolateState::Ready as i32))
+            );
         }
+        let mut latest = self.latest_report.write().await;
         *latest = report;
     }
 
@@ -127,7 +143,12 @@ impl HealthManager {
                     .map(|it| (it.isolate_name.as_str(), it.publisher_id.as_str()))
                     .unwrap_or(("unknown", "unknown"));
                 let is_ratified = isolate_id.is_ratified_isolate();
-                build_health_isolate_attributes(isolate_name, publisher_id, is_ratified)
+                build_health_isolate_attributes(
+                    isolate_name,
+                    publisher_id,
+                    is_ratified,
+                    &InstanceIdGenerator::generate(),
+                )
             });
 
             self.metrics.state.record(state_val, attributes);
@@ -188,11 +209,12 @@ impl HealthManager {
                     state: Some(state as i32),
                     ..Default::default()
                 };
-                // Populate current_scope
+                // Populate current_scope and sensitive_session_count
                 if let Ok(response) =
                     ds_requester.get_isolate_scope(GetIsolateScopeRequest { isolate_id }).await
                 {
                     health.current_scope = Some(response.current_scope as i32);
+                    health.sensitive_session_count = response.sensitive_session_count;
                 }
 
                 // Populate operator_domain and service_name
@@ -239,13 +261,93 @@ fn build_health_isolate_attributes(
     isolate_name: &str,
     publisher_id: &str,
     is_ratified: bool,
+    isolate_instance_id: &str,
 ) -> Vec<KeyValue> {
     metrics::isolate_metrics_receiver::get_isolate_attribute_data(
         isolate_name,
         publisher_id,
         is_ratified,
+        isolate_instance_id,
     )
     .into_iter()
     .map(|(k, v)| KeyValue::new(k, v))
     .collect()
+}
+
+pub fn isolates_equal(a: &[EzIsolateHealth], b: &[EzIsolateHealth]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b.iter()).all(|(x, y)| isolate_health_eq(x, y))
+}
+
+pub fn isolate_health_eq(a: &EzIsolateHealth, b: &EzIsolateHealth) -> bool {
+    a.isolate_id == b.isolate_id
+        && a.state == b.state
+        && a.container_run_status == b.container_run_status
+        && a.container_reset_requested == b.container_reset_requested
+        && a.services == b.services
+        && a.current_scope == b.current_scope
+}
+
+pub fn format_isolate_health(isolate: &EzIsolateHealth) -> String {
+    let state_str = isolate
+        .state
+        .and_then(|s| IsolateState::try_from(s).ok())
+        .map(|s| format!("{:?}", s))
+        .unwrap_or_else(|| "Unknown".to_string());
+
+    let mut status_str = match &isolate.container_run_status {
+        Some(status_info) => {
+            if let Some(code) = status_info.exit_code {
+                format!("Exited({})", code)
+            } else if let Some(sig) = status_info.signal {
+                format!("Signaled({})", sig)
+            } else {
+                RunStatus::try_from(status_info.status)
+                    .map(|s| format!("{:?}", s))
+                    .unwrap_or_else(|_| "Unknown".to_string())
+            }
+        }
+        None => "None".to_string(),
+    };
+    if let Some(restarts) = isolate.container_restart_count {
+        if restarts > 0 {
+            status_str.push_str(&format!(" (restarts: {})", restarts));
+        }
+    }
+
+    let mut scope_str = isolate
+        .current_scope
+        .and_then(|s| DataScopeType::try_from(s).ok())
+        .map(|s| format!("{:?}", s))
+        .unwrap_or_else(|| "Unspecified".to_string());
+    if let Some(sensitive_count) = isolate.sensitive_session_count {
+        if sensitive_count > 0 {
+            scope_str.push_str(&format!(" (sensitive_sessions: {})", sensitive_count));
+        }
+    }
+
+    let services_str = if isolate.services.is_empty() {
+        "none".to_string()
+    } else {
+        isolate
+            .services
+            .iter()
+            .map(|s| {
+                format!(
+                    "{} (operator_domain: {}, publisher_id: {}, isolate_name: {})",
+                    s.service_name, s.operator_domain, s.publisher_id, s.isolate_name
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
+
+    let reset_str = if isolate.container_reset_requested { " | reset_requested: true" } else { "" };
+
+    format!(
+        "{} | state: {} | container: {} | scope: {} | services: [{}]{}",
+        isolate.isolate_id, state_str, status_str, scope_str, services_str, reset_str
+    )
 }

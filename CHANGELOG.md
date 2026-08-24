@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## 0.22.0 (2026-08-24)
+
+
+### EZ Policy Enforcer
+
+* **enforcer:** Add get_isolate_name helper func
+* **enforcer:** Dependency ordering for Isolates
+* **enforcer:** Health report changes ignore mem
+* **enforcer:** Improve health manager logging
+* **enforcer:** Log cycles in Isolate dependencies
+* **enforcer:** manifest v2 support in container manager
+* **enforcer:** manifest v2 support in enforcer and mtls
+* **enforcer:** parameterize metrics receiver with isolate_instance_id
+* **enforcer:** Sensitive session in health report
+* **enforcer:** Set ez_isolate_name attribute from manifest isolate_name
+* **enforcer:** Track ready isolate services
+
 ## 0.21.0 (2026-08-20)
 
 

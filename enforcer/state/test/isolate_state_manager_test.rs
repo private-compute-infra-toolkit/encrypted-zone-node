@@ -436,6 +436,102 @@ async fn test_get_all_isolate_states() -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
+#[tokio::test]
+async fn test_is_isolate_ready() -> Result<(), Box<dyn std::error::Error>> {
+    let mut harness = TestHarness::new().await;
+    let binary_index = *TEST_BINARY_SERVICES_INDEX;
+
+    assert!(!harness.state_manager.is_isolate_ready(binary_index));
+
+    harness.advance_to_state(IsolateState::Ready).await;
+    assert!(harness.state_manager.is_isolate_ready(binary_index));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_wait_for_isolate_ready() -> Result<(), Box<dyn std::error::Error>> {
+    let harness = TestHarness::new().await;
+    let binary_index = *TEST_BINARY_SERVICES_INDEX;
+    let isolate_id = harness.isolate_id;
+    let state_manager = harness.state_manager.clone();
+
+    // Spawn task waiting for isolate ready
+    let wait_handle =
+        tokio::spawn(async move { state_manager.wait_for_isolate_ready(binary_index).await });
+
+    // Verify wait_handle is not finished immediately
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    assert!(!wait_handle.is_finished());
+
+    // Transition isolate to Ready
+    harness.state_manager.update_state(isolate_id, IsolateState::Ready).await?;
+
+    // Now wait_handle should complete successfully
+    let res = tokio::time::timeout(tokio::time::Duration::from_secs(2), wait_handle).await??;
+    assert!(res.is_ok());
+
+    // Calling wait_for_isolate_ready when already ready should return immediately
+    let res_immediate = harness.state_manager.wait_for_isolate_ready(binary_index).await;
+    assert!(res_immediate.is_ok());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_is_isolate_ready_multiple_replicas() -> Result<(), Box<dyn std::error::Error>> {
+    let harness = TestHarness::new().await;
+    let binary_index = *TEST_BINARY_SERVICES_INDEX;
+    let isolate_id1 = harness.isolate_id;
+    let isolate_id2 = IsolateId::new(binary_index);
+    harness.state_manager.add_isolate(create_add_isolate_request(isolate_id2)).await;
+
+    assert!(!harness.state_manager.is_isolate_ready(binary_index));
+
+    // First isolate becomes ready
+    harness.state_manager.update_state(isolate_id1, IsolateState::Ready).await?;
+    assert!(harness.state_manager.is_isolate_ready(binary_index));
+
+    // Second isolate becomes ready
+    harness.state_manager.update_state(isolate_id2, IsolateState::Ready).await?;
+    assert!(harness.state_manager.is_isolate_ready(binary_index));
+
+    // First isolate retires
+    harness.state_manager.update_state(isolate_id1, IsolateState::Retiring).await?;
+    assert!(
+        harness.state_manager.is_isolate_ready(binary_index),
+        "Binary service should still be ready as isolate_id2 is ready"
+    );
+
+    // Second isolate retires
+    harness.state_manager.update_state(isolate_id2, IsolateState::Retiring).await?;
+    assert!(
+        !harness.state_manager.is_isolate_ready(binary_index),
+        "Binary service should not be ready when all isolates have retired"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_is_isolate_ready_after_removal() -> Result<(), Box<dyn std::error::Error>> {
+    let mut harness = TestHarness::new().await;
+    let binary_index = *TEST_BINARY_SERVICES_INDEX;
+
+    harness.advance_to_state(IsolateState::Ready).await;
+    assert!(harness.state_manager.is_isolate_ready(binary_index));
+
+    let remove_req = RemoveIsolateRequest { isolate_id: harness.isolate_id };
+    harness.state_manager.remove_isolate(remove_req).await?;
+
+    assert!(
+        !harness.state_manager.is_isolate_ready(binary_index),
+        "Binary service should not be ready after removing its only ready isolate"
+    );
+
+    Ok(())
+}
+
 // --- Helper Functions ---
 
 fn create_add_isolate_request(isolate_id: IsolateId) -> AddIsolateRequest {

@@ -14,7 +14,8 @@
 
 use anyhow::{Context, Result};
 use data_scope_proto::enforcer::v1::DataScopeType;
-use manifest_parser::{get_strictest_scope, parse_isolate_runtime_configs, parse_manifest};
+use manifest_parser::get_strictest_scope;
+use manifest_parser::v1::{flatten_manifest, parse_isolate_runtime_configs, parse_manifest};
 use manifest_proto::enforcer::v1::{
     ez_manifest::ManifestType, BinaryManifest, BundleManifest, EzManifest, EzMethodSpec,
 };
@@ -233,4 +234,22 @@ fn test_parse_isolate_runtime_configs_type_mismatch() {
         "#;
     let result = parse_isolate_runtime_configs(json_str);
     assert!(result.is_err());
+}
+
+#[test]
+fn test_flatten_manifest() {
+    let manifest = parse_manifest(JSON_MANIFEST_PATH).expect("Failed to parse JSON manifest");
+    let isolates = flatten_manifest(manifest).expect("Failed to flatten manifest");
+    assert_eq!(isolates.len(), 2);
+    assert_eq!(isolates[0].isolate_name, "ezpkg://playground.example.com");
+    assert_eq!(isolates[0].publisher_id, "playground_example");
+    assert_eq!(
+        isolates[0].binary_manifest.binary_filename,
+        "/usr/local/bin/summation_by_lookup_table_with_backend"
+    );
+    assert_eq!(isolates[1].publisher_id, "playground_example");
+    assert_eq!(
+        isolates[1].binary_manifest.binary_filename,
+        "/usr/local/bin/summation_precomputed_backend"
+    );
 }

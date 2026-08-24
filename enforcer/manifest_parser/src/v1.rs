@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use anyhow::{Context, Result};
+use manifest_proto::enforcer::v1::ez_manifest::ManifestType;
 use manifest_proto::enforcer::v1::{
     EzBackendDependencies, EzBackendDependency, EzManifest, IsolateRuntimeConfigs,
 };
@@ -23,6 +24,7 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use super::parser_util::parse_proto_message;
+use super::ParsedIsolate;
 
 const PROTO_DESCRIPTOR_V1_BYTES: &[u8] = include_bytes!(env!("MANIFEST_V1_DESCRIPTOR_SET_PATH"));
 
@@ -41,6 +43,35 @@ pub fn parse_manifest(manifest_path: impl AsRef<Path>) -> Result<EzManifest> {
     let manifest_json_string = read_to_string(path)
         .context(format!("couldn't open manifest Json file at: {}", path.display()))?;
     parse_proto_message(get_v1_descriptor_pool(), "enforcer.v1.EzManifest", &manifest_json_string)
+}
+
+/// Flattens an [`EzManifest`] (binary or bundle) into a list of [`ParsedIsolate`]s.
+pub fn flatten_manifest(ez_manifest: EzManifest) -> Result<Vec<ParsedIsolate>> {
+    let mut isolates = Vec::new();
+    flatten_manifest_helper(ez_manifest, &mut isolates)?;
+    Ok(isolates)
+}
+
+fn flatten_manifest_helper(ez_manifest: EzManifest, output: &mut Vec<ParsedIsolate>) -> Result<()> {
+    let manifest_type =
+        ez_manifest.manifest_type.context("manifest_type can't be empty in EzManifest")?;
+    match manifest_type {
+        ManifestType::BundleManifest(bundle_manifest) => {
+            for manifest in bundle_manifest.manifests {
+                flatten_manifest_helper(manifest, output)?;
+            }
+        }
+        ManifestType::BinaryManifest(binary_manifest) => {
+            output.push(ParsedIsolate {
+                isolate_name: ez_manifest.isolate_name,
+                publisher_id: ez_manifest.publisher_id,
+                package_filename: ez_manifest.package_filename,
+                binary_manifest,
+            });
+        }
+        _ => anyhow::bail!("Provided ManifestType in EzManifest is not supported yet"),
+    }
+    Ok(())
 }
 
 /// Parses a JSON string into an [`IsolateRuntimeConfigs`] proto.

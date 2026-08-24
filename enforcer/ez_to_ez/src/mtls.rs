@@ -20,12 +20,33 @@ use boring::x509::{store::X509StoreBuilder, X509};
 use ez_mtls_proto::enforcer::v1::ez_mtls_service_client::EzMtlsServiceClient;
 use ez_mtls_proto::enforcer::v1::{GetCertificateRequest, PolicyHint, ReportSniRequest};
 use grpc_connector::GrpcChannelPool;
+use manifest_parser::v2::SetupManifest;
 use manifest_proto::enforcer::v1::{ez_manifest::ManifestType, EzManifest};
 use sha2::Digest;
 use std::sync::Arc;
 use tonic::transport::Channel;
 
 const HASH_VERSION: &str = "a";
+
+pub use manifest_parser::v2::IsolateIdentity;
+
+/// Manifest available at boot-time for initial mTLS bootstrapping.
+#[derive(Clone, Debug)]
+pub enum BootManifest {
+    V1(EzManifest),
+    V2(SetupManifest),
+}
+
+/// Extracts initial isolate identities from a boot-time manifest.
+///
+/// Extracts all identities in V1, or only the Setup Isolate identity in V2.
+/// Subsequent V2 workload identities are reported at runtime via [`EzMtlsManager::report_snis`].
+pub fn load_initial_snis(manifest: &BootManifest) -> Vec<IsolateIdentity> {
+    match manifest {
+        BootManifest::V1(ez_manifest) => extract_sni_params(ez_manifest),
+        BootManifest::V2(setup_manifest) => vec![setup_manifest.extract_sni_params()],
+    }
+}
 
 /// Generates a Server Name Indication (SNI) string based on the provided parameters.
 ///
@@ -63,12 +84,12 @@ pub fn sni(
     )
 }
 
-/// Extracts the isolate name and publisher ID pairs from an EzManifest.
-fn extract_sni_params(manifest: &EzManifest) -> Vec<(&str, &str)> {
+/// Extracts the isolate identities from an EzManifest.
+pub fn extract_sni_params(manifest: &EzManifest) -> Vec<IsolateIdentity> {
     if let Some(ManifestType::BundleManifest(bundle_manifest)) = &manifest.manifest_type {
-        bundle_manifest.manifests.iter().flat_map(|m| extract_sni_params(m)).collect()
+        bundle_manifest.manifests.iter().flat_map(extract_sni_params).collect()
     } else {
-        vec![(manifest.isolate_name.as_str(), manifest.publisher_id.as_str())]
+        vec![IsolateIdentity::new(manifest.isolate_name.clone(), manifest.publisher_id.clone())]
     }
 }
 
@@ -147,8 +168,8 @@ pub struct EzMtlsManagerConfig {
     pub csr_path: String,
     // Address to talk to EZ proxy.
     pub proxy_address: String,
-    // EzManifest to parse for SNI fields.
-    pub ez_manifest: EzManifest,
+    // Isolate identities to register for initial SNI routing.
+    pub isolate_identities: Vec<IsolateIdentity>,
 }
 
 /// A manager for the EzMtlsService connection that holds the current certificate and SNIs.
@@ -185,7 +206,7 @@ impl EzMtlsManager {
         let (leaf_private_key, csr) = Self::load_keys(&config).await?;
         let (cert_chain, trust_anchors) = Self::fetch_certs(&mut client, &csr).await?;
         let spiffe_identity = Self::parse_spiffe_id(&cert_chain)?;
-        Self::report_initial_snis_internal(&mut client, &spiffe_identity, &config.ez_manifest)
+        Self::report_snis_internal(&mut client, &spiffe_identity, &config.isolate_identities)
             .await?;
         Ok(Self {
             config,
@@ -266,19 +287,18 @@ impl EzMtlsManager {
         Ok(spiffe_identity)
     }
 
-    /// Reports initial SNIs to the proxy.
-    async fn report_initial_snis_internal(
+    /// Reports SNIs to the proxy.
+    async fn report_snis_internal(
         client: &mut EzMtlsServiceClient<Channel>,
         spiffe_identity: &SpiffeUri,
-        ez_manifest: &EzManifest,
+        isolate_identities: &[IsolateIdentity],
     ) -> Result<()> {
-        let sni_params = extract_sni_params(ez_manifest);
         let mut snis = Vec::new();
-        for (isolate_name, publisher_id) in sni_params {
+        for identity in isolate_identities {
             snis.push(sni(
                 "",
-                isolate_name,
-                publisher_id,
+                &identity.isolate_name,
+                &identity.publisher_id,
                 &spiffe_identity.operator_domain,
                 &spiffe_identity.trust_domain,
             ));
@@ -376,15 +396,12 @@ impl EzMtlsManager {
         Ok(())
     }
 
-    /// Reports the provided SNI strings to the mTLS service to update the routing table.
-    pub async fn report_snis(&self, snis: Vec<String>) -> Result<()> {
-        let req = ReportSniRequest { sni: snis };
+    /// Reports isolate identities to the mTLS service to update the proxy's routing table.
+    ///
+    /// Callers must provide the complete list of active isolate identities for this node.
+    pub async fn report_snis(&self, isolate_identities: &[IsolateIdentity]) -> Result<()> {
         let mut client = self.client.clone();
-        client
-            .report_sni(tonic::Request::new(req))
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to report SNIs to EzMtlsService: {}", e))?;
-        Ok(())
+        Self::report_snis_internal(&mut client, &self.spiffe_identity, isolate_identities).await
     }
 
     /// Helper function to build the X509 store from trust anchors.

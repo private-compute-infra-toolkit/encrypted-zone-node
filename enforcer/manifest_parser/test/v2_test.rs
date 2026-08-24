@@ -12,7 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use manifest_parser::{SetupManifest, WorkloadManifests};
+use manifest_parser::v2::{
+    parse_opaque_isolate_manifest, parse_ratified_isolate_manifest, parse_setup_isolate_manifest,
+    IsolateIdentity, SetupManifest, WorkloadManifests,
+};
+use manifest_parser_test_utils::load_workload_manifests_from_paths;
 
 const V2_SETUP_JSON_PATH: &str =
     "enforcer/manifest_parser/test/testdata/test_manifest_v2_setup.json";
@@ -23,8 +27,9 @@ const V2_OPAQUE_JSON_PATH: &str =
 
 #[test]
 fn test_load_v2_setup_manifest() {
-    let setup =
-        SetupManifest::load_from_path(V2_SETUP_JSON_PATH).expect("Failed to load setup manifest");
+    let raw_setup = parse_setup_isolate_manifest(V2_SETUP_JSON_PATH)
+        .expect("Failed to parse raw setup manifest");
+    let setup = SetupManifest::new(raw_setup);
     assert!(setup.setup_isolate_manifest.setup_isolate_descriptor.is_some());
     let isolate = setup.into_parsed_isolate();
     assert_eq!(isolate.isolate_name, "ezpkg://setup.example.com");
@@ -35,9 +40,12 @@ fn test_load_v2_setup_manifest() {
 
 #[test]
 fn test_load_v2_workload_manifests() {
-    let workload =
-        WorkloadManifests::load_from_paths(Some(V2_RATIFIED_JSON_PATH), Some(V2_OPAQUE_JSON_PATH))
-            .expect("Failed to load workload manifests");
+    let ratified = parse_ratified_isolate_manifest(V2_RATIFIED_JSON_PATH)
+        .expect("Failed to parse ratified manifest");
+    let opaque = parse_opaque_isolate_manifest(V2_OPAQUE_JSON_PATH)
+        .expect("Failed to parse opaque manifest");
+
+    let workload = WorkloadManifests::new(Some(ratified), Some(opaque));
     assert!(workload.ratified_isolate_manifest.is_some());
     assert!(workload.opaque_isolate_manifest.is_some());
 
@@ -75,14 +83,23 @@ fn test_v2_extract_sni_params() {
     let setup =
         SetupManifest::load_from_path(V2_SETUP_JSON_PATH).expect("Failed to load setup manifest");
     let setup_sni = setup.extract_sni_params();
-    assert_eq!(setup_sni, Some(("ezpkg://setup.example.com", "EZ_Trusted")));
+    assert_eq!(setup_sni, IsolateIdentity::new("ezpkg://setup.example.com", "EZ_Trusted"));
 
     let workload =
-        WorkloadManifests::load_from_paths(Some(V2_RATIFIED_JSON_PATH), Some(V2_OPAQUE_JSON_PATH))
+        load_workload_manifests_from_paths(Some(V2_RATIFIED_JSON_PATH), Some(V2_OPAQUE_JSON_PATH))
             .expect("Failed to load workload manifests");
     let workload_snis = workload.extract_sni_params();
     assert_eq!(workload_snis.len(), 3);
-    assert_eq!(workload_snis[0], ("ezpkg://ratified1.example.com", "EZ_Trusted"));
-    assert_eq!(workload_snis[1], ("ezpkg://ratified2.example.com", "EZ_Trusted"));
-    assert_eq!(workload_snis[2], ("ezpkg://helloworld.com", "helloworld_domain"));
+    assert_eq!(
+        workload_snis[0],
+        IsolateIdentity::new("ezpkg://ratified1.example.com", "EZ_Trusted")
+    );
+    assert_eq!(
+        workload_snis[1],
+        IsolateIdentity::new("ezpkg://ratified2.example.com", "EZ_Trusted")
+    );
+    assert_eq!(
+        workload_snis[2],
+        IsolateIdentity::new("ezpkg://helloworld.com", "helloworld_domain")
+    );
 }

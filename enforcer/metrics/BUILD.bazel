@@ -53,6 +53,7 @@ rust_library(
     srcs = ["test/test_utils.rs"],
     deps = [
         ":metrics",
+        "//enforcer/isolate:isolate_info",
         "@crates//:fake-opentelemetry-collector",
         "@crates//:opentelemetry",
         "@crates//:serde_json",
@@ -88,6 +89,7 @@ rust_test(
     deps = [
         ":metrics",
         ":metrics_test_utils",
+        "//enforcer/isolate:isolate_info",
         "//enforcer/v1:manifest_rust",
         "@crates//:opentelemetry",
         "@crates//:opentelemetry-proto",
@@ -101,6 +103,7 @@ rust_binary(
     visibility = ["//visibility:public"],
     deps = [
         ":metrics",
+        "//enforcer/isolate:isolate_info",
         "//enforcer/manifest_parser",
         "//enforcer/v1:manifest_rust",
         "@crates//:anyhow",

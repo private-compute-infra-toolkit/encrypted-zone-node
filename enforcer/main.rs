@@ -15,14 +15,13 @@
 use anyhow::Context;
 use clap::Parser;
 use container_custom::ContainerCustom;
-use container_manager::{ContainerManager, ContainerManagerArgs};
+use container_manager::{ContainerManager, ContainerManagerArgs, ManifestSource};
 use container_manager_requester::ContainerManagerRequester;
 use data_scope::manifest_validator::ManifestValidator;
 use data_scope::requester::DataScopeRequester;
 use diagnostics::{EnforcerDiagnosticService, EnforcerPprofService, TokioDiagnosticService};
 use diagnostics_proto::enforcer::diagnostics::v1::diagnostic_service_server::DiagnosticServiceServer;
-use external_proxy_connector::ExternalProxyChannel;
-use external_proxy_connector::ExternalProxyConnector;
+use external_proxy_connector::{ExternalProxyChannel, ExternalProxyConnector};
 use ez_service_proto::enforcer::v1::ez_public_api_server::EzPublicApiServer;
 use fileshare_manager::FileshareManager;
 use health_manager::HealthManager;
@@ -32,7 +31,8 @@ use isolate_ez_service_manager::{IsolateEzServiceManager, IsolateEzServiceManage
 use isolate_service_mapper::IsolateServiceMapper;
 use junction::IsolateJunction;
 use logging::logger;
-use manifest_parser::{parse_isolate_runtime_configs, parse_manifest};
+use manifest_parser::v1::{parse_isolate_runtime_configs, parse_manifest};
+use manifest_parser::v2::SetupManifest;
 use metrics::setup_otel_metrics;
 use outbound_ez_to_ez_client::OutboundEzToEzClient;
 use outbound_ez_to_ez_handler::OutboundEzToEzHandler;
@@ -57,8 +57,8 @@ const ISOLATE_MNGR_REQUEST_CHANNEL_SIZE: usize = 1024;
 #[command(version = version::VERSION, about)]
 struct EnforcerInputs {
     /// Path to EZ Manifest Json file representing EzManifest proto
-    #[arg(short = 'm', long, required = true)]
-    manifest_path: String,
+    #[arg(short = 'm', long, required_unless_present = "use_manifest_v2")]
+    manifest_path: Option<String>,
     /// Network host to listen on
     #[arg(short = 'a', long, default_value = "[::1]")]
     host: String,
@@ -212,6 +212,14 @@ struct EnforcerInputs {
         help = "Operator role to be provided to all isolates as EZ_OPERATOR_ROLE. Note: This argument will be deprecated soon."
     )]
     operator_role: String,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Enable parsing EZ Manifest v2 schemas. Note: This argument will be deprecated in the future when v2 manifests become the default."
+    )]
+    pub use_manifest_v2: bool,
+    #[arg(long, help = "Path to setup isolate manifest JSON file (v2)")]
+    pub setup_isolate_manifest_path: Option<String>,
 }
 
 enum Endpoint {
@@ -347,14 +355,30 @@ fn main() -> anyhow::Result<()> {
             let csr_path = enforcer_inputs.mtls_leaf_csr_path.as_ref().context(
                 "mTLS enabled but mtls_leaf_csr_path is missing.",
             )?;
-            // TODO: Remove duplicated manifest parsing happened in container manager.
-            let ez_manifest = parse_manifest(enforcer_inputs.manifest_path.clone())
-                .context("couldn't parse EzManifest for mTLS SNI")?;
+            let boot_manifest = if enforcer_inputs.use_manifest_v2 {
+                let setup_path = enforcer_inputs.setup_isolate_manifest_path.as_deref().context(
+                    "setup_isolate_manifest_path is required when use_manifest_v2 is true",
+                )?;
+                let setup_manifest = SetupManifest::load_from_path(setup_path)
+                    .context("couldn't parse SetupIsolateManifest for mTLS SNI")?;
+                mtls::mtls::BootManifest::V2(setup_manifest)
+            } else {
+                let manifest_path = enforcer_inputs
+                    .manifest_path
+                    .clone()
+                    .context("manifest_path is required when use_manifest_v2 is false")?;
+                let ez_manifest = parse_manifest(manifest_path)
+                    .context("couldn't parse EzManifest for mTLS SNI")?;
+                mtls::mtls::BootManifest::V1(ez_manifest)
+            };
+            // In V2, only the Setup Isolate SNI is registered at boot; workload SNIs are reported
+            // via `mtls_manager.report_snis(...)` once loaded dynamically.
+            let isolate_identities = mtls::mtls::load_initial_snis(&boot_manifest);
             let config = mtls::mtls::EzMtlsManagerConfig {
                 mtls_key_path: key_path.clone(),
                 csr_path: csr_path.clone(),
                 proxy_address: proxy_address.clone(),
-                ez_manifest,
+                isolate_identities,
             };
             let mtls_manager = mtls::mtls::EzMtlsManager::build(config).await.context("Failed to bootstrap EzMtlsManager. mTLS connection must be successful.")?;
             let acceptor = mtls_manager.create_tls_acceptor().await.context("Failed to create TLS acceptor")?;
@@ -439,6 +463,20 @@ fn main() -> anyhow::Result<()> {
 
         let isolate_ez_service_mngr = IsolateEzServiceManager::new(manager_deps);
 
+        let manifest_source = if enforcer_inputs.use_manifest_v2 {
+            let setup_path = enforcer_inputs.setup_isolate_manifest_path.context(
+                "setup_isolate_manifest_path is required when use_manifest_v2 is true",
+            )?;
+            ManifestSource::V2 {
+                setup_isolate_manifest_path: setup_path,
+            }
+        } else {
+            let manifest_path = enforcer_inputs
+                .manifest_path
+                .context("manifest_path is required when use_manifest_v2 is false")?;
+            ManifestSource::V1 { manifest_path }
+        };
+
         let container_manager_args = ContainerManagerArgs {
             isolate_junction: Box::new(isolate_junction.clone()),
             container_manager_request_rx,
@@ -448,7 +486,7 @@ fn main() -> anyhow::Result<()> {
             manifest_validator,
             shared_mem_manager: shared_memory_manager,
             fileshare_manager,
-            manifest_path: enforcer_inputs.manifest_path,
+            manifest_source,
             common_bind_mounts: enforcer_inputs.common_bind_mount.clone(),
             max_decoding_message_size,
             isolate_runtime_configs: parse_isolate_runtime_configs(

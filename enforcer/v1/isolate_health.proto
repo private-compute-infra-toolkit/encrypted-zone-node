@@ -32,6 +32,8 @@ message EzIsolateHealthReport {
 }
 
 // Health report of a single Isolate.
+// Logging of the health report should ignore fields that are not
+// expected to change frequently, such as memory usage.
 message EzIsolateHealth {
   // Status of the container run.
   message ContainerRunStatus {
@@ -76,6 +78,10 @@ message EzIsolateHealth {
   optional int64 container_data_memory_bytes = 12;
   // Number of times the container has been restarted.
   optional int32 container_restart_count = 13;
+  // Number of times the Isolate has been assigned to a sensitive session.
+  // A sensitive session is a unique user's private data flowing through the
+  // Isolate.
+  optional uint64 sensitive_session_count = 14;
 }
 
 // Information about a service running in an Isolate.

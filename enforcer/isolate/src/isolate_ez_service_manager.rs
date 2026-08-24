@@ -19,11 +19,11 @@ use enforcer_proto::enforcer::v1::isolate_ez_bridge_server::IsolateEzBridgeServe
 use external_proxy_connector::ExternalProxyChannel;
 use fileshare_manager::FileshareManager;
 use isolate_ez_service::{IsolateEzBridgeDependencies, IsolateEzBridgeService};
-use isolate_info::IsolateId;
+use isolate_info::{InstanceIdGenerator, IsolateId};
 use isolate_service_mapper::IsolateServiceMapper;
 use junction_trait::Junction;
 use manifest_proto::enforcer::v1::IsolateMetricsPolicy;
-use metrics::isolate_metrics_receiver::IsolateMetricsReceiver;
+use metrics::isolate_metrics_receiver::{IsolateMetricsReceiver, IsolateMetricsReceiverConfig};
 use opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_server::MetricsServiceServer;
 use outbound_ez_to_ez_client::OutboundEzToEzClient;
 use shared_memory_manager::SharedMemManager;
@@ -186,15 +186,16 @@ impl IsolateEzServiceManager {
         let uds = uds_result.expect("Failed to bind to OTel metrics UDS");
         let uds_stream = UnixListenerStream::new(uds);
 
-        let receiver = IsolateMetricsReceiver::new(
+        let receiver = IsolateMetricsReceiver::new(IsolateMetricsReceiverConfig {
             policy,
             isolate_name,
             publisher_id,
             is_ratified,
-            self.deps.otel_endpoint.clone(),
-            self.deps.max_decoding_message_size,
-            self.deps.disable_metrics_filtering,
-        )
+            isolate_instance_id: InstanceIdGenerator::generate(),
+            otel_endpoint: self.deps.otel_endpoint.clone(),
+            max_decoding_message_size: self.deps.max_decoding_message_size,
+            disable_filtering: self.deps.disable_metrics_filtering,
+        })
         .await
         .expect("Failed to create IsolateMetricsReceiver");
         let max_decoding_message_size = self.deps.max_decoding_message_size;

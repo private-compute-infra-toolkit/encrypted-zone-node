@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use isolate_info::InstanceIdGenerator;
 use manifest_proto::enforcer::v1::{
     allowed_metric::MetricType, AllowedMetric, IsolateMetricsPolicy,
 };
-use metrics::isolate_metrics_receiver::IsolateMetricsReceiver;
+use metrics::isolate_metrics_receiver::{IsolateMetricsReceiver, IsolateMetricsReceiverConfig};
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{
     any_value::Value, AnyValue, ArrayValue, KeyValue, KeyValueList,
@@ -415,15 +416,16 @@ async fn test_filter_metrics_coverage_disable_filtering_and_purging() {
             allowed_attributes: vec![],
         }],
     };
-    let receiver_disabled = IsolateMetricsReceiver::new(
-        policy.clone(),
-        "test-isolate".to_string(),
-        "test-publisher".to_string(),
-        false, // is_ratified
-        None,
-        4 * 1024 * 1024,
-        true, // disable_filtering = true
-    )
+    let receiver_disabled = IsolateMetricsReceiver::new(IsolateMetricsReceiverConfig {
+        policy: policy.clone(),
+        isolate_name: "test-isolate".to_string(),
+        publisher_id: "test-publisher".to_string(),
+        is_ratified: false,
+        isolate_instance_id: InstanceIdGenerator::generate(),
+        otel_endpoint: None,
+        max_decoding_message_size: 4 * 1024 * 1024,
+        disable_filtering: true,
+    })
     .await
     .unwrap();
 
@@ -567,15 +569,16 @@ async fn test_filter_metrics_coverage_uds_channel_pool_initialization() {
     let policy = IsolateMetricsPolicy { allowed_metrics: vec![] };
     let otel_endpoint = format!("unix:{}", uds_path.display());
 
-    let receiver = IsolateMetricsReceiver::new(
+    let receiver = IsolateMetricsReceiver::new(IsolateMetricsReceiverConfig {
         policy,
-        "test-isolate".to_string(),
-        "test-publisher".to_string(),
-        false,               // is_ratified
-        Some(otel_endpoint), // safe_endpoint = Some
-        4 * 1024 * 1024,
-        false,
-    )
+        isolate_name: "test-isolate".to_string(),
+        publisher_id: "test-publisher".to_string(),
+        is_ratified: false,
+        isolate_instance_id: InstanceIdGenerator::generate(),
+        otel_endpoint: Some(otel_endpoint),
+        max_decoding_message_size: 4 * 1024 * 1024,
+        disable_filtering: false,
+    })
     .await;
 
     // Verify that it initialized successfully without returning an error
@@ -669,17 +672,57 @@ async fn test_filter_metrics_empty_allowlist_removal() {
 }
 
 async fn create_test_receiver(policy: IsolateMetricsPolicy) -> IsolateMetricsReceiver {
-    IsolateMetricsReceiver::new(
+    create_test_receiver_with_instance_id(policy, InstanceIdGenerator::generate()).await
+}
+
+async fn create_test_receiver_with_instance_id(
+    policy: IsolateMetricsPolicy,
+    isolate_instance_id: String,
+) -> IsolateMetricsReceiver {
+    IsolateMetricsReceiver::new(IsolateMetricsReceiverConfig {
         policy,
-        "test-isolate".to_string(),
-        "test-publisher".to_string(),
-        false, // is_ratified
-        None,
-        4 * 1024 * 1024,
-        false,
-    )
+        isolate_name: "test-isolate".to_string(),
+        publisher_id: "test-publisher".to_string(),
+        is_ratified: false,
+        isolate_instance_id,
+        otel_endpoint: None,
+        max_decoding_message_size: 4 * 1024 * 1024,
+        disable_filtering: false,
+    })
     .await
     .unwrap()
+}
+
+#[tokio::test]
+async fn test_enrich_metrics_dynamic_instance_id_restart() {
+    let policy = IsolateMetricsPolicy { allowed_metrics: vec![] };
+
+    let instance_id_1 = "1700000000000000_0000000000000001".to_string();
+    let instance_id_2 = "1700000000000001_0000000000000002".to_string();
+
+    // receiver_1 represents the receiver before restart and receiver_2 represents receiver after restart
+    let receiver_1 =
+        create_test_receiver_with_instance_id(policy.clone(), instance_id_1.clone()).await;
+    let receiver_2 = create_test_receiver_with_instance_id(policy, instance_id_2.clone()).await;
+
+    let mut request_1 = create_test_request(vec![create_test_metric("test_metric", vec![])]);
+    receiver_1.enrich_metrics(&mut request_1);
+
+    let mut request_2 = create_test_request(vec![create_test_metric("test_metric", vec![])]);
+    receiver_2.enrich_metrics(&mut request_2);
+
+    let scope_1 = request_1.resource_metrics[0].scope_metrics[0].scope.as_ref().unwrap();
+    let scope_2 = request_2.resource_metrics[0].scope_metrics[0].scope.as_ref().unwrap();
+
+    let id_attr_1 =
+        scope_1.attributes.iter().find(|kv| kv.key == "ez_isolate_instance_id").unwrap();
+    let id_attr_2 =
+        scope_2.attributes.iter().find(|kv| kv.key == "ez_isolate_instance_id").unwrap();
+
+    // Verify that receiver_1 and receiver_2 properly set the expected instance_id
+    assert_eq!(id_attr_1.value.as_ref().unwrap().value, Some(Value::StringValue(instance_id_1)));
+    assert_eq!(id_attr_2.value.as_ref().unwrap().value, Some(Value::StringValue(instance_id_2)));
+    assert_ne!(id_attr_1.value, id_attr_2.value);
 }
 
 fn create_test_request(metrics: Vec<Metric>) -> ExportMetricsServiceRequest {

@@ -91,6 +91,8 @@ pub struct GetIsolateScopeRequest {
 pub struct GetIsolateScopeResponse {
     /// The current data scope of the Isolate.
     pub current_scope: DataScopeType,
+    /// Number of times the Isolate has been assigned to a sensitive session.
+    pub sensitive_session_count: Option<u64>,
 }
 
 /// A request to add the data scope information from a manifest for a binary.

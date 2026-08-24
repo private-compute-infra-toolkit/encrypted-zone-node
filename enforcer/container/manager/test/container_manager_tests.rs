@@ -13,20 +13,21 @@
 // limitations under the License.
 
 use anyhow::{ensure, Context, Result};
-use container_manager::{sanitize_path_component, ContainerManager, ContainerManagerArgs};
+use container_manager::{
+    sanitize_path_component, ContainerManager, ContainerManagerArgs, ManifestSource,
+};
 use container_manager_request::{
     ContainerManagerRequest, MountReadOnlyFile, MountWritableFile, ResetIsolateRequest,
 };
 use container_manager_requester::ContainerManagerRequester;
 use container_test_utils::{FakeContainer, Status};
+use data_scope::error::DataScopeError;
+use data_scope::manifest_validator::ManifestValidator;
 use data_scope::request::{
-    ValidateBackendDependencyRequest, ValidateManifestInputScopeRequest,
+    GetIsolateRequest, ValidateBackendDependencyRequest, ValidateManifestInputScopeRequest,
     ValidateManifestOutputScopeRequest,
 };
-use data_scope::{
-    error::DataScopeError, manifest_validator::ManifestValidator, request::GetIsolateRequest,
-    requester::DataScopeRequester,
-};
+use data_scope::requester::DataScopeRequester;
 use data_scope_proto::enforcer::v1::DataScopeType;
 use enforcer_proto::enforcer::v1::{
     isolate_ez_bridge_client::IsolateEzBridgeClient, ControlPlaneMetadata, CreateMemshareRequest,
@@ -41,7 +42,16 @@ use isolate_ez_service_manager::{IsolateEzServiceManager, IsolateEzServiceManage
 use isolate_info::{BinaryServicesIndex, IsolateId, IsolateServiceIndex, IsolateServiceInfo};
 use isolate_service_mapper::IsolateServiceMapper;
 use junction_test_utils::FakeJunction;
+use manifest_parser::v2::WorkloadManifests;
+use manifest_parser_test_utils::load_workload_manifests_from_paths;
 use manifest_proto::enforcer::v1::IsolateRuntimeConfigs;
+use opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_server::{
+    MetricsService, MetricsServiceServer,
+};
+use opentelemetry_proto::tonic::collector::metrics::v1::{
+    ExportMetricsServiceRequest, ExportMetricsServiceResponse,
+};
+use opentelemetry_proto::tonic::common::v1::any_value::Value;
 use payload_proto::enforcer::v1::{
     ez_hybrid_payload::DeliveryMethod, EzHybridPayload, EzPayloadData,
 };
@@ -49,11 +59,11 @@ use shared_memory_manager::SharedMemManager;
 use simple_tonic_stream::SimpleStreamingWrapper;
 use state_manager::{IsolateStateManager, IsolateStateManagerError};
 use std::fs::OpenOptions;
-use tokio::net::UnixStream;
+use tokio::net::{TcpListener, UnixStream};
 use tokio::sync::mpsc::channel;
 use tokio::task::spawn_blocking;
 use tokio::time::{sleep, timeout, Duration};
-use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
 use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
 
@@ -77,10 +87,16 @@ const JSON_MANIFEST_PATH_OTEL: &str =
     "enforcer/container/manager/test/testdata/test_manifest_otel.json";
 
 // The following constants are from the test manifests.
+// From test_manifest_v2_setup.json
+const SETUP_BINARY: &str = "/usr/local/bin/setup";
+const SETUP_ISOLATE_DOMAIN: &str = "EZ_Trusted";
+const SETUP_SERVICE: &str = "SetupService";
+
 // From test_manifest_one_isolate.json
 const HELLOWORLD_BINARY: &str = "/usr/local/bin/main";
 const HELLOWORLD_DOMAIN: &str = "helloworld_domain";
 const GREETER_SERVICE: &str = "Greeter";
+const AUTH_SERVICE: &str = "AuthService";
 const SAY_HELLO_METHOD: &str = "SayHello";
 const RATIFIED_ISOLATE_DOMAIN: &str = "EZ_Trusted";
 
@@ -118,8 +134,31 @@ impl TestHarness {
         otel_endpoint: Option<String>,
         operator_role: String,
     ) -> Result<Self> {
-        Self::new_impl(manifest_path, isolate_runtime_configs, otel_endpoint, None, operator_role)
-            .await
+        Self::new_impl(
+            ManifestSource::V1 { manifest_path: manifest_path.to_string() },
+            isolate_runtime_configs,
+            otel_endpoint,
+            None,
+            operator_role,
+        )
+        .await
+    }
+
+    async fn new_v2(
+        setup_isolate_manifest_path: &str,
+        isolate_runtime_configs: &IsolateRuntimeConfigs,
+        operator_role: String,
+    ) -> Result<Self> {
+        Self::new_impl(
+            ManifestSource::V2 {
+                setup_isolate_manifest_path: setup_isolate_manifest_path.to_string(),
+            },
+            isolate_runtime_configs,
+            None,
+            None,
+            operator_role,
+        )
+        .await
     }
 
     async fn new_with_otel_traces(
@@ -130,7 +169,7 @@ impl TestHarness {
         operator_role: String,
     ) -> Result<Self> {
         Self::new_impl(
-            manifest_path,
+            ManifestSource::V1 { manifest_path: manifest_path.to_string() },
             isolate_runtime_configs,
             otel_endpoint,
             otel_traces_endpoint,
@@ -139,8 +178,18 @@ impl TestHarness {
         .await
     }
 
+    async fn load_workload_manifests_from_paths(
+        &self,
+        ratified_path: Option<&str>,
+        opaque_path: Option<&str>,
+    ) -> Result<()> {
+        let workload_manifests = load_workload_manifests_from_paths(ratified_path, opaque_path)?;
+        self.container_manager.load_workload_isolates(workload_manifests).await?;
+        Ok(())
+    }
+
     async fn new_impl(
-        manifest_path: &str,
+        manifest_source: ManifestSource,
         isolate_runtime_configs: &IsolateRuntimeConfigs,
         otel_endpoint: Option<String>,
         otel_traces_endpoint: Option<String>,
@@ -197,7 +246,7 @@ impl TestHarness {
             manifest_validator: manifest_validator.clone(),
             shared_mem_manager: shared_memory_manager.clone(),
             fileshare_manager: fileshare_manager.clone(),
-            manifest_path: manifest_path.to_string(),
+            manifest_source,
             common_bind_mounts: vec![],
             max_decoding_message_size: MAX_DECODING_SIZE,
             isolate_runtime_configs: isolate_runtime_configs.clone(),
@@ -450,23 +499,14 @@ async fn test_isolate_reset() {
     .await
     .expect("TestHarness::new should succeed");
 
-    let isolate_and_uds_vec =
-        check_container_started(vec![SUMMATION_BINARY, PRECOMPUTED_BACKEND_BINARY])
-            .await
-            .expect("Container should start");
+    let isolate_and_uds_vec = start_and_ready_containers_in_dependency_order(vec![
+        SUMMATION_BINARY,
+        PRECOMPUTED_BACKEND_BINARY,
+    ])
+    .await
+    .expect("Containers should start and be readied");
     assert_eq!(isolate_and_uds_vec.len(), 2);
-    let mut fake_container_ids: Vec<u64> = Vec::with_capacity(2);
-
-    for tracked_container in FakeContainer::get_tracker().iter() {
-        assert_eq!(tracked_container.value().status, Status::Started);
-        let isolate_ez_bridge_enforcer_side_uds_path =
-            tracked_container.isolate_ez_bridge_enforcer_side_uds_path.to_owned().unwrap();
-        fake_container_ids.push(*tracked_container.key());
-
-        let _client = notify_isolate_ready(isolate_ez_bridge_enforcer_side_uds_path)
-            .await
-            .expect("Isolate should be ready");
-    }
+    let fake_container_ids: Vec<u64> = isolate_and_uds_vec.iter().map(|(id, _)| *id).collect();
 
     // Assert that Isolate is added in junction
     assert_eq!(harness.isolate_junction.connected_isolates.len(), 2);
@@ -784,23 +824,14 @@ async fn test_backend_dependencies() {
     .expect("TestHarness::new should succeed");
 
     // Wait for containers to start
-    let isolate_and_uds_vec =
-        check_container_started(vec![SUMMATION_BINARY, PRECOMPUTED_BACKEND_BINARY])
-            .await
-            .expect("Container should start");
+    let isolate_and_uds_vec = start_and_ready_containers_in_dependency_order(vec![
+        SUMMATION_BINARY,
+        PRECOMPUTED_BACKEND_BINARY,
+    ])
+    .await
+    .expect("Containers should start and be readied");
     assert_eq!(isolate_and_uds_vec.len(), 2);
-    let mut fake_container_ids: Vec<u64> = Vec::with_capacity(2);
-
-    for tracked_container in FakeContainer::get_tracker().iter() {
-        assert_eq!(tracked_container.value().status, Status::Started);
-        let isolate_ez_bridge_enforcer_side_uds_path =
-            tracked_container.isolate_ez_bridge_enforcer_side_uds_path.to_owned().unwrap();
-        fake_container_ids.push(*tracked_container.key());
-
-        let _client = notify_isolate_ready(isolate_ez_bridge_enforcer_side_uds_path)
-            .await
-            .expect("Isolate should be ready");
-    }
+    let fake_container_ids: Vec<u64> = isolate_and_uds_vec.iter().map(|(id, _)| *id).collect();
 
     // Get the BinaryServicesIndex for the binary that has a dependency.
     let summation_binary_index = get_binary_service_index(
@@ -877,20 +908,13 @@ async fn test_interceptor() {
     .await
     .expect("TestHarness::new should succeed");
 
-    // Wait for containers to start
-    let isolate_and_uds_vec =
-        check_container_started(vec![SUMMATION_BINARY, PRECOMPUTED_BACKEND_BINARY])
-            .await
-            .expect("Container should start");
+    let isolate_and_uds_vec = start_and_ready_containers_in_dependency_order(vec![
+        SUMMATION_BINARY,
+        PRECOMPUTED_BACKEND_BINARY,
+    ])
+    .await
+    .expect("Containers should start and be readied");
     assert_eq!(isolate_and_uds_vec.len(), 2);
-
-    for tracked_container in FakeContainer::get_tracker().iter() {
-        let isolate_ez_bridge_enforcer_side_uds_path =
-            tracked_container.isolate_ez_bridge_enforcer_side_uds_path.to_owned().unwrap();
-        let _client = notify_isolate_ready(isolate_ez_bridge_enforcer_side_uds_path)
-            .await
-            .expect("Isolate should be ready");
-    }
 
     let mut call_request = create_call_request_for_interceptor();
     harness.interceptor.replace_with_interceptor(&mut call_request, RequestType::Unary).await;
@@ -1064,6 +1088,46 @@ async fn check_container_started(binary_file_names: Vec<&str>) -> Result<Vec<(u6
     }
 
     Ok(results)
+}
+
+// Helper function to wait for containers to start and notify them ready in dependency order.
+async fn start_and_ready_containers_in_dependency_order(
+    binary_file_names: Vec<&str>,
+) -> Result<Vec<(u64, String)>> {
+    let mut results: Vec<(u64, String)> = vec![];
+    let mut readied_container_ids = std::collections::HashSet::new();
+
+    timeout(Duration::from_secs(10), async {
+        loop {
+            let tracker = FakeContainer::get_tracker();
+            for entry in tracker.iter() {
+                let container_id = *entry.key();
+                if readied_container_ids.contains(&container_id) {
+                    continue;
+                }
+                let container_data = entry.value();
+                if let Some(actual_binary_filename) = &container_data.binary_filename {
+                    if binary_file_names.contains(&actual_binary_filename.as_str())
+                        && container_data.status == Status::Started
+                    {
+                        if let Some(uds_path) =
+                            &container_data.isolate_ez_bridge_enforcer_side_uds_path
+                        {
+                            let _client = notify_isolate_ready(uds_path.clone()).await?;
+                            readied_container_ids.insert(container_id);
+                            results.push((container_id, uds_path.clone()));
+                        }
+                    }
+                }
+            }
+            if results.len() == binary_file_names.len() {
+                return Ok(results);
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("Timed out waiting for containers to start and be readied")?
 }
 
 // Helper function that establishes a client connection to an Isolate's gRPC server
@@ -1286,6 +1350,171 @@ async fn test_otel_endpoint_unix_variant(endpoint_val: &str) {
     ensure_isolate_stopped(fake_container_id).await.expect("Container should stop");
 }
 
+struct MockMetricsService {
+    tx: tokio::sync::mpsc::Sender<ExportMetricsServiceRequest>,
+}
+
+#[tonic::async_trait]
+impl MetricsService for MockMetricsService {
+    async fn export(
+        &self,
+        request: tonic::Request<ExportMetricsServiceRequest>,
+    ) -> Result<tonic::Response<ExportMetricsServiceResponse>, tonic::Status> {
+        let _ = self.tx.send(request.into_inner()).await;
+        Ok(tonic::Response::new(ExportMetricsServiceResponse { partial_success: None }))
+    }
+}
+
+async fn start_mock_otel_server(
+) -> (String, tokio::sync::mpsc::Receiver<ExportMetricsServiceRequest>, tokio::task::JoinHandle<()>)
+{
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let endpoint_url = format!("http://127.0.0.1:{}", port);
+    let (tx, rx) = channel(10);
+    let server_handle = tokio::spawn(async move {
+        let _ = tonic::transport::Server::builder()
+            .add_service(MetricsServiceServer::new(MockMetricsService { tx }))
+            .serve_with_incoming(TcpListenerStream::new(listener))
+            .await;
+    });
+    (endpoint_url, rx, server_handle)
+}
+
+async fn connect_metrics_uds_client(
+    socket_path: std::path::PathBuf,
+) -> opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_client::MetricsServiceClient<
+    Channel,
+>{
+    let endpoint = Endpoint::from_shared("http://127.0.0.1".to_string()).unwrap();
+    let channel = endpoint
+        .connect_with_connector(tower::service_fn(move |_: tonic::transport::Uri| {
+            let socket_path = socket_path.clone();
+            async move {
+                Ok::<_, std::io::Error>(TokioIo::new(
+                    tokio::net::UnixStream::connect(socket_path).await?,
+                ))
+            }
+        }))
+        .await
+        .unwrap();
+    opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_client::MetricsServiceClient::new(channel)
+}
+
+async fn setup_isolate_metrics_client(
+    container_data: &container_test_utils::FakeContainerData,
+) -> opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_client::MetricsServiceClient<
+    Channel,
+>{
+    let isolate_ez_bridge_enforcer_side_uds_path =
+        container_data.isolate_ez_bridge_enforcer_side_uds_path.clone().unwrap();
+    let _ = notify_isolate_ready(isolate_ez_bridge_enforcer_side_uds_path).await;
+
+    let sharing_dir_path = &container_data.boot_mounts[0].source;
+    let otlp_metrics_uds_path = sharing_dir_path.join("otlp-metrics.sock");
+
+    let mut attempts = 0;
+    while !otlp_metrics_uds_path.exists() && attempts < 100 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        attempts += 1;
+    }
+    assert!(otlp_metrics_uds_path.exists(), "Metrics UDS path was never created");
+
+    connect_metrics_uds_client(otlp_metrics_uds_path).await
+}
+
+fn create_test_export_metrics_request(metric_name: &str) -> ExportMetricsServiceRequest {
+    let metric = opentelemetry_proto::tonic::metrics::v1::Metric {
+        name: metric_name.to_string(),
+        description: "".to_string(),
+        unit: "".to_string(),
+        data: Some(opentelemetry_proto::tonic::metrics::v1::metric::Data::Gauge(
+            opentelemetry_proto::tonic::metrics::v1::Gauge {
+                data_points: vec![opentelemetry_proto::tonic::metrics::v1::NumberDataPoint {
+                    attributes: vec![],
+                    value: Some(
+                        opentelemetry_proto::tonic::metrics::v1::number_data_point::Value::AsInt(
+                            42,
+                        ),
+                    ),
+                    ..Default::default()
+                }],
+            },
+        )),
+        ..Default::default()
+    };
+
+    ExportMetricsServiceRequest {
+        resource_metrics: vec![opentelemetry_proto::tonic::metrics::v1::ResourceMetrics {
+            resource: Some(Default::default()),
+            scope_metrics: vec![opentelemetry_proto::tonic::metrics::v1::ScopeMetrics {
+                scope: None,
+                metrics: vec![metric],
+                schema_url: "".to_string(),
+            }],
+            schema_url: "".to_string(),
+        }],
+    }
+}
+
+#[tokio::test]
+async fn test_otel_metrics_enrichment_isolate_name() {
+    let (endpoint_url, mut rx, server_handle) = start_mock_otel_server().await;
+
+    let mut harness = TestHarness::new(
+        JSON_MANIFEST_PATH_OTEL,
+        &IsolateRuntimeConfigs::default(),
+        /* otel_endpoint= */ Some(endpoint_url),
+        /* operator_role= */ "".to_string(),
+    )
+    .await
+    .expect("TestHarness::new should succeed");
+
+    let isolate_and_uds_vec =
+        check_container_started(vec![HELLOWORLD_BINARY]).await.expect("Container should start");
+    let fake_container_id = isolate_and_uds_vec[0].0;
+    let tracker = FakeContainer::get_tracker();
+    let container_data = tracker.get(&fake_container_id).unwrap();
+
+    let mut client = setup_isolate_metrics_client(&container_data).await;
+    let request = create_test_export_metrics_request("test_metric");
+
+    let response = client.export(request).await;
+    assert!(response.is_ok(), "Metrics export failed: {:?}", response.err());
+
+    let received = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("Timeout waiting for metric")
+        .expect("Channel closed");
+
+    let scope_attrs = &received.resource_metrics[0].scope_metrics[0]
+        .scope
+        .as_ref()
+        .expect("Scope should be present")
+        .attributes;
+    let find_attr = |key: &str| {
+        scope_attrs
+            .iter()
+            .find(|attr| attr.key == key)
+            .and_then(|attr| attr.value.as_ref())
+            .and_then(|v| match &v.value {
+                Some(Value::StringValue(s)) => Some(s.as_str()),
+                _ => None,
+            })
+    };
+
+    assert_eq!(find_attr("ez_isolate_name"), Some("ezpkg://helloworld.com"));
+    assert_eq!(find_attr("ez_publisher_id"), Some("helloworld_domain"));
+    assert_eq!(find_attr("ez_component_name"), Some("isolate"));
+    assert_eq!(find_attr("ez_isolate_type"), Some("opaque"));
+
+    server_handle.abort();
+    drop(container_data);
+    drop(tracker);
+    harness.stop().await;
+    ensure_isolate_stopped(fake_container_id).await.expect("Container should stop");
+}
+
 #[tokio::test]
 async fn test_backend_dependencies_env_var() {
     let mut harness = TestHarness::new(
@@ -1340,16 +1569,13 @@ async fn test_multiple_isolates_backend_dependencies_env_vars() {
     .await
     .expect("TestHarness::new should succeed");
 
-    let isolate_and_uds_vec =
-        check_container_started(vec![SUMMATION_BINARY, PRECOMPUTED_BACKEND_BINARY])
-            .await
-            .expect("Container should start");
+    let isolate_and_uds_vec = start_and_ready_containers_in_dependency_order(vec![
+        SUMMATION_BINARY,
+        PRECOMPUTED_BACKEND_BINARY,
+    ])
+    .await
+    .expect("Containers should start and be readied");
     assert_eq!(isolate_and_uds_vec.len(), 2);
-
-    for (_, uds_path) in &isolate_and_uds_vec {
-        let _client =
-            notify_isolate_ready(uds_path.clone()).await.expect("Isolate should be ready");
-    }
 
     let tracker = FakeContainer::get_tracker();
 
@@ -1606,4 +1832,124 @@ async fn test_non_existent_otel_traces_uds() {
     drop(tracker);
     harness.stop().await;
     ensure_isolate_stopped(fake_container_id).await.expect("Container should stop");
+}
+
+#[tokio::test]
+async fn test_container_manager_v2_start_multiple_isolates() {
+    let mut harness = TestHarness::new_v2(
+        "enforcer/manifest_parser/test/testdata/test_manifest_v2_setup.json",
+        &IsolateRuntimeConfigs::default(),
+        "test_operator".to_string(),
+    )
+    .await
+    .expect("ContainerManager should start with v2 setup manifest");
+
+    let setup_containers =
+        check_container_started(vec![SETUP_BINARY]).await.expect("Setup container should start");
+    assert_eq!(setup_containers.len(), 1);
+    let _client = notify_isolate_ready(setup_containers[0].1.clone())
+        .await
+        .expect("Setup isolate should be ready");
+
+    // Load composite workload manifests (2 ratified + 1 opaque) dynamically
+    harness
+        .load_workload_manifests_from_paths(
+            Some("enforcer/manifest_parser/test/testdata/test_manifest_v2_ratified.json"),
+            Some("enforcer/manifest_parser/test/testdata/test_manifest_v2_opaque.json"),
+        )
+        .await
+        .expect("Should load workload manifests");
+
+    let workload_containers = start_and_ready_containers_in_dependency_order(vec![
+        HELLOWORLD_BINARY,
+        HELLOWORLD_BINARY,
+        HELLOWORLD_BINARY,
+    ])
+    .await
+    .expect("Workload containers should start and be readied");
+    assert_eq!(workload_containers.len(), 3);
+
+    // Verify SetupService (from setup isolate)
+    let setup_index = harness
+        .isolate_service_mapper
+        .get_service_index(&IsolateServiceInfo {
+            operator_domain: SETUP_ISOLATE_DOMAIN.to_string(),
+            service_name: SETUP_SERVICE.to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("SetupService should be registered");
+    assert!(service_info_has_valid_binary_index(&setup_index));
+
+    // Verify Greeter service (from ratified isolate 1)
+    let greeter_index = harness
+        .isolate_service_mapper
+        .get_service_index(&IsolateServiceInfo {
+            operator_domain: RATIFIED_ISOLATE_DOMAIN.to_string(),
+            service_name: GREETER_SERVICE.to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("Ratified Greeter should be registered");
+    assert!(service_info_has_valid_binary_index(&greeter_index));
+
+    // Verify AuthService (from ratified isolate 2)
+    let auth_index = harness
+        .isolate_service_mapper
+        .get_service_index(&IsolateServiceInfo {
+            operator_domain: RATIFIED_ISOLATE_DOMAIN.to_string(),
+            service_name: AUTH_SERVICE.to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("Ratified AuthService should be registered");
+    assert!(service_info_has_valid_binary_index(&auth_index));
+
+    // Verify Greeter service (from opaque isolate)
+    let opaque_greeter_index = harness
+        .isolate_service_mapper
+        .get_service_index(&IsolateServiceInfo {
+            operator_domain: HELLOWORLD_DOMAIN.to_string(),
+            service_name: GREETER_SERVICE.to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("Opaque Greeter should be registered");
+    assert!(service_info_has_valid_binary_index(&opaque_greeter_index));
+
+    harness.stop().await;
+    for (id, _) in setup_containers.into_iter().chain(workload_containers.into_iter()) {
+        ensure_isolate_stopped(id).await.expect("Container should stop");
+    }
+}
+
+#[tokio::test]
+async fn test_v2_empty_workload_manifests_returns_error() {
+    let mut harness = TestHarness::new_v2(
+        "enforcer/manifest_parser/test/testdata/test_manifest_v2_setup.json",
+        &IsolateRuntimeConfigs::default(),
+        "test_operator".to_string(),
+    )
+    .await
+    .expect("ContainerManager should start with v2 setup manifest");
+
+    let setup_containers =
+        check_container_started(vec![SETUP_BINARY]).await.expect("Setup container should start");
+    assert_eq!(setup_containers.len(), 1);
+    let (fake_container_id, isolate_ez_bridge_enforcer_side_uds_path) = setup_containers[0].clone();
+    let _client = notify_isolate_ready(isolate_ez_bridge_enforcer_side_uds_path)
+        .await
+        .expect("Setup isolate should be ready");
+
+    let result =
+        harness.container_manager.load_workload_isolates(WorkloadManifests::default()).await;
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err().to_string(), "workload isolates cannot be empty");
+
+    harness.stop().await;
+    ensure_isolate_stopped(fake_container_id).await.expect("Container should stop");
+}
+
+fn service_info_has_valid_binary_index(index: &IsolateServiceIndex) -> bool {
+    index.get_binary_services_index().is_some()
 }

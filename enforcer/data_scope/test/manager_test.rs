@@ -631,6 +631,44 @@ async fn test_get_isolate_scope_opaque_success() -> Result<(), Box<dyn std::erro
     let get_scope_request = GetIsolateScopeRequest { isolate_id };
     let response = data_scope_requester.get_isolate_scope(get_scope_request).await?;
     assert_eq!(response.current_scope, DataScopeType::Public);
+    assert_eq!(response.sensitive_session_count, Some(0));
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_get_isolate_scope_sensitive_session_count() -> Result<(), Box<dyn std::error::Error>>
+{
+    let data_scope_requester = DataScopeRequester::new(5);
+    let mut add_isolate_request = create_add_isolate_request(false);
+    add_isolate_request.allowed_data_scope_type = DataScopeType::UserPrivate;
+    let isolate_id = add_isolate_request.isolate_id;
+    data_scope_requester.add_isolate(add_isolate_request).await?;
+
+    let get_scope_request = GetIsolateScopeRequest { isolate_id };
+    let response = data_scope_requester.get_isolate_scope(get_scope_request).await?;
+    assert_eq!(response.sensitive_session_count, Some(0));
+
+    // Request a sensitive session
+    let mut get_isolate_req = create_get_isolate_request(false);
+    get_isolate_req.data_scope_type = DataScopeType::UserPrivate;
+    let get_resp = data_scope_requester.get_isolate(get_isolate_req).await?;
+    assert_eq!(get_resp.isolate_id, isolate_id);
+
+    let response =
+        data_scope_requester.get_isolate_scope(GetIsolateScopeRequest { isolate_id }).await?;
+    assert_eq!(response.sensitive_session_count, Some(1));
+    assert_eq!(response.current_scope, DataScopeType::UserPrivate);
+
+    // Request another sensitive session
+    let mut get_isolate_req_2 = create_get_isolate_request(false);
+    get_isolate_req_2.data_scope_type = DataScopeType::UserPrivate;
+    let get_resp_2 = data_scope_requester.get_isolate(get_isolate_req_2).await?;
+    assert_eq!(get_resp_2.isolate_id, isolate_id);
+
+    let response =
+        data_scope_requester.get_isolate_scope(GetIsolateScopeRequest { isolate_id }).await?;
+    assert_eq!(response.sensitive_session_count, Some(2));
+    assert_eq!(response.current_scope, DataScopeType::UserPrivate);
     Ok(())
 }
 
@@ -643,6 +681,7 @@ async fn test_get_isolate_scope_ratified_unsupported() -> Result<(), Box<dyn std
     let get_ratified_scope_request = GetIsolateScopeRequest { isolate_id: ratified_isolate_id };
     let response = data_scope_requester.get_isolate_scope(get_ratified_scope_request).await?;
     assert_eq!(response.current_scope, DataScopeType::Unspecified);
+    assert_eq!(response.sensitive_session_count, None);
     Ok(())
 }
 

@@ -19,9 +19,6 @@ pub(crate) mod parser_util;
 pub mod v1;
 pub mod v2;
 
-pub use v1::{parse_isolate_runtime_configs, parse_manifest, serialize_backend_dependencies};
-pub use v2::{SetupManifest, WorkloadManifests};
-
 /// A parsed isolate containing its identity and binary specification.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParsedIsolate {

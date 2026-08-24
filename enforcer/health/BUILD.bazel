@@ -32,6 +32,7 @@ load("//:build_flavors.bzl", "flavors")
             "//enforcer/logging:logging{}".format(flavor.suffix),
             "//enforcer/metrics",
             "//enforcer/state:state_manager",
+            "//enforcer/v1:data_scope_rust",
             "//enforcer/v1:enforcer_rust",
             "@crates//:anyhow",
             "@crates//:log",

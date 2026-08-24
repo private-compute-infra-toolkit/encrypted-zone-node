@@ -14,9 +14,11 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use isolate_info::InstanceIdGenerator;
+use manifest_parser::v1::parse_manifest;
 use manifest_proto::enforcer::v1::ez_manifest::ManifestType;
 use manifest_proto::enforcer::v1::EzManifest;
-use metrics::isolate_metrics_receiver::IsolateMetricsReceiver;
+use metrics::isolate_metrics_receiver::{IsolateMetricsReceiver, IsolateMetricsReceiverConfig};
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -64,8 +66,7 @@ fn main() -> Result<()> {
     println!("Loading manifest from: {:?}", args.manifest);
     let manifest_path_str =
         args.manifest.to_str().context("Invalid manifest path unicode")?.to_string();
-    let manifest = manifest_parser::parse_manifest(manifest_path_str)
-        .context("Failed to parse manifest JSON")?;
+    let manifest = parse_manifest(manifest_path_str).context("Failed to parse manifest JSON")?;
 
     let (binary_manifest, manifest_to_use) = match manifest.manifest_type {
         Some(ManifestType::BinaryManifest(ref bm)) => (bm.clone(), manifest.clone()),
@@ -110,31 +111,35 @@ fn main() -> Result<()> {
     // 3. Instantiate the IsolateMetricsReceiver locally inside tokio block
     let rt = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
 
+    let instance_id = InstanceIdGenerator::generate();
+
     // Create baseline receiver (does filtering only)
     let baseline_receiver = rt.block_on(async {
-        IsolateMetricsReceiver::new(
-            metrics_policy.clone(),
-            manifest_to_use.isolate_name.clone(),
-            manifest_to_use.publisher_id.clone(),
-            false,           // is_ratified
-            None,            // No real collector endpoint
-            4 * 1024 * 1024, // default max message size
-            false,           // Run metrics filtering
-        )
+        IsolateMetricsReceiver::new(IsolateMetricsReceiverConfig {
+            policy: metrics_policy.clone(),
+            isolate_name: manifest_to_use.isolate_name.clone(),
+            publisher_id: manifest_to_use.publisher_id.clone(),
+            is_ratified: false,
+            isolate_instance_id: instance_id.clone(),
+            otel_endpoint: None,
+            max_decoding_message_size: 4 * 1024 * 1024,
+            disable_filtering: false,
+        })
         .await
     })?;
 
     // Create active simulation receiver (does filtering only at this stage)
     let receiver = rt.block_on(async {
-        IsolateMetricsReceiver::new(
-            metrics_policy,
-            manifest_to_use.isolate_name,
-            manifest_to_use.publisher_id,
-            false,           // is_ratified
-            None,            // No real collector endpoint during simulation
-            4 * 1024 * 1024, // default max message size
-            false,           // Run metrics filtering
-        )
+        IsolateMetricsReceiver::new(IsolateMetricsReceiverConfig {
+            policy: metrics_policy,
+            isolate_name: manifest_to_use.isolate_name,
+            publisher_id: manifest_to_use.publisher_id,
+            is_ratified: false,
+            isolate_instance_id: instance_id,
+            otel_endpoint: None,
+            max_decoding_message_size: 4 * 1024 * 1024,
+            disable_filtering: false,
+        })
         .await
     })?;
 

@@ -50,6 +50,19 @@ impl MetricPolicy {
     }
 }
 
+/// Configuration for initializing an [`IsolateMetricsReceiver`].
+#[derive(Debug, Default, Clone)]
+pub struct IsolateMetricsReceiverConfig {
+    pub policy: IsolateMetricsPolicy,
+    pub isolate_name: String,
+    pub publisher_id: String,
+    pub is_ratified: bool,
+    pub isolate_instance_id: String,
+    pub otel_endpoint: Option<String>,
+    pub max_decoding_message_size: usize,
+    pub disable_filtering: bool,
+}
+
 /// Receiver for Isolate metrics. It filters metrics based on policy and injects identity.
 pub struct IsolateMetricsReceiver {
     /// Map of exact allowed metric names to their expected policies.
@@ -65,19 +78,11 @@ pub struct IsolateMetricsReceiver {
 
 impl IsolateMetricsReceiver {
     /// Creates a new `IsolateMetricsReceiver`.
-    pub async fn new(
-        policy: IsolateMetricsPolicy,
-        isolate_name: String,
-        publisher_id: String,
-        is_ratified: bool,
-        otel_endpoint: Option<String>,
-        max_decoding_message_size: usize,
-        disable_filtering: bool,
-    ) -> Result<Self> {
+    pub async fn new(config: IsolateMetricsReceiverConfig) -> Result<Self> {
         let mut exact_metrics: HashMap<String, Vec<MetricPolicy>> = HashMap::new();
         let mut prefix_metrics = Vec::new();
 
-        for allowed in &policy.allowed_metrics {
+        for allowed in &config.policy.allowed_metrics {
             let allowed_attributes: HashSet<String> =
                 allowed.allowed_attributes.iter().cloned().collect();
             let metric_policy = MetricPolicy {
@@ -93,7 +98,7 @@ impl IsolateMetricsReceiver {
             }
         }
 
-        let client = if let Some(endpoint) = otel_endpoint {
+        let client = if let Some(endpoint) = config.otel_endpoint {
             let pool = GrpcChannelPool::new(
                 endpoint.clone(),
                 1,
@@ -106,16 +111,27 @@ impl IsolateMetricsReceiver {
             let channel = pool.next_channel();
             Some(
                 MetricsServiceClient::new(channel)
-                    .max_decoding_message_size(max_decoding_message_size)
-                    .max_encoding_message_size(max_decoding_message_size),
+                    .max_decoding_message_size(config.max_decoding_message_size)
+                    .max_encoding_message_size(config.max_decoding_message_size),
             )
         } else {
             None
         };
 
-        let extra_attributes = build_isolate_attributes(&isolate_name, &publisher_id, is_ratified);
+        let extra_attributes = build_isolate_attributes(
+            &config.isolate_name,
+            &config.publisher_id,
+            config.is_ratified,
+            &config.isolate_instance_id,
+        );
 
-        Ok(Self { exact_metrics, prefix_metrics, extra_attributes, client, disable_filtering })
+        Ok(Self {
+            exact_metrics,
+            prefix_metrics,
+            extra_attributes,
+            client,
+            disable_filtering: config.disable_filtering,
+        })
     }
 
     /// Gets the MetricsServiceClient.
@@ -269,6 +285,7 @@ pub fn get_isolate_attribute_data(
     isolate_name: &str,
     publisher_id: &str,
     is_ratified: bool,
+    isolate_instance_id: &str,
 ) -> Vec<(&'static str, std::borrow::Cow<'static, str>)> {
     let isolate_type_str = if is_ratified { "ratified" } else { "opaque" };
     vec![
@@ -277,8 +294,7 @@ pub fn get_isolate_attribute_data(
         ("ez_publisher_id", publisher_id.to_string().into()),
         ("ez_isolate_type", isolate_type_str.into()),
         ("ez_enforcer_version", crate::get_enforcer_version().into()),
-        // Placeholder isolate instance ID until dynamic generation is wired.
-        ("ez_isolate_instance_id", "1".into()),
+        ("ez_isolate_instance_id", isolate_instance_id.to_string().into()),
     ]
 }
 
@@ -290,8 +306,9 @@ pub fn build_isolate_attributes(
     isolate_name: &str,
     publisher_id: &str,
     is_ratified: bool,
+    isolate_instance_id: &str,
 ) -> Vec<KeyValue> {
-    get_isolate_attribute_data(isolate_name, publisher_id, is_ratified)
+    get_isolate_attribute_data(isolate_name, publisher_id, is_ratified, isolate_instance_id)
         .into_iter()
         .map(|(k, v)| make_string_attribute(k, v))
         .collect()

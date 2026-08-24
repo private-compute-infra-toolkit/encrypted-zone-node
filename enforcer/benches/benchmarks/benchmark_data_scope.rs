@@ -21,7 +21,8 @@ use data_scope::{
 };
 use data_scope_proto::enforcer::v1::DataScopeType;
 use isolate_info::{BinaryServicesIndex, IsolateId};
-use manifest_parser::{get_strictest_scope, parse_manifest};
+use manifest_parser::get_strictest_scope;
+use manifest_parser::v1::parse_manifest;
 use manifest_proto::enforcer::v1::{
     ez_manifest::ManifestType, BinaryManifest, BundleManifest, EzManifest, EzServiceSpec,
 };

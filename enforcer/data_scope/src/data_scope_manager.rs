@@ -366,7 +366,12 @@ impl DataScopeManager {
 
         // TODO: Add support for retiring Isolates
         if let Some(current_scope) = state.isolate_scope_index.get(&req.isolate_id) {
-            return Ok(GetIsolateScopeResponse { current_scope: *current_scope });
+            let sensitive_session_count =
+                state.sensitive_session_counts.get(&req.isolate_id).copied().or(Some(0));
+            return Ok(GetIsolateScopeResponse {
+                current_scope: *current_scope,
+                sensitive_session_count,
+            });
         }
         Err(DataScopeError::UnknownIsolateId)
     }

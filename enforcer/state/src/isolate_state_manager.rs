@@ -23,11 +23,14 @@ use data_scope::request::{
 };
 use data_scope::requester::DataScopeRequester;
 use enforcer_proto::enforcer::v1::IsolateState;
-use isolate_info::IsolateId;
+use isolate_info::{BinaryServicesIndex, IsolateId};
+use std::collections::HashSet;
 use std::result::Result::Ok;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
+
+use tokio::sync::broadcast;
 
 /// Maintains [IsolateState] for each Isolate and validates the state transitions.
 /// It also delays the Isolates being added to DataScopeManager before they are ready.
@@ -40,6 +43,8 @@ pub struct IsolateStateManager {
     data_scope_requester: DataScopeRequester,
     container_manager_requester: ContainerManagerRequester,
     in_flight_request_counts: Arc<DashMap<IsolateId, AtomicUsize>>,
+    ready_notifier: Arc<broadcast::Sender<BinaryServicesIndex>>,
+    ready_binary_services_map: Arc<DashMap<BinaryServicesIndex, HashSet<IsolateId>>>,
     // TODO: Add another map here to store the Isolates that are in MULTI-USER scope.
 }
 
@@ -62,12 +67,15 @@ impl IsolateStateManager {
         data_scope_requester: DataScopeRequester,
         container_manager_requester: ContainerManagerRequester,
     ) -> Self {
+        let (ready_notifier, _) = broadcast::channel(128);
         Self {
             isolate_state_map: Arc::new(DashMap::new()),
             unready_isolate_map: Arc::new(DashMap::new()),
             data_scope_requester,
             container_manager_requester,
             in_flight_request_counts: Arc::new(DashMap::new()),
+            ready_notifier: Arc::new(ready_notifier),
+            ready_binary_services_map: Arc::new(DashMap::new()),
         }
     }
 
@@ -89,7 +97,7 @@ impl IsolateStateManager {
     /// Pre-registers an Isolate's `BinaryServicesIndex` and maximum allowed data scope.
     pub async fn register_isolate_scope(
         &self,
-        binary_services_index: isolate_info::BinaryServicesIndex,
+        binary_services_index: BinaryServicesIndex,
         allowed_data_scope_type: data_scope_proto::enforcer::v1::DataScopeType,
     ) {
         self.data_scope_requester
@@ -162,6 +170,10 @@ impl IsolateStateManager {
         self.isolate_state_map.remove(&isolate_id);
         self.unready_isolate_map.remove(&isolate_id);
         self.in_flight_request_counts.remove(&isolate_id);
+        let binary_index = isolate_id.get_binary_services_index();
+        if let Some(mut set) = self.ready_binary_services_map.get_mut(&binary_index) {
+            set.remove(&isolate_id);
+        }
 
         match self.data_scope_requester.remove_isolate(remove_isolate_request).await {
             Ok(response) => Ok(response),
@@ -202,9 +214,17 @@ impl IsolateStateManager {
             .get_mut(&isolate_id)
             .context("Unrecognized IsolateId received for update_state")?;
 
-        validate_state_transition(*isolate_id_current_state_ref_mut.value(), isolate_state)?;
+        let old_state = *isolate_id_current_state_ref_mut.value();
+        validate_state_transition(old_state, isolate_state)?;
         *isolate_id_current_state_ref_mut.value_mut() = isolate_state;
         drop(isolate_id_current_state_ref_mut); // drop ref to minimize contention for DashMap
+
+        let binary_index = isolate_id.get_binary_services_index();
+        if old_state == IsolateState::Ready && isolate_state != IsolateState::Ready {
+            if let Some(mut set) = self.ready_binary_services_map.get_mut(&binary_index) {
+                set.remove(&isolate_id);
+            }
+        }
 
         match isolate_state {
             IsolateState::Idle => {
@@ -222,6 +242,8 @@ impl IsolateStateManager {
                     .context("Unrecognized IsolateId received for update_state, InternalError")?;
 
                 self.data_scope_requester.add_isolate(add_isolate_request).await?;
+                self.ready_binary_services_map.entry(binary_index).or_default().insert(isolate_id);
+                let _ = self.ready_notifier.send(binary_index);
                 Ok(())
             }
             IsolateState::Retiring => {
@@ -289,6 +311,33 @@ impl IsolateStateManager {
     /// * `isolate_id` - The ID of the Isolate to query.
     pub fn get_isolate_state(&self, isolate_id: IsolateId) -> Option<IsolateState> {
         self.isolate_state_map.get(&isolate_id).map(|state| *state.value())
+    }
+
+    /// Returns true if at least one instance for the given BinaryServicesIndex is Ready.
+    pub fn is_isolate_ready(&self, target: BinaryServicesIndex) -> bool {
+        self.ready_binary_services_map.get(&target).is_some_and(|set| !set.is_empty())
+    }
+
+    /// Waits asynchronously until at least one instance of the target BinaryServicesIndex reports Ready.
+    pub async fn wait_for_isolate_ready(&self, target: BinaryServicesIndex) -> Result<()> {
+        let mut rx = self.ready_notifier.subscribe();
+        if self.is_isolate_ready(target) {
+            return Ok(());
+        }
+        loop {
+            match rx.recv().await {
+                Ok(ready_index) if ready_index == target => return Ok(()),
+                Ok(_) => continue,
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    if self.is_isolate_ready(target) {
+                        return Ok(());
+                    }
+                }
+                Err(e) => {
+                    anyhow::bail!("Failed while waiting for isolate ready notification: {:?}", e)
+                }
+            }
+        }
     }
 }
 

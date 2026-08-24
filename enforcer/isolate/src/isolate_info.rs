@@ -59,6 +59,10 @@ pub fn get_isolate_type(index: &BinaryServicesIndex) -> Option<IsolateType> {
     registry.get(index).cloned()
 }
 
+pub fn get_isolate_name(index: &BinaryServicesIndex) -> String {
+    get_isolate_type(index).map(|t| t.isolate_name).unwrap_or_else(|| format!("{:?}", index))
+}
+
 /// Represents the destination route for a service request.
 ///
 /// This enum is used to determine whether a request is intended for an

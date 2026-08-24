@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod dependency_graph;
+
 use anyhow::{ensure, Context, Result};
 use container::{Container, ContainerOptions, ContainerRoot, MountOptions, NetworkOptions};
 use container_manager_request::{
@@ -29,23 +31,22 @@ use derivative::Derivative;
 use fileshare_manager::FileshareManager;
 use interceptor::Interceptor;
 use isolate_ez_service_manager::IsolateEzServiceManager;
-use isolate_info::BinaryServicesIndex;
-use isolate_info::{IsolateId, IsolateServiceInfo};
+use isolate_info::{get_isolate_name, BinaryServicesIndex, IsolateId, IsolateServiceInfo};
 use isolate_service_mapper::IsolateServiceMapper;
 use junction_trait::Junction;
-use manifest_parser::{get_strictest_scope, parse_manifest};
+use manifest_parser::v1::{flatten_manifest, parse_manifest, serialize_backend_dependencies};
+use manifest_parser::v2::{SetupManifest, WorkloadManifests};
+use manifest_parser::{get_strictest_scope, ParsedIsolate};
 use manifest_proto::enforcer::v1::ez_backend_dependency::RouteType;
-use manifest_proto::enforcer::v1::ez_manifest::ManifestType;
-use manifest_proto::enforcer::v1::IsolateMetricsPolicy;
 use manifest_proto::enforcer::v1::{
-    BinaryManifest, EzBackendDependency, EzManifest, EzServiceSpec, IsolateRuntimeConfigs,
+    EzBackendDependency, EzServiceSpec, IsolateMetricsPolicy, IsolateRuntimeConfigs,
 };
 use nix::sys::stat::Mode;
 use nix::unistd::mkfifo;
 use shared_memory_manager::SharedMemManager;
 use state_manager::IsolateStateManager;
 use std::cmp::max;
-use std::convert::TryFrom;
+use std::collections::{HashMap, HashSet};
 use std::env;
 
 use std::path::PathBuf;
@@ -70,15 +71,6 @@ const OTEL_TRACES_UDS: &str = "traces-otlp.sock";
 const DEV_SHM_PATH: &str = "/dev/shm";
 const RATIFIED_ISOLATE_DOMAIN: &str = "EZ_Trusted";
 
-/// Arguments that describe the shape of shared memory to be used between
-/// the Enforcer and Isolate.
-#[derive(Clone)]
-struct ShmIPCArgs {
-    shm_num_slots: u64,
-    shm_slot_size: u64,
-    shm_payload_threshold: u64,
-}
-
 #[derive(Debug, Derivative)]
 #[derivative(Clone(bound = ""))]
 pub struct ContainerManager<ContainerT: Container> {
@@ -99,6 +91,7 @@ pub struct ContainerManager<ContainerT: Container> {
     run_isolate_as_unprivileged: bool,
     enable_syscall_filtering: bool,
     operator_role: String,
+    isolate_arg_config: IsolateArgConfig,
 }
 
 #[derive(Debug)]
@@ -112,8 +105,7 @@ pub struct ContainerManagerArgs {
     pub fileshare_manager: FileshareManager,
     pub manifest_validator: ManifestValidator,
     pub interceptor: Interceptor,
-    // TODO Remove this once we have IsolateManager RPC in place
-    pub manifest_path: String,
+    pub manifest_source: ManifestSource,
     pub common_bind_mounts: Vec<String>,
     pub max_decoding_message_size: usize,
     pub isolate_runtime_configs: IsolateRuntimeConfigs,
@@ -126,31 +118,27 @@ pub struct ContainerManagerArgs {
     pub operator_role: String,
 }
 
-struct ProcessBinaryManifestArgs {
-    binary_manifest: BinaryManifest,
+/// Arguments that describe the shape of shared memory to be used between
+/// the Enforcer and Isolate.
+#[derive(Clone, Debug)]
+struct ShmIPCArgs {
+    shm_num_slots: u64,
+    shm_slot_size: u64,
+    shm_payload_threshold: u64,
+}
+
+/// Configuration parameters for isolate manifest processing and container initialization.
+#[derive(Clone, Debug)]
+struct IsolateArgConfig {
     common_bind_mounts: Vec<String>,
     max_decoding_message_size: usize,
     isolate_runtime_configs: IsolateRuntimeConfigs,
-    publisher_id: String,
-    isolate_name: String,
-    package_filename: String,
     shm_ipc_args: ShmIPCArgs,
-}
-
-// Internal struct to store Container and it's related properties.
-#[derive(Debug)]
-struct IsolateContainer<ContainerT: Container> {
-    pub container: ContainerT,
-    // root_dir where runc will store the state of the Container
-    pub _root_dir: TempDir,
-    // dir where all mounted data related to Container will be stored
-    pub _sharing_dir: TempDir,
-    pub restart_count: u32,
 }
 
 /// Data required to initiate a new container.
 #[derive(Clone, Debug)]
-struct ContainerStartupArgs {
+pub(crate) struct ContainerStartupArgs {
     binary_filename: String,
     command_line_args: Vec<String>,
     strictest_scope: DataScopeType,
@@ -158,13 +146,44 @@ struct ContainerStartupArgs {
     bind_mounts: Vec<String>,
     env_vars: Vec<String>,
     publisher_id: String,
+    isolate_name: String,
     metrics_policy: IsolateMetricsPolicy,
     run_isolate_as_unprivileged: bool,
     number_of_isolates: i32,
+    pub(crate) backend_dependencies: Vec<EzBackendDependency>,
+}
+
+// Internal struct to store Container and its related properties.
+#[derive(Debug)]
+struct IsolateContainer<ContainerT: Container> {
+    pub container: ContainerT,
+    // dir where all mounted data related to Container will be stored
+    pub _sharing_dir: TempDir,
+    pub restart_count: u32,
+}
+
+/// Source of isolate manifest configuration for ContainerManager initialization.
+#[derive(Debug)]
+pub enum ManifestSource {
+    /// Legacy v1 monolithic or bundle manifest path.
+    V1 { manifest_path: String },
+    /// v2 setup isolate manifest path for bootstrap.
+    V2 { setup_isolate_manifest_path: String },
 }
 
 impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
     pub async fn start(args: ContainerManagerArgs) -> Result<Self> {
+        let isolate_arg_config = IsolateArgConfig {
+            common_bind_mounts: args.common_bind_mounts,
+            max_decoding_message_size: args.max_decoding_message_size,
+            isolate_runtime_configs: args.isolate_runtime_configs,
+            shm_ipc_args: ShmIPCArgs {
+                shm_num_slots: args.shm_num_slots,
+                shm_slot_size: args.shm_slot_size,
+                shm_payload_threshold: args.shm_payload_threshold,
+            },
+        };
+
         let isolate_mngr = Self {
             isolate_container_map: Arc::new(DashMap::new()),
             container_startup_args_map: Arc::new(DashMap::new()),
@@ -181,65 +200,23 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             run_isolate_as_unprivileged: args.run_isolate_as_unprivileged,
             enable_syscall_filtering: args.enable_syscall_filtering,
             operator_role: args.operator_role.clone(),
+            isolate_arg_config,
         };
 
-        let ez_manifest =
-            parse_manifest(args.manifest_path).context("couldn't parse EzManifest")?;
-        isolate_mngr
-            .process_manifest(
-                ez_manifest.clone(),
-                args.common_bind_mounts,
-                args.max_decoding_message_size,
-                args.isolate_runtime_configs,
-                ShmIPCArgs {
-                    shm_num_slots: args.shm_num_slots,
-                    shm_slot_size: args.shm_slot_size,
-                    shm_payload_threshold: args.shm_payload_threshold,
-                },
-            )
-            .await
-            .context("Failed to process manifest")?;
-        isolate_mngr
-            .post_process_manifest(ez_manifest)
-            .await
-            .context("Failed to post-process manifest")?;
-
-        let boot_requests: Vec<_> = isolate_mngr
-            .container_startup_args_map
-            .iter()
-            .map(|entry| {
-                let args = entry.value();
-                (*entry.key(), args.number_of_isolates, args.strictest_scope)
-            })
-            .collect();
-
-        // Register all intended Ratified Isolates globally *before* spawning any containers
-        // to ensure concurrent dependants gracefully retry with NoMatchingIsolates (ResourceExhausted).
-        for (binary_services_index, _num_isolates, strictest_scope) in boot_requests.iter() {
-            isolate_mngr
-                .state_manager
-                .register_isolate_scope(*binary_services_index, *strictest_scope)
-                .await;
-        }
-
-        let mut join_set = tokio::task::JoinSet::new();
-        for (binary_services_index, num_isolates, strictest_scope) in boot_requests {
-            for _ in 0..num_isolates {
-                let add_req = AddIsolateRequest {
-                    isolate_id: IsolateId::new(binary_services_index),
-                    current_data_scope_type: DataScopeType::Public,
-                    allowed_data_scope_type: strictest_scope,
-                };
-                let isolate_mngr = isolate_mngr.clone();
-                join_set.spawn(async move {
-                    isolate_mngr.add_new_isolate(add_req, /*restart_count=*/ 0).await
-                });
+        let initial_isolates = match args.manifest_source {
+            ManifestSource::V1 { manifest_path } => {
+                let ez_manifest =
+                    parse_manifest(manifest_path).context("couldn't parse EzManifest")?;
+                flatten_manifest(ez_manifest).context("Failed to flatten EzManifest")?
             }
-        }
+            ManifestSource::V2 { setup_isolate_manifest_path } => {
+                let setup_manifest = SetupManifest::load_from_path(setup_isolate_manifest_path)
+                    .context("Failed to load v2 setup isolate manifest")?;
+                vec![setup_manifest.into_parsed_isolate()]
+            }
+        };
 
-        while let Some(res) = join_set.join_next().await {
-            res.context("Add Isolate failed")??;
-        }
+        isolate_mngr.process_and_boot_isolates(initial_isolates).await?;
 
         // Spawn to avoid blocking the constructor
         let mut isolate_mngr_clone = isolate_mngr.clone();
@@ -248,6 +225,50 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
         });
 
         Ok(isolate_mngr)
+    }
+
+    /// Dynamically loads and starts workload isolates (Ratified and Opaque) from v2 manifests.
+    pub async fn load_workload_isolates(
+        &self,
+        workload_manifests: WorkloadManifests,
+    ) -> Result<Vec<BinaryServicesIndex>> {
+        let workload_isolates = workload_manifests.into_parsed_isolates();
+        ensure!(!workload_isolates.is_empty(), "workload isolates cannot be empty");
+        self.process_and_boot_isolates(workload_isolates).await
+    }
+
+    async fn process_and_boot_isolates(
+        &self,
+        isolates: Vec<ParsedIsolate>,
+    ) -> Result<Vec<BinaryServicesIndex>> {
+        let indices = self.process_isolates(isolates, &self.isolate_arg_config).await?;
+
+        // Register all intended Ratified Isolates globally *before* spawning any containers
+        // to ensure concurrent dependants gracefully retry with NoMatchingIsolates (ResourceExhausted).
+        for binary_services_index in &indices {
+            if let Some(entry) = self.container_startup_args_map.get(binary_services_index) {
+                self.state_manager
+                    .register_isolate_scope(*binary_services_index, entry.strictest_scope)
+                    .await;
+            }
+        }
+
+        let isolate_deps_map: HashMap<BinaryServicesIndex, Vec<EzBackendDependency>> = self
+            .container_startup_args_map
+            .iter()
+            .map(|entry| (*entry.key(), entry.value().backend_dependencies.clone()))
+            .collect();
+
+        let graph = dependency_graph::build_isolate_dependency_graph(
+            &isolate_deps_map,
+            &self.isolate_service_mapper,
+        )
+        .await
+        .context("Failed to build isolate dependency graph")?;
+        dependency_graph::validate_isolate_dependency_graph(&graph)?;
+        self.start_isolates(&indices, &graph).await?;
+
+        Ok(indices)
     }
 
     pub async fn stop(&mut self) {
@@ -261,93 +282,84 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
         self.isolate_container_map.clear();
     }
 
-    async fn process_manifest(
+    async fn process_isolates(
         &self,
-        ez_manifest: EzManifest,
-        common_bind_mounts: Vec<String>,
-        max_decoding_message_size: usize,
-        isolate_runtime_configs: IsolateRuntimeConfigs,
-        shm_ipc_args: ShmIPCArgs,
-    ) -> Result<()> {
-        let manifest_type =
-            ez_manifest.manifest_type.context("manifest_type can't be empty in EzManifest")?;
-        match manifest_type {
-            ManifestType::BundleManifest(bundle_manifest) => {
-                for manifest in bundle_manifest.manifests {
-                    // Recursive async functions in Rust require Box::pin. See:
-                    // https://rust-lang.github.io/async-book/07_workarounds/04_recursion.html
-                    Box::pin(self.process_manifest(
-                        manifest,
-                        common_bind_mounts.clone(),
-                        max_decoding_message_size,
-                        isolate_runtime_configs.clone(),
-                        shm_ipc_args.clone(),
-                    ))
-                    .await?;
-                }
+        isolates: Vec<ParsedIsolate>,
+        config: &IsolateArgConfig,
+    ) -> Result<Vec<BinaryServicesIndex>> {
+        let mut indices = Vec::new();
+        for isolate in &isolates {
+            let index = self.process_binary_manifest(isolate, config).await?;
+            indices.push(index);
+        }
+
+        for isolate in isolates {
+            self.process_binary_backend_dependencies(
+                isolate.publisher_id,
+                isolate.isolate_name,
+                isolate.binary_manifest.service_specs,
+                isolate.binary_manifest.ez_backend_dependencies,
+            )
+            .await
+            .context("Failed to add backend dependencies for binary services index")?;
+
+            for intercepting_service in isolate.binary_manifest.services_to_intercept {
+                self.interceptor
+                    .add_interceptor(intercepting_service)
+                    .await
+                    .context("Failed to add interceptor")?;
             }
-            ManifestType::BinaryManifest(binary_manifest) => {
-                self.process_binary_manifest(ProcessBinaryManifestArgs {
-                    binary_manifest,
-                    common_bind_mounts,
-                    max_decoding_message_size,
-                    isolate_runtime_configs,
-                    publisher_id: ez_manifest.publisher_id,
-                    isolate_name: ez_manifest.isolate_name,
-                    package_filename: ez_manifest.package_filename,
-                    shm_ipc_args,
-                })
-                .await?;
-            }
-            _ => {
-                // TODO Support other ManifestTypes
-                anyhow::bail!("Provided ManifestType in EzManifest is not supported yet");
-            }
-        };
-        Ok(())
+        }
+
+        Ok(indices)
     }
 
-    async fn process_binary_manifest(&self, args: ProcessBinaryManifestArgs) -> Result<()> {
+    async fn process_binary_manifest(
+        &self,
+        isolate: &ParsedIsolate,
+        config: &IsolateArgConfig,
+    ) -> Result<BinaryServicesIndex> {
         let (strictest_scope, binary_services_index) = self
             .process_binary_scope(
-                args.publisher_id.clone(),
-                args.isolate_name.clone(),
-                args.binary_manifest.service_specs,
-                args.binary_manifest.is_ratified_isolate,
+                isolate.publisher_id.clone(),
+                isolate.isolate_name.clone(),
+                isolate.binary_manifest.service_specs.clone(),
+                isolate.binary_manifest.is_ratified_isolate,
             )
             .await
             .context("Failed to process scope of binary")?;
 
-        let config = args.isolate_runtime_configs.configs.iter().find(|config| {
+        let runtime_config = config.isolate_runtime_configs.configs.iter().find(|c| {
             let isolate_name_matches =
-                config.isolate_name.is_empty() || config.isolate_name == args.isolate_name;
+                c.isolate_name.is_empty() || c.isolate_name == isolate.isolate_name;
             isolate_name_matches
-                && config.publisher_id == args.publisher_id
-                && config.binary_filename == args.binary_manifest.binary_filename
+                && c.publisher_id == isolate.publisher_id
+                && c.binary_filename == isolate.binary_manifest.binary_filename
         });
-        let command_line_args = if let Some(config) = config {
-            &config.command_line_arguments
+        let command_line_args = if let Some(c) = runtime_config {
+            &c.command_line_arguments
         } else {
-            &args.binary_manifest.command_line_arguments
+            &isolate.binary_manifest.command_line_arguments
         };
-        let base_env_vars = if let Some(config) = config {
-            &config.environment_variables
+        let base_env_vars = if let Some(c) = runtime_config {
+            &c.environment_variables
         } else {
-            &args.binary_manifest.environment_variables
+            &isolate.binary_manifest.environment_variables
         };
 
-        let etc_hosts = if let Some(config) = config { &config.etc_hosts } else { "" };
-        let mut bind_mounts = args.common_bind_mounts.clone();
+        let etc_hosts = if let Some(c) = runtime_config { &c.etc_hosts } else { "" };
+        let mut bind_mounts = config.common_bind_mounts.clone();
         if !etc_hosts.is_empty() {
             let etc_hosts_path =
-                get_etc_hosts_path(&args.publisher_id, &args.binary_manifest.binary_filename);
+                get_etc_hosts_path(&isolate.publisher_id, &isolate.binary_manifest.binary_filename);
             let etc_hosts_parent_dir =
                 etc_hosts_path.parent().context("etc_hosts_path has no parent")?;
             tokio::fs::create_dir_all(etc_hosts_parent_dir)
                 .await
                 .context(format!("Failed to create directory {etc_hosts_parent_dir:?}"))?;
 
-            let key = (args.publisher_id.clone(), args.binary_manifest.binary_filename.clone());
+            let key =
+                (isolate.publisher_id.clone(), isolate.binary_manifest.binary_filename.clone());
             if self.etc_hosts_written.insert(key, ()).is_none() {
                 match tokio::fs::OpenOptions::new()
                     .write(true)
@@ -372,27 +384,27 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
                 };
             }
 
-            bind_mounts.push(format!("{}:{}", etc_hosts_path.display(), "/etc/hosts",));
+            bind_mounts.push(format!("{}:{}", etc_hosts_path.display(), "/etc/hosts"));
         }
 
         // Copy is required because of the mutation statement.
         let mut env_vars = base_env_vars.clone();
         env_vars
-            .push(format!("EZ_MAX_DECODING_MESSAGE_SIZE={:#?}", args.max_decoding_message_size));
-        env_vars.push(format!("EZ_SHM_NUM_SLOTS={:#?}", args.shm_ipc_args.shm_num_slots));
-        env_vars.push(format!("EZ_SHM_SLOT_SIZE={:#?}", args.shm_ipc_args.shm_slot_size));
+            .push(format!("EZ_MAX_DECODING_MESSAGE_SIZE={:#?}", config.max_decoding_message_size));
+        env_vars.push(format!("EZ_SHM_NUM_SLOTS={:#?}", config.shm_ipc_args.shm_num_slots));
+        env_vars.push(format!("EZ_SHM_SLOT_SIZE={:#?}", config.shm_ipc_args.shm_slot_size));
         env_vars.push(format!(
             "EZ_SHM_PAYLOAD_THRESHOLD={:#?}",
-            args.shm_ipc_args.shm_payload_threshold
+            config.shm_ipc_args.shm_payload_threshold
         ));
-        if !args.binary_manifest.ez_backend_dependencies.is_empty() {
-            let serialized_deps = manifest_parser::serialize_backend_dependencies(
-                args.binary_manifest.ez_backend_dependencies.clone(),
+        if !isolate.binary_manifest.ez_backend_dependencies.is_empty() {
+            let serialized_deps = serialize_backend_dependencies(
+                isolate.binary_manifest.ez_backend_dependencies.clone(),
             )?;
             env_vars.push(format!("EZ_BACKEND_DEPENDENCIES={}", serialized_deps));
         }
         env_vars.push(format!("EZ_OPERATOR_ROLE={}", self.operator_role));
-        let package_filename = args.package_filename.clone();
+        let package_filename = isolate.package_filename.clone();
         let shared_root =
             tokio::task::spawn_blocking(move || utils::unpack_file_system(&package_filename))
                 .await
@@ -400,31 +412,32 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
                 .context("Failed to unpack file system")?;
 
         let container_startup_args = ContainerStartupArgs {
-            binary_filename: args.binary_manifest.binary_filename.clone(),
+            binary_filename: isolate.binary_manifest.binary_filename.clone(),
             // Copy is required because command_line_args is now owned by container_startup_args.
             command_line_args: command_line_args.clone(),
             strictest_scope,
             shared_root: Arc::new(shared_root),
             bind_mounts,
             env_vars,
-            publisher_id: args.publisher_id.clone(),
+            publisher_id: isolate.publisher_id.clone(),
+            isolate_name: isolate.isolate_name.clone(),
             // Use an empty metrics policy if nothing is specified
-            metrics_policy: args.binary_manifest.metrics_policy.unwrap_or_default(),
+            metrics_policy: isolate.binary_manifest.metrics_policy.clone().unwrap_or_default(),
             run_isolate_as_unprivileged: self.run_isolate_as_unprivileged,
-            number_of_isolates: args.binary_manifest.number_of_isolates,
+            number_of_isolates: isolate.binary_manifest.number_of_isolates,
+            backend_dependencies: isolate.binary_manifest.ez_backend_dependencies.clone(),
         };
 
-        self.container_startup_args_map
-            .insert(binary_services_index, container_startup_args.clone());
+        self.container_startup_args_map.insert(binary_services_index, container_startup_args);
 
-        let number_of_isolates = args.binary_manifest.number_of_isolates;
+        let number_of_isolates = isolate.binary_manifest.number_of_isolates;
         if number_of_isolates == 0 {
             log::warn!(
                 "number_of_isolates is 0 for package {:#?}, no isolates will be launched.",
-                args.publisher_id
+                isolate.publisher_id
             );
         }
-        Ok(())
+        Ok(binary_services_index)
     }
 
     async fn process_binary_scope(
@@ -491,43 +504,6 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
 
         let strictest_scope = max(strictest_input_scope, strictest_output_scope);
         Ok((strictest_scope, binary_services_index))
-    }
-
-    async fn post_process_manifest(&self, ez_manifest: EzManifest) -> Result<()> {
-        let manifest_type =
-            ez_manifest.manifest_type.context("manifest_type can't be empty in EzManifest")?;
-        match manifest_type {
-            ManifestType::BundleManifest(bundle_manifest) => {
-                for manifest in bundle_manifest.manifests {
-                    // Recursive async functions in Rust require Box::pin. See:
-                    // https://rust-lang.github.io/async-book/07_workarounds/04_recursion.html
-                    Box::pin(self.post_process_manifest(manifest)).await?;
-                }
-            }
-            ManifestType::BinaryManifest(binary_manifest) => {
-                self.process_binary_backend_dependencies(
-                    ez_manifest.publisher_id,
-                    ez_manifest.isolate_name,
-                    binary_manifest.service_specs,
-                    binary_manifest.ez_backend_dependencies,
-                )
-                .await
-                .context("Failed to add backend dependencies for binary services index")?;
-
-                // Add the requested Interceptors
-                for intercepting_service in binary_manifest.services_to_intercept {
-                    self.interceptor
-                        .add_interceptor(intercepting_service)
-                        .await
-                        .context("Failed to add interceptor")?;
-                }
-            }
-            _ => {
-                // TODO Support other ManifestTypes
-                anyhow::bail!("Provided ManifestType in EzManifest is not supported yet");
-            }
-        };
-        Ok(())
     }
 
     async fn process_binary_backend_dependencies(
@@ -642,8 +618,6 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
 
         let isolate_id = request.isolate_id;
         log::info!("adding isolate: {isolate_id:?}");
-        let root_dir =
-            tempfile::Builder::new().prefix(&container_startup_args.publisher_id).tempdir()?;
         let root = Arc::clone(&container_startup_args.shared_root);
         // Check that DEV_SHM_PATH exists and is a directory.
         if !std::path::Path::new(DEV_SHM_PATH).is_dir() {
@@ -731,7 +705,7 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
                 otel_metrics_address: otlp_metrics_enforcer_side_uds_path,
                 metrics_policy: container_startup_args.metrics_policy,
                 isolate_type: isolate_info::IsolateType {
-                    isolate_name: container_startup_args.binary_filename.clone(),
+                    isolate_name: container_startup_args.isolate_name.clone(),
                     publisher_id: container_startup_args.publisher_id,
                 },
             })
@@ -741,12 +715,7 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
 
         self.isolate_container_map.insert(
             isolate_id,
-            IsolateContainer {
-                container,
-                _root_dir: root_dir,
-                _sharing_dir: sharing_dir,
-                restart_count,
-            },
+            IsolateContainer { container, _sharing_dir: sharing_dir, restart_count },
         );
         self.add_isolate_to_state_mngr(isolate_id, request.allowed_data_scope_type).await?;
         self.add_isolate_to_junction(isolate_id, ez_isolate_bridge_enforcer_side_uds_path)
@@ -957,6 +926,69 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             data_bytes,
             restart_count,
         })
+    }
+
+    /// Boots all isolate replicas defined in the startup args map asynchronously in dependency order.
+    async fn start_isolates(
+        &self,
+        indices: &[BinaryServicesIndex],
+        dep_graph: &HashMap<BinaryServicesIndex, HashSet<BinaryServicesIndex>>,
+    ) -> Result<()> {
+        for &binary_services_index in indices {
+            if let Some(entry) = self.container_startup_args_map.get(&binary_services_index) {
+                let num_isolates = entry.number_of_isolates;
+                let strictest_scope = entry.strictest_scope;
+                let dependencies =
+                    dep_graph.get(&binary_services_index).cloned().unwrap_or_default();
+                let isolate_mngr = self.clone();
+
+                tokio::spawn(async move {
+                    let boot_res: Result<()> = async {
+                        let source_isolate_name = get_isolate_name(&binary_services_index);
+                        if !dependencies.is_empty() {
+                            for dep_index in &dependencies {
+                                isolate_mngr
+                                    .state_manager
+                                    .wait_for_isolate_ready(*dep_index)
+                                    .await?;
+                            }
+                            log::info!(
+                                "Dependencies are Ready for Isolate {}",
+                                source_isolate_name
+                            );
+                        }
+
+                        let mut join_set = tokio::task::JoinSet::new();
+                        for _ in 0..num_isolates {
+                            let add_req = AddIsolateRequest {
+                                isolate_id: IsolateId::new(binary_services_index),
+                                current_data_scope_type: DataScopeType::Public,
+                                allowed_data_scope_type: strictest_scope,
+                            };
+                            let isolate_mngr = isolate_mngr.clone();
+                            join_set.spawn(async move {
+                                isolate_mngr.add_new_isolate(add_req, /*restart_count=*/ 0).await
+                            });
+                        }
+                        while let Some(res) = join_set.join_next().await {
+                            res.context("Add Isolate failed")??;
+                        }
+                        Ok(())
+                    }
+                    .await;
+
+                    if let Err(e) = boot_res {
+                        log::error!(
+                            "Failed to add isolate {:?} ({}): {:?}",
+                            binary_services_index,
+                            get_isolate_name(&binary_services_index),
+                            e
+                        );
+                    }
+                });
+            }
+        }
+        Ok(())
     }
 }
 

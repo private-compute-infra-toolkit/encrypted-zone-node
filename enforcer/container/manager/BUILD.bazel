@@ -50,10 +50,12 @@ rust_library(
     rust_library(
         name = "container_manager{}".format(flavor.suffix),
         srcs = [
+            "src/dependency_graph.rs",
             "src/manager.rs",
         ],
         crate_features = flavor.features,
         crate_name = "container_manager",
+        crate_root = "src/manager.rs",
         proc_macro_deps = ["@crates//:derivative"],
         visibility = ["//visibility:public"],
         deps = [
@@ -74,6 +76,7 @@ rust_library(
             "//enforcer/v1:manifest_rust",
             "@crates//:anyhow",
             "@crates//:dashmap",
+            "@crates//:indexmap",
             "@crates//:log",
             "@crates//:nix",
             "@crates//:tempfile",
@@ -96,7 +99,6 @@ rust_test(
     name = "container_manager_tests",
     size = "small",
     srcs = [
-        "src/manager.rs",
         "test/container_manager_tests.rs",
     ],
     # Add this line to enforce sequential execution
@@ -106,9 +108,11 @@ rust_test(
         "//enforcer/proto:manifest_v1_descriptor_set",
         "//enforcer/proto:manifest_v2_descriptor_set",
     ],
+    crate_root = "test/container_manager_tests.rs",
     data = [
         ":testdata",
         "//enforcer/container/test_data:test_binary",
+        "//enforcer/manifest_parser:testdata",
         "//enforcer/proto:manifest_v1_descriptor_set",
         "//enforcer/proto:manifest_v2_descriptor_set",
     ],
@@ -132,6 +136,7 @@ rust_test(
         "//enforcer/junction:junction_test_utils",
         "//enforcer/junction:junction_trait",
         "//enforcer/manifest_parser",
+        "//enforcer/manifest_parser:manifest_parser_test_utils",
         "//enforcer/state:state_manager",
         "//enforcer/v1:data_scope_rust",
         "//enforcer/v1:enforcer_rust",
@@ -142,11 +147,26 @@ rust_test(
         "@crates//:anyhow",
         "@crates//:dashmap",
         "@crates//:hyper-util",
+        "@crates//:opentelemetry-proto",
         "@crates//:rand",
         "@crates//:tempfile",
         "@crates//:tokio",
         "@crates//:tokio-stream",
         "@crates//:tonic",
         "@crates//:tower",
+    ],
+)
+
+rust_test(
+    name = "dependency_graph_test",
+    size = "small",
+    srcs = ["test/dependency_graph_test.rs"],
+    deps = [
+        ":container_manager",
+        "//enforcer/isolate:isolate_info",
+        "//enforcer/isolate:isolate_service_mapper",
+        "//enforcer/v1:manifest_rust",
+        "@crates//:anyhow",
+        "@crates//:tokio",
     ],
 )

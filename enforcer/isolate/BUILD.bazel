@@ -351,3 +351,13 @@ rust_test(
         ":isolate_info",
     ],
 )
+
+rust_test(
+    name = "isolate_info_test",
+    size = "small",
+    srcs = ["test/isolate_info_test.rs"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":isolate_info",
+    ],
+)

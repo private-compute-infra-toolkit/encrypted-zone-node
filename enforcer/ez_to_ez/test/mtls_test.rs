@@ -16,8 +16,12 @@ use ez_mtls_proto::enforcer::v1::ez_mtls_service_server::{EzMtlsService, EzMtlsS
 use ez_mtls_proto::enforcer::v1::{
     GetCertificateRequest, GetCertificateResponse, ReportSniRequest, ReportSniResponse,
 };
-use manifest_proto::enforcer::v1::EzManifest;
-use mtls::mtls::{sni, EzMtlsManager, SpiffeUri};
+use manifest_parser::v1::parse_manifest;
+use manifest_parser::v2::SetupManifest;
+use mtls::mtls::{
+    extract_sni_params, load_initial_snis, sni, BootManifest, EzMtlsManager, IsolateIdentity,
+    SpiffeUri,
+};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -43,9 +47,56 @@ fn test_sni() {
     assert_eq!(sni, "ez-instance-id--00b5ac486086aa9eae630c1d511eee7c-a.avs.goog.tca");
 }
 
+#[test]
+fn test_load_initial_snis_v1() {
+    let manifest = parse_manifest("enforcer/manifest_parser/test/testdata/test_manifest.json")
+        .expect("Failed to parse v1 manifest");
+    let boot_manifest = BootManifest::V1(manifest);
+    let snis = load_initial_snis(&boot_manifest);
+    assert_eq!(snis.len(), 2);
+    assert_eq!(
+        snis[0],
+        IsolateIdentity::new("ezpkg://playground.example.com", "playground_example")
+    );
+    assert_eq!(
+        snis[1],
+        IsolateIdentity::new("ezpkg://playground.example.com", "playground_example")
+    );
+}
+
+#[test]
+fn test_load_initial_snis_v2() {
+    let setup = SetupManifest::load_from_path(
+        "enforcer/manifest_parser/test/testdata/test_manifest_v2_setup.json",
+    )
+    .expect("Failed to load setup manifest");
+    let boot_manifest = BootManifest::V2(setup);
+    let snis = load_initial_snis(&boot_manifest);
+    assert_eq!(snis.len(), 1);
+    assert_eq!(snis[0], IsolateIdentity::new("ezpkg://setup.example.com", "EZ_Trusted"));
+}
+
+#[test]
+fn test_extract_sni_params_v1() {
+    let manifest = parse_manifest("enforcer/manifest_parser/test/testdata/test_manifest.json")
+        .expect("Failed to parse v1 manifest");
+    let snis = extract_sni_params(&manifest);
+    assert_eq!(snis.len(), 2);
+    assert_eq!(
+        snis[0],
+        IsolateIdentity::new("ezpkg://playground.example.com", "playground_example")
+    );
+    assert_eq!(
+        snis[1],
+        IsolateIdentity::new("ezpkg://playground.example.com", "playground_example")
+    );
+}
+
+#[derive(Clone)]
 struct MockMtlsService {
     leaf_der: &'static [u8],
     root_der: &'static [u8],
+    reported_snis: std::sync::Arc<tokio::sync::Mutex<Vec<Vec<String>>>>,
 }
 
 impl MockMtlsService {
@@ -53,6 +104,7 @@ impl MockMtlsService {
         Self {
             leaf_der: include_bytes!("testdata/leaf.der"),
             root_der: include_bytes!("testdata/root.der"),
+            reported_snis: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         }
     }
 }
@@ -71,8 +123,9 @@ impl EzMtlsService for MockMtlsService {
 
     async fn report_sni(
         &self,
-        _request: Request<ReportSniRequest>,
+        request: Request<ReportSniRequest>,
     ) -> Result<Response<ReportSniResponse>, Status> {
+        self.reported_snis.lock().await.push(request.into_inner().sni);
         Ok(Response::new(ReportSniResponse::default()))
     }
 }
@@ -98,16 +151,12 @@ async fn test_connect_ez_mtls() {
     let key_path = "enforcer/ez_to_ez/test/testdata/leaf.key".to_string();
     let csr_path = "enforcer/ez_to_ez/test/testdata/leaf.csr".to_string();
 
-    let ez_manifest = manifest_proto::enforcer::v1::EzManifest {
-        isolate_name: "test-isolate".to_string(),
-        publisher_id: "test-publisher".to_string(),
-        ..Default::default()
-    };
+    let isolate_identities = vec![IsolateIdentity::new("test-isolate", "test-publisher")];
     let config = mtls::mtls::EzMtlsManagerConfig {
         mtls_key_path: key_path,
         csr_path,
         proxy_address: server_addr,
-        ez_manifest,
+        isolate_identities,
     };
     let manager_result = EzMtlsManager::build(config).await;
     assert!(
@@ -120,8 +169,67 @@ async fn test_connect_ez_mtls() {
     let fetch_result = manager.fetch_certificate().await;
     assert!(fetch_result.is_ok(), "Failed to fetch certificate");
 
-    let report_result = manager.report_snis(vec!["test-sni".to_string()]).await;
+    let report_result =
+        manager.report_snis(&[IsolateIdentity::new("test-isolate", "test-publisher")]).await;
     assert!(report_result.is_ok(), "Failed to report SNIs");
+
+    let _ = tx.send(());
+}
+
+/// Verifies that dynamic SNI reporting updates the proxy with the provided identities.
+#[tokio::test]
+async fn test_report_snis() {
+    let (tx, rx) = oneshot::channel();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_addr = format!("http://{}", addr);
+
+    let service = MockMtlsService::new();
+    let reported_snis = service.reported_snis.clone();
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(EzMtlsServiceServer::new(service))
+            .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
+                rx.await.ok();
+            })
+            .await
+            .unwrap();
+    });
+
+    let key_path = "enforcer/ez_to_ez/test/testdata/leaf.key".to_string();
+    let csr_path = "enforcer/ez_to_ez/test/testdata/leaf.csr".to_string();
+
+    let initial_identity = IsolateIdentity::new("setup-isolate", "setup-publisher");
+    let config = mtls::mtls::EzMtlsManagerConfig {
+        mtls_key_path: key_path,
+        csr_path,
+        proxy_address: server_addr,
+        isolate_identities: vec![initial_identity.clone()],
+    };
+    let manager = EzMtlsManager::build(config).await.expect("Failed to build manager");
+
+    {
+        let snis = reported_snis.lock().await;
+        assert_eq!(snis.len(), 1);
+        assert_eq!(snis[0].len(), 1);
+    }
+
+    let workload_identity1 = IsolateIdentity::new("workload-1", "publisher-1");
+    let workload_identity2 = IsolateIdentity::new("workload-2", "publisher-2");
+    manager
+        .report_snis(&[
+            initial_identity.clone(),
+            workload_identity1.clone(),
+            workload_identity2.clone(),
+        ])
+        .await
+        .expect("Failed to report SNIs");
+
+    {
+        let snis = reported_snis.lock().await;
+        assert_eq!(snis.len(), 2);
+        assert_eq!(snis[1].len(), 3);
+    }
 
     let _ = tx.send(());
 }
@@ -187,16 +295,12 @@ async fn test_tls_acceptor_connector() {
     });
     let key_path = "enforcer/ez_to_ez/test/testdata/leaf.key".to_string();
     let csr_path = "enforcer/ez_to_ez/test/testdata/leaf.csr".to_string();
-    let ez_manifest = EzManifest {
-        isolate_name: "encrypted-zone".to_string(),
-        publisher_id: "release@google.com".to_string(),
-        ..Default::default()
-    };
+    let isolate_identities = vec![IsolateIdentity::new("encrypted-zone", "release@google.com")];
     let config = mtls::mtls::EzMtlsManagerConfig {
         mtls_key_path: key_path.clone(),
         csr_path: csr_path.clone(),
         proxy_address: server_addr.clone(),
-        ez_manifest,
+        isolate_identities,
     };
     let server_manager =
         EzMtlsManager::build(config.clone()).await.expect("Failed to initialize server manager");
@@ -261,18 +365,13 @@ async fn test_boring_tls_stream_duplex() {
             .unwrap();
     });
 
-    // Create a fake EZ manifest.
-    let ez_manifest = EzManifest {
-        isolate_name: "encrypted-zone".to_string(),
-        publisher_id: "release@google.com".to_string(),
-        ..Default::default()
-    };
+    let isolate_identities = vec![IsolateIdentity::new("encrypted-zone", "release@google.com")];
 
     let config = mtls::mtls::EzMtlsManagerConfig {
         mtls_key_path: key_path.clone(),
         csr_path: csr_path.clone(),
         proxy_address: server_addr.clone(),
-        ez_manifest,
+        isolate_identities: isolate_identities.clone(),
     };
     // Create a mTLS manager to fetch the certificates from the mock server and load certificates from testdata.
     let server_manager =
@@ -366,17 +465,13 @@ async fn create_test_context() -> TestContext {
             .unwrap();
     });
 
-    let ez_manifest = manifest_proto::enforcer::v1::EzManifest {
-        isolate_name: "encrypted-zone".to_string(),
-        publisher_id: "release@google.com".to_string(),
-        ..Default::default()
-    };
+    let isolate_identities = vec![IsolateIdentity::new("encrypted-zone", "release@google.com")];
 
     let config = mtls::mtls::EzMtlsManagerConfig {
         mtls_key_path: key_path.clone(),
         csr_path: csr_path.clone(),
         proxy_address: server_addr.clone(),
-        ez_manifest,
+        isolate_identities,
     };
 
     let server_manager = EzMtlsManager::build(config.clone()).await.unwrap();

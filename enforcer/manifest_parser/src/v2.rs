@@ -51,11 +51,29 @@ pub struct WorkloadManifests {
     pub opaque_isolate_manifest: Option<OpaqueIsolateManifest>,
 }
 
+/// Represents the identity of an isolate for mTLS and routing configuration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IsolateIdentity {
+    pub isolate_name: String,
+    pub publisher_id: String,
+}
+
+impl IsolateIdentity {
+    pub fn new(isolate_name: impl Into<String>, publisher_id: impl Into<String>) -> Self {
+        Self { isolate_name: isolate_name.into(), publisher_id: publisher_id.into() }
+    }
+}
+
 impl SetupManifest {
+    /// Creates a new [`SetupManifest`] from an in-memory manifest proto.
+    pub fn new(setup_isolate_manifest: SetupIsolateManifest) -> Self {
+        Self { setup_isolate_manifest }
+    }
+
     /// Loads and parses the setup isolate manifest from a JSON file path.
     pub fn load_from_path(setup_path: impl AsRef<Path>) -> Result<Self> {
         let setup_isolate_manifest = parse_setup_isolate_manifest(setup_path)?;
-        Ok(Self { setup_isolate_manifest })
+        Ok(Self::new(setup_isolate_manifest))
     }
 
     /// Converts the setup isolate manifest into a [`ParsedIsolate`].
@@ -65,25 +83,23 @@ impl SetupManifest {
         )
     }
 
-    /// Extracts `(isolate_name, publisher_id)` for the setup isolate descriptor.
-    pub fn extract_sni_params(&self) -> Option<(&str, &str)> {
+    /// Extracts [`IsolateIdentity`] for the setup isolate descriptor.
+    pub fn extract_sni_params(&self) -> IsolateIdentity {
         self.setup_isolate_manifest
             .setup_isolate_descriptor
             .as_ref()
-            .map(|d| (d.isolate_name.as_str(), d.publisher_id.as_str()))
+            .map(|d| IsolateIdentity::new(d.isolate_name.clone(), d.publisher_id.clone()))
+            .expect("setup_isolate_descriptor must be present in SetupManifest")
     }
 }
 
 impl WorkloadManifests {
-    /// Loads and parses workload (ratified and opaque) isolate manifests from file paths.
-    pub fn load_from_paths(
-        ratified_path: Option<impl AsRef<Path>>,
-        opaque_path: Option<impl AsRef<Path>>,
-    ) -> Result<Self> {
-        let ratified = ratified_path.map(parse_ratified_isolate_manifest).transpose()?;
-        let opaque = opaque_path.map(parse_opaque_isolate_manifest).transpose()?;
-
-        Ok(Self { ratified_isolate_manifest: ratified, opaque_isolate_manifest: opaque })
+    /// Creates a new [`WorkloadManifests`] container from in-memory manifest protos.
+    pub fn new(
+        ratified_isolate_manifest: Option<RatifiedIsolateManifest>,
+        opaque_isolate_manifest: Option<OpaqueIsolateManifest>,
+    ) -> Self {
+        Self { ratified_isolate_manifest, opaque_isolate_manifest }
     }
 
     /// Flattens workload descriptors into a sequence of [`ParsedIsolate`]s.
@@ -103,25 +119,28 @@ impl WorkloadManifests {
         ratified_iter.chain(opaque_iter).collect()
     }
 
-    /// Extracts `(isolate_name, publisher_id)` pairs across workload descriptors for mTLS SNI configuration.
-    pub fn extract_sni_params(&self) -> Vec<(&str, &str)> {
+    /// Extracts [`IsolateIdentity`] entries across workload descriptors for mTLS SNI configuration.
+    pub fn extract_sni_params(&self) -> Vec<IsolateIdentity> {
         let ratified_iter = self
             .ratified_isolate_manifest
             .iter()
             .flat_map(|m| &m.ratified_isolate_descriptors)
-            .map(|d| (d.isolate_name.as_str(), d.publisher_id.as_str()));
+            .map(|d| IsolateIdentity::new(d.isolate_name.clone(), d.publisher_id.clone()));
 
         let opaque_iter = self
             .opaque_isolate_manifest
             .iter()
             .flat_map(|m| &m.opaque_isolate_descriptors)
-            .map(|d| (d.isolate_name.as_str(), d.publisher_id.as_str()));
+            .map(|d| IsolateIdentity::new(d.isolate_name.clone(), d.publisher_id.clone()));
 
         ratified_iter.chain(opaque_iter).collect()
     }
 }
 
-fn parse_setup_isolate_manifest(manifest_path: impl AsRef<Path>) -> Result<SetupIsolateManifest> {
+/// Parses a setup isolate manifest from a JSON file path.
+pub fn parse_setup_isolate_manifest(
+    manifest_path: impl AsRef<Path>,
+) -> Result<SetupIsolateManifest> {
     let path = manifest_path.as_ref();
     let json_string = read_to_string(path).with_context(|| {
         format!("couldn't open setup manifest Json file at: {}", path.display())
@@ -138,7 +157,8 @@ fn parse_setup_isolate_manifest(manifest_path: impl AsRef<Path>) -> Result<Setup
     Ok(manifest)
 }
 
-fn parse_ratified_isolate_manifest(
+/// Parses a ratified isolate manifest from a JSON file path.
+pub fn parse_ratified_isolate_manifest(
     manifest_path: impl AsRef<Path>,
 ) -> Result<RatifiedIsolateManifest> {
     let path = manifest_path.as_ref();
@@ -152,7 +172,10 @@ fn parse_ratified_isolate_manifest(
     )
 }
 
-fn parse_opaque_isolate_manifest(manifest_path: impl AsRef<Path>) -> Result<OpaqueIsolateManifest> {
+/// Parses an opaque isolate manifest from a JSON file path.
+pub fn parse_opaque_isolate_manifest(
+    manifest_path: impl AsRef<Path>,
+) -> Result<OpaqueIsolateManifest> {
     let path = manifest_path.as_ref();
     let json_string = read_to_string(path).with_context(|| {
         format!("couldn't open opaque manifest Json file at: {}", path.display())

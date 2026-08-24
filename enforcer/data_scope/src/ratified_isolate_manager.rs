@@ -187,7 +187,10 @@ impl RatifiedIsolateManager {
         &self,
         _: GetIsolateScopeRequest,
     ) -> Result<GetIsolateScopeResponse, DataScopeError> {
-        Ok(GetIsolateScopeResponse { current_scope: DataScopeType::Unspecified })
+        Ok(GetIsolateScopeResponse {
+            current_scope: DataScopeType::Unspecified,
+            sensitive_session_count: None,
+        })
     }
 
     /// Retrieves a reference to the set of Isolates for a given binary index.

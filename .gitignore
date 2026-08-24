@@ -26,3 +26,7 @@ docker-buildx*
 coverage.log
 # Manual testing files
 manual_testing/**
+# Licenses bep.json
+bep/enforcer_enforcer_rootfs.tar/bep.json
+# Licenses output
+licenses_output/**

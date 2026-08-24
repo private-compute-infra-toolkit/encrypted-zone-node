@@ -177,6 +177,7 @@ rust_library(
     visibility = ["//visibility:public"],
     deps = [
         "//enforcer/grpc_connector",
+        "//enforcer/manifest_parser",
         "//enforcer/v1:ez_mtls_rust",
         "//enforcer/v1:manifest_rust",
         "@crates//:anyhow",
@@ -199,13 +200,16 @@ rust_test(
         "test/testdata/leaf.der",
         "test/testdata/root.der",
     ],
-    data = glob(["test/testdata/*"]),
+    data = glob(["test/testdata/*"]) + [
+        "//enforcer/manifest_parser:testdata",
+    ],
     deps = [
         ":inbound_ez_to_ez_handler",
         ":mtls",
         ":outbound_ez_to_ez_client",
         ":outbound_ez_to_ez_handler",
         "//enforcer/junction:junction_test_utils",
+        "//enforcer/manifest_parser",
         "//enforcer/metrics:metrics_test_utils",
         "//enforcer/v1:enforcer_rust",
         "//enforcer/v1:ez_mtls_rust",
