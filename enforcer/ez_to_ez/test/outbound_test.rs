@@ -75,9 +75,13 @@ impl EzToEzApi for FakeEzToEzProxy {
     ) -> Result<Response<Self::EzStreamingCallStream>, Status> {
         let mut in_stream = request.into_inner();
         let (tx, rx) = mpsc::channel(10);
+        let delay = self.response_delay;
 
         tokio::spawn(async move {
             while let Some(result) = in_stream.next().await {
+                if let Some(d) = delay {
+                    tokio::time::sleep(d).await;
+                }
                 match result {
                     Ok(req) => {
                         let resp = EzCallResponse {
@@ -88,10 +92,10 @@ impl EzToEzApi for FakeEzToEzProxy {
                                 .map(|m| m.extensions)
                                 .unwrap_or_default(),
                         };
-                        tx.send(Ok(resp)).await.unwrap();
+                        let _ = tx.send(Ok(resp)).await;
                     }
                     Err(e) => {
-                        tx.send(Err(e)).await.unwrap();
+                        let _ = tx.send(Err(e)).await;
                     }
                 }
             }
@@ -225,7 +229,7 @@ async fn test_outbound_streaming_flow() {
 
     let (local_to_outbound, from_local_rx) = mpsc::channel(10);
     let mut outbound_to_local =
-        handler.remote_streaming_connect(None, from_local_rx).await.unwrap();
+        handler.remote_streaming_connect(None, from_local_rx, None).await.unwrap();
 
     let initial_request = create_test_request(Some(first_payload));
     local_to_outbound.send(initial_request).await.unwrap();

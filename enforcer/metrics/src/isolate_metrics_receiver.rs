@@ -71,7 +71,8 @@ pub struct IsolateMetricsReceiver {
     /// List of allowed metric prefixes to their expected policies
     /// Strings store here will have their trailing * stripped
     prefix_metrics: Vec<(String, MetricPolicy)>,
-    extra_attributes: Vec<KeyValue>,
+    resource_attributes: Vec<KeyValue>,
+    scope_attributes: Vec<KeyValue>,
     client: Option<MetricsServiceClient<Channel>>,
     disable_filtering: bool,
 }
@@ -118,17 +119,18 @@ impl IsolateMetricsReceiver {
             None
         };
 
-        let extra_attributes = build_isolate_attributes(
+        let resource_attributes = build_isolate_resource_attributes(
             &config.isolate_name,
             &config.publisher_id,
-            config.is_ratified,
             &config.isolate_instance_id,
         );
+        let scope_attributes = build_isolate_scope_attributes(config.is_ratified);
 
         Ok(Self {
             exact_metrics,
             prefix_metrics,
-            extra_attributes,
+            resource_attributes,
+            scope_attributes,
             client,
             disable_filtering: config.disable_filtering,
         })
@@ -179,7 +181,10 @@ impl IsolateMetricsReceiver {
         }
     }
 
-    /// Appends identity and metadata attributes to each metric's datapoints.
+    /// Enriches metrics by adding isolate resource attributes (ez_isolate_name,
+    /// ez_publisher_id, ez_isolate_instance_id) to resource.attributes and runtime
+    /// metadata (ez_component_name, ez_isolate_type, ez_enforcer_version) to
+    /// scope.attributes, while purging any client-spoofed identity attributes.
     pub fn enrich_metrics(&self, request: &mut ExportMetricsServiceRequest) {
         let is_identity_attr = |key: &str| {
             matches!(
@@ -194,14 +199,14 @@ impl IsolateMetricsReceiver {
         };
 
         for resource_metrics in &mut request.resource_metrics {
-            if let Some(ref mut resource) = resource_metrics.resource {
-                resource.attributes.retain(|attr| !is_identity_attr(&attr.key));
-            }
+            let resource = resource_metrics.resource.get_or_insert_with(Default::default);
+            resource.attributes.retain(|attr| !is_identity_attr(&attr.key));
+            resource.attributes.extend_from_slice(&self.resource_attributes);
 
             for scope_metrics in &mut resource_metrics.scope_metrics {
                 let scope = scope_metrics.scope.get_or_insert_with(Default::default);
                 scope.attributes.retain(|attr| !is_identity_attr(&attr.key));
-                scope.attributes.extend_from_slice(&self.extra_attributes);
+                scope.attributes.extend_from_slice(&self.scope_attributes);
             }
         }
     }
@@ -309,6 +314,53 @@ pub fn build_isolate_attributes(
     isolate_instance_id: &str,
 ) -> Vec<KeyValue> {
     get_isolate_attribute_data(isolate_name, publisher_id, is_ratified, isolate_instance_id)
+        .into_iter()
+        .map(|(k, v)| make_string_attribute(k, v))
+        .collect()
+}
+
+/// Returns the isolate-level resource attributes (`ez_isolate_name`, `ez_publisher_id`,
+/// `ez_isolate_instance_id`) representing the isolate entity in Monarch root labels.
+pub fn get_isolate_resource_attribute_data(
+    isolate_name: &str,
+    publisher_id: &str,
+    isolate_instance_id: &str,
+) -> Vec<(&'static str, std::borrow::Cow<'static, str>)> {
+    vec![
+        ("ez_isolate_name", isolate_name.to_string().into()),
+        ("ez_publisher_id", publisher_id.to_string().into()),
+        ("ez_isolate_instance_id", isolate_instance_id.to_string().into()),
+    ]
+}
+
+/// Builds OpenTelemetry resource attributes for an isolate entity.
+pub fn build_isolate_resource_attributes(
+    isolate_name: &str,
+    publisher_id: &str,
+    isolate_instance_id: &str,
+) -> Vec<KeyValue> {
+    get_isolate_resource_attribute_data(isolate_name, publisher_id, isolate_instance_id)
+        .into_iter()
+        .map(|(k, v)| make_string_attribute(k, v))
+        .collect()
+}
+
+/// Returns the runtime instrumentation scope attributes (`ez_component_name`,
+/// `ez_isolate_type`, `ez_enforcer_version`).
+pub fn get_isolate_scope_attribute_data(
+    is_ratified: bool,
+) -> Vec<(&'static str, std::borrow::Cow<'static, str>)> {
+    let isolate_type_str = if is_ratified { "ratified" } else { "opaque" };
+    vec![
+        ("ez_component_name", "isolate".into()),
+        ("ez_isolate_type", isolate_type_str.into()),
+        ("ez_enforcer_version", crate::get_enforcer_version().into()),
+    ]
+}
+
+/// Builds OpenTelemetry scope attributes for runtime instrumentation metadata.
+pub fn build_isolate_scope_attributes(is_ratified: bool) -> Vec<KeyValue> {
+    get_isolate_scope_attribute_data(is_ratified)
         .into_iter()
         .map(|(k, v)| make_string_attribute(k, v))
         .collect()

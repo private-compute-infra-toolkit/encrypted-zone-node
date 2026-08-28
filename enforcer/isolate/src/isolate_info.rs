@@ -13,7 +13,7 @@
 // limitations under the License.
 
 pub mod instance_id;
-pub use instance_id::InstanceIdGenerator;
+pub use instance_id::{InstanceId, InstanceIdGenerator};
 
 use anyhow::{ensure, Ok, Result};
 use derivative::Derivative;

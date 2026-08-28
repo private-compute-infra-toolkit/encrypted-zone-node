@@ -273,6 +273,7 @@ async fn test_metrics_server_reception() {
                 isolate_name: TEST_ISOLATE_NAME.to_string(),
                 publisher_id: TEST_PUBLISHER_ID.to_string(),
             },
+            isolate_instance_id: "1".to_string(),
         })
         .await;
 

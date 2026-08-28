@@ -26,6 +26,7 @@ rust_library(
         "@crates//:anyhow",
         "@crates//:once_cell",
         "@crates//:rand",
+        "@crates//:uuid",
     ],
 )
 
@@ -349,6 +350,7 @@ rust_test(
     visibility = ["//visibility:public"],
     deps = [
         ":isolate_info",
+        "@crates//:uuid",
     ],
 )
 

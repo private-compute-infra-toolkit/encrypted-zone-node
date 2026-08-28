@@ -12,13 +12,41 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt;
+use std::ops::Deref;
+
+/// An identifier representing a specific isolate instance.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct InstanceId(String);
+
+impl Deref for InstanceId {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl fmt::Display for InstanceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl From<InstanceId> for String {
+    fn from(id: InstanceId) -> Self {
+        id.0
+    }
+}
+
 /// Generator for unique, collision-resistant isolate instance IDs.
 #[derive(Debug, Default)]
 pub struct InstanceIdGenerator;
 
 impl InstanceIdGenerator {
     /// Generates a unique, collision-resistant identifier for an isolate instance.
-    pub fn generate() -> String {
-        "1".to_string()
+    pub fn generate() -> InstanceId {
+        InstanceId(uuid::Uuid::new_v4().to_string())
     }
 }

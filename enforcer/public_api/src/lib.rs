@@ -25,7 +25,7 @@ use ez_service_proto::enforcer::v1::{
     CallParameters, CallRequest, CallResponse, EncryptedField, GetHealthReportRequest,
     GetHealthReportResponse, SessionMetadata,
 };
-use grpc_connector::try_parse_grpc_timeout;
+use grpc_connector::get_grpc_timeout_or_log;
 use health_manager::HealthManager;
 use interceptor::{Interceptor, RequestType};
 use junction::error::IsolateStatusCode;
@@ -98,7 +98,7 @@ impl EzPublicApi for EzPublicApiService {
         });
         let _ = tracing::Span::current().set_parent(parent_context);
 
-        let timeout = try_parse_grpc_timeout(request.metadata()).unwrap_or(None);
+        let timeout = get_grpc_timeout_or_log(request.metadata());
         let deadline = timeout.and_then(|t| Instant::now().checked_add(t));
         tracing::debug!("after parsing timeout");
 
@@ -159,6 +159,8 @@ impl EzPublicApi for EzPublicApiService {
         &self,
         request: Request<Streaming<CallRequest>>,
     ) -> Result<Response<Self::StreamCallStream>, Status> {
+        let timeout = get_grpc_timeout_or_log(request.metadata());
+
         let call_request_stream = request.into_inner();
 
         let (api_to_client_response_tx, api_to_client_response_rx) =
@@ -166,7 +168,7 @@ impl EzPublicApi for EzPublicApiService {
         let api_to_client_response_tx_clone = api_to_client_response_tx.clone();
         // new bi-di stream created for each stream_call
         let isolate_junction_channel =
-            self.isolate_junction.stream_invoke_isolate(None, true).await;
+            self.isolate_junction.stream_invoke_isolate(None, true, timeout).await;
 
         // Wrap the internal junction receiver to observe responses before processing
         let internal_response_stream =

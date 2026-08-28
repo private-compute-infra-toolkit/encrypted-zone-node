@@ -1,0 +1,12 @@
+{
+  "opaque_isolate_descriptors": [
+    {
+      "isolate_type": {
+        "isolate_name": "ezpkg://default.opaque.com",
+        "publisher_id": "default_domain"
+      },
+      "package_filename": "enforcer/container/test_data/test_binary.tar",
+      "binary_filename": "/usr/local/bin/entrypoint.sh"
+    }
+  ]
+}

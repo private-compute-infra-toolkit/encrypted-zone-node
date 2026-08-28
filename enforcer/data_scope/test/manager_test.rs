@@ -87,6 +87,7 @@ async fn test_get_isolate_success() -> Result<(), Box<dyn std::error::Error>> {
         add_isolate_request.allowed_data_scope_type = DataScopeType::Public;
         let isolate_id = add_isolate_request.isolate_id;
         data_scope_requester.add_isolate(add_isolate_request).await?;
+        data_scope_requester.activate_isolate(isolate_id).await?;
         let get_isolate_request = create_get_isolate_request(is_ratified);
         let get_isolate_result = data_scope_requester.get_isolate(get_isolate_request).await?;
         assert_eq!(get_isolate_result.isolate_id, isolate_id);
@@ -101,7 +102,9 @@ async fn test_get_isolate_invalid_service_index() -> Result<(), Box<dyn std::err
     for is_ratified in [true, false] {
         let mut add_isolate_request: AddIsolateRequest = create_add_isolate_request(is_ratified);
         add_isolate_request.allowed_data_scope_type = DataScopeType::Public;
+        let isolate_id = add_isolate_request.isolate_id;
         data_scope_requester.add_isolate(add_isolate_request).await?;
+        data_scope_requester.activate_isolate(isolate_id).await?;
         let mut get_isolate_request = create_get_isolate_request(is_ratified);
         get_isolate_request.binary_services_index = random_binary_service_index;
         assert!(matches!(
@@ -118,7 +121,9 @@ async fn test_get_isolate_no_matching_isolates() -> Result<(), Box<dyn std::erro
     for is_ratified in [true, false] {
         let mut add_isolate_request: AddIsolateRequest = create_add_isolate_request(is_ratified);
         add_isolate_request.allowed_data_scope_type = DataScopeType::Public;
+        let isolate_id = add_isolate_request.isolate_id;
         data_scope_requester.add_isolate(add_isolate_request).await?;
+        data_scope_requester.activate_isolate(isolate_id).await?;
         let mut get_isolate_request = create_get_isolate_request(is_ratified);
         get_isolate_request.data_scope_type = DataScopeType::UserPrivate;
         assert!(matches!(
@@ -175,7 +180,9 @@ async fn test_get_isolate_invalid_data_scope_type() -> Result<(), Box<dyn std::e
     for is_ratified in [true, false] {
         let mut add_isolate_request: AddIsolateRequest = create_add_isolate_request(is_ratified);
         add_isolate_request.allowed_data_scope_type = DataScopeType::Public;
+        let isolate_id = add_isolate_request.isolate_id;
         data_scope_requester.add_isolate(add_isolate_request).await?;
+        data_scope_requester.activate_isolate(isolate_id).await?;
         let mut get_isolate_request = create_get_isolate_request(is_ratified);
         get_isolate_request.data_scope_type = DataScopeType::MultiUserPrivate;
         assert!(matches!(
@@ -199,9 +206,34 @@ async fn test_freeze_isolate() -> Result<(), Box<dyn std::error::Error>> {
     let add_isolate_request: AddIsolateRequest = create_add_isolate_request(false);
     let isolate_id = add_isolate_request.isolate_id;
     data_scope_requester.add_isolate(add_isolate_request).await?;
+    data_scope_requester.activate_isolate(isolate_id).await?;
 
     let freeze_isolate_request = create_freeze_isolate_request(isolate_id);
     data_scope_requester.freeze_isolate_scope(freeze_isolate_request).await?;
+
+    // Attempting to validate a stricter scope should fail as the max scope was clamped
+    let validate_stricter_request =
+        create_validate_isolate_request(isolate_id, DataScopeType::DomainOwned);
+    let validation_result =
+        data_scope_requester.validate_isolate_scope(validate_stricter_request).await;
+    assert!(matches!(validation_result, Err(DataScopeError::DisallowedByManifest)));
+
+    // Validating current scope should still succeed
+    let validate_same_request = create_validate_isolate_request(isolate_id, DataScopeType::Public);
+    assert!(data_scope_requester.validate_isolate_scope(validate_same_request).await.is_ok());
+
+    // Getting an isolate for a stricter scope should not match this frozen isolate
+    let mut get_stricter_request = create_get_isolate_request(false);
+    get_stricter_request.data_scope_type = DataScopeType::DomainOwned;
+    let get_result = data_scope_requester.get_isolate(get_stricter_request).await;
+    assert!(matches!(get_result, Err(DataScopeError::NoMatchingIsolates)));
+
+    // Getting an isolate for the frozen scope should succeed
+    let mut get_same_request = create_get_isolate_request(false);
+    get_same_request.data_scope_type = DataScopeType::Public;
+    let get_result = data_scope_requester.get_isolate(get_same_request).await?;
+    assert_eq!(get_result.isolate_id, isolate_id);
+
     Ok(())
 }
 
@@ -261,6 +293,7 @@ async fn test_validate_isolate_scope_less_strict_than_current(
     add_isolate_request.allowed_data_scope_type = DataScopeType::UserPrivate;
     let isolate_id = add_isolate_request.isolate_id;
     assert!(data_scope_requester.add_isolate(add_isolate_request).await.is_ok());
+    data_scope_requester.activate_isolate(isolate_id).await?;
 
     // Validate with a less strict scope
     let validate_request = create_validate_isolate_request(isolate_id, DataScopeType::Public);
@@ -284,6 +317,7 @@ async fn test_validate_isolate_scope_valid_change() -> Result<(), Box<dyn std::e
     let add_isolate_request = create_add_isolate_request(false); //[PUBLIC, USER]
     let isolate_id = add_isolate_request.isolate_id;
     assert!(data_scope_requester.add_isolate(add_isolate_request).await.is_ok());
+    data_scope_requester.activate_isolate(isolate_id).await?;
 
     // Validate with a stricter scope that is allowed
     let validate_request = create_validate_isolate_request(isolate_id, DataScopeType::DomainOwned);
@@ -338,6 +372,7 @@ async fn test_isolate_retires_when_sensitive_session_threshold_is_reached(
     let add_isolate_request = create_add_isolate_request(false);
     let isolate_id = add_isolate_request.isolate_id;
     data_scope_requester.add_isolate(add_isolate_request).await?;
+    data_scope_requester.activate_isolate(isolate_id).await?;
 
     let get_sensitive_isolate_request = || GetIsolateRequest {
         binary_services_index: *TEST_BINARY_SERVICES_INDEX,
@@ -366,6 +401,12 @@ async fn test_isolate_retires_when_sensitive_session_threshold_is_reached(
         "Isolate should be retiring on its final allowed sensitive use"
     );
 
+    // While retiring, the Isolate's current scope and sensitive count should still be retrievable.
+    let scope_response =
+        data_scope_requester.get_isolate_scope(GetIsolateScopeRequest { isolate_id }).await?;
+    assert_eq!(scope_response.current_scope, DataScopeType::UserPrivate);
+    assert_eq!(scope_response.sensitive_session_count, Some(TEST_SENSITIVE_SESSION_THRESHOLD));
+
     // After being retired, the Isolate should no longer be available for any new requests.
     let get_isolate_result_3 =
         data_scope_requester.get_isolate(get_sensitive_isolate_request()).await;
@@ -381,6 +422,7 @@ async fn test_isolate_retires_when_already_removed() -> Result<(), Box<dyn std::
     let add_isolate_request = create_add_isolate_request(false);
     let isolate_id = add_isolate_request.isolate_id;
     data_scope_requester.add_isolate(add_isolate_request).await?;
+    data_scope_requester.activate_isolate(isolate_id).await?;
 
     let get_sensitive_isolate_request = || GetIsolateRequest {
         binary_services_index: *TEST_BINARY_SERVICES_INDEX,
@@ -408,6 +450,7 @@ async fn test_non_sensitive_requests_do_not_retire_isolate(
     let add_isolate_request = create_add_isolate_request(false);
     let isolate_id = add_isolate_request.isolate_id;
     data_scope_requester.add_isolate(add_isolate_request).await?;
+    data_scope_requester.activate_isolate(isolate_id).await?;
 
     // Call it multiple times with a non-sensitive scope, more than the sensitive threshold.
     for _ in 0..TEST_SENSITIVE_SESSION_THRESHOLD + 5 {
@@ -643,6 +686,7 @@ async fn test_get_isolate_scope_sensitive_session_count() -> Result<(), Box<dyn 
     add_isolate_request.allowed_data_scope_type = DataScopeType::UserPrivate;
     let isolate_id = add_isolate_request.isolate_id;
     data_scope_requester.add_isolate(add_isolate_request).await?;
+    data_scope_requester.activate_isolate(isolate_id).await?;
 
     let get_scope_request = GetIsolateScopeRequest { isolate_id };
     let response = data_scope_requester.get_isolate_scope(get_scope_request).await?;
@@ -696,12 +740,46 @@ async fn test_get_isolate_scope_unknown_isolate() -> Result<(), Box<dyn std::err
 }
 
 #[tokio::test]
+async fn test_get_isolate_scope_works_before_activation() -> Result<(), Box<dyn std::error::Error>>
+{
+    let data_scope_requester = DataScopeRequester::new(u64::MAX);
+
+    for is_ratified in [false, true] {
+        let add_isolate_request = create_add_isolate_request(is_ratified);
+        let isolate_id = add_isolate_request.isolate_id;
+        data_scope_requester.add_isolate(add_isolate_request).await?;
+
+        // get_isolate_scope should work immediately during isolate startup
+        let scope_resp =
+            data_scope_requester.get_isolate_scope(GetIsolateScopeRequest { isolate_id }).await?;
+        if !is_ratified {
+            assert_eq!(scope_resp.current_scope, DataScopeType::Public);
+        }
+
+        // But get_isolate (inbound traffic routing) must NOT route to unready isolate
+        let get_isolate_req = create_get_isolate_request(is_ratified);
+        assert!(matches!(
+            data_scope_requester.get_isolate(get_isolate_req).await,
+            Err(DataScopeError::NoMatchingIsolates)
+        ));
+
+        // Once activated (Ready + Channel Connected), get_isolate should succeed
+        data_scope_requester.activate_isolate(isolate_id).await?;
+        let get_isolate_req = create_get_isolate_request(is_ratified);
+        let resp = data_scope_requester.get_isolate(get_isolate_req).await?;
+        assert_eq!(resp.isolate_id, isolate_id);
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_parallel_get_isolate_requests() -> Result<(), Box<dyn std::error::Error>> {
     let data_scope_requester = DataScopeRequester::new(u64::MAX);
     // Add multiple Isolates to ensure we test contention.
     let add_isolate_request = create_add_isolate_request(false);
     let isolate_id = add_isolate_request.isolate_id;
     data_scope_requester.add_isolate(add_isolate_request).await?;
+    data_scope_requester.activate_isolate(isolate_id).await?;
 
     let num_requests = 100;
     let mut tasks = Vec::with_capacity(num_requests);
@@ -821,6 +899,7 @@ async fn test_lower_data_scope_data_allowed_to_stricter_data_scope_isolate(
     add_req_1.allowed_data_scope_type = DataScopeType::UserPrivate;
     let isolate_id_1 = add_req_1.isolate_id;
     data_scope_requester.add_isolate(add_req_1).await?;
+    data_scope_requester.activate_isolate(isolate_id_1).await?;
 
     // Verify initial scope is DomainOwned
     let scope_resp = data_scope_requester
@@ -870,6 +949,7 @@ async fn test_lower_data_scope_data_allowed_to_stricter_data_scope_isolate(
     add_req_2.allowed_data_scope_type = DataScopeType::DomainOwned;
     let _isolate_id_2 = add_req_2.isolate_id;
     data_scope_requester.add_isolate(add_req_2).await?;
+    data_scope_requester.activate_isolate(_isolate_id_2).await?;
 
     // Isolate 1 is now in UserPrivate. Isolate 2 is in Public.
     // Request UserPrivate. Since only Isolate 1 is UserPrivate, it should return Isolate 1.
@@ -895,6 +975,88 @@ async fn test_lower_data_scope_data_allowed_to_stricter_data_scope_isolate(
     get_req_user_3.data_scope_type = DataScopeType::UserPrivate;
     let result = data_scope_requester.get_isolate(get_req_user_3).await;
     assert!(matches!(result, Err(DataScopeError::NoMatchingIsolates)));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_retiring_isolate_validation_semantics() -> Result<(), Box<dyn std::error::Error>> {
+    let data_scope_requester = DataScopeRequester::new(1);
+
+    let mut add_isolate_request = create_add_isolate_request(false);
+    add_isolate_request.current_data_scope_type = DataScopeType::Public;
+    add_isolate_request.allowed_data_scope_type = DataScopeType::MultiUserPrivate;
+    let isolate_id = add_isolate_request.isolate_id;
+    data_scope_requester.add_isolate(add_isolate_request).await?;
+    data_scope_requester.activate_isolate(isolate_id).await?;
+
+    // Use for a UserPrivate session, which reaches the threshold and retires the isolate.
+    let mut get_req = create_get_isolate_request(false);
+    get_req.data_scope_type = DataScopeType::UserPrivate;
+    let get_res = data_scope_requester.get_isolate(get_req).await?;
+    assert_eq!(get_res.isolate_id, isolate_id);
+    assert_eq!(get_res.new_state, Some(IsolateState::Retiring));
+
+    // Validating at <= current_data_scope (UserPrivate, DomainOwned, Public) should succeed
+    let validate_user = create_validate_isolate_request(isolate_id, DataScopeType::UserPrivate);
+    assert!(data_scope_requester.validate_isolate_scope(validate_user).await.is_ok());
+
+    let validate_domain = create_validate_isolate_request(isolate_id, DataScopeType::DomainOwned);
+    assert!(data_scope_requester.validate_isolate_scope(validate_domain).await.is_ok());
+
+    let validate_public = create_validate_isolate_request(isolate_id, DataScopeType::Public);
+    assert!(data_scope_requester.validate_isolate_scope(validate_public).await.is_ok());
+
+    // Validating at > current_data_scope (MultiUserPrivate) on a retiring isolate should succeed
+    // when within the allowed scope limit.
+    let validate_multi_user =
+        create_validate_isolate_request(isolate_id, DataScopeType::MultiUserPrivate);
+    assert!(data_scope_requester.validate_isolate_scope(validate_multi_user).await.is_ok());
+
+    // Verify scope was updated to MultiUserPrivate
+    let scope_res =
+        data_scope_requester.get_isolate_scope(GetIsolateScopeRequest { isolate_id }).await?;
+    assert_eq!(scope_res.current_scope, DataScopeType::MultiUserPrivate);
+
+    // Freeze scope on the retiring isolate
+    let freeze_req = create_freeze_isolate_request(isolate_id);
+    assert!(data_scope_requester.freeze_isolate_scope(freeze_req).await.is_ok());
+
+    // Validation at current scope still succeeds after freeze
+    let validate_user_after_freeze =
+        create_validate_isolate_request(isolate_id, DataScopeType::MultiUserPrivate);
+    assert!(data_scope_requester.validate_isolate_scope(validate_user_after_freeze).await.is_ok());
+
+    // Retiring isolate must NOT be re-added to the routing pool for any scope
+    for scope in [DataScopeType::Public, DataScopeType::DomainOwned, DataScopeType::UserPrivate] {
+        let mut req = create_get_isolate_request(false);
+        req.data_scope_type = scope;
+        let result = data_scope_requester.get_isolate(req).await;
+        assert!(
+            matches!(result, Err(DataScopeError::NoMatchingIsolates)),
+            "Retiring isolate must not be returned by get_isolate for scope {:?}",
+            scope
+        );
+    }
+
+    // A retiring isolate exceeding its allowed max scope must still fail
+    let mut add_isolate_req_limited = create_add_isolate_request(false);
+    add_isolate_req_limited.current_data_scope_type = DataScopeType::Public;
+    add_isolate_req_limited.allowed_data_scope_type = DataScopeType::UserPrivate;
+    let isolate_id_limited = add_isolate_req_limited.isolate_id;
+    data_scope_requester.add_isolate(add_isolate_req_limited).await?;
+    data_scope_requester.activate_isolate(isolate_id_limited).await?;
+
+    let mut get_req_limited = create_get_isolate_request(false);
+    get_req_limited.binary_services_index = isolate_id_limited.get_binary_services_index();
+    get_req_limited.data_scope_type = DataScopeType::UserPrivate;
+    let get_res_limited = data_scope_requester.get_isolate(get_req_limited).await?;
+    assert_eq!(get_res_limited.new_state, Some(IsolateState::Retiring));
+
+    let validate_exceeding =
+        create_validate_isolate_request(isolate_id_limited, DataScopeType::MultiUserPrivate);
+    let result_exceeding = data_scope_requester.validate_isolate_scope(validate_exceeding).await;
+    assert!(matches!(result_exceeding, Err(DataScopeError::DisallowedByManifest)));
 
     Ok(())
 }

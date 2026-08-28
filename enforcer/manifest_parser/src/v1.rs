@@ -24,7 +24,7 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use super::parser_util::parse_proto_message;
-use super::ParsedIsolate;
+use super::{IsolateKind, ParsedIsolate};
 
 const PROTO_DESCRIPTOR_V1_BYTES: &[u8] = include_bytes!(env!("MANIFEST_V1_DESCRIPTOR_SET_PATH"));
 
@@ -61,12 +61,36 @@ fn flatten_manifest_helper(ez_manifest: EzManifest, output: &mut Vec<ParsedIsola
                 flatten_manifest_helper(manifest, output)?;
             }
         }
-        ManifestType::BinaryManifest(binary_manifest) => {
+        ManifestType::BinaryManifest(manifest) => {
+            if manifest.number_of_isolates < 0 {
+                anyhow::bail!(
+                    "number_of_isolates cannot be negative, got {}",
+                    manifest.number_of_isolates
+                );
+            }
+            let kind = if manifest.is_ratified_isolate {
+                IsolateKind::Ratified {
+                    binary_filename: manifest.binary_filename,
+                    command_line_arguments: manifest.command_line_arguments,
+                    environment_variables: manifest.environment_variables,
+                    services_to_intercept: manifest.services_to_intercept,
+                }
+            } else {
+                IsolateKind::Opaque {
+                    binary_filename: manifest.binary_filename,
+                    command_line_arguments: manifest.command_line_arguments,
+                    environment_variables: manifest.environment_variables,
+                }
+            };
             output.push(ParsedIsolate {
                 isolate_name: ez_manifest.isolate_name,
                 publisher_id: ez_manifest.publisher_id,
                 package_filename: ez_manifest.package_filename,
-                binary_manifest,
+                number_of_isolates: manifest.number_of_isolates,
+                service_specs: manifest.service_specs,
+                ez_backend_dependencies: manifest.ez_backend_dependencies,
+                metrics_policy: manifest.metrics_policy,
+                kind,
             });
         }
         _ => anyhow::bail!("Provided ManifestType in EzManifest is not supported yet"),

@@ -25,7 +25,7 @@ use indexmap::set::IndexSet;
 use isolate_info::{BinaryServicesIndex, IsolateId};
 use metrics::histogram;
 use rand::Rng;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use tokio::sync::Mutex;
 
@@ -43,7 +43,7 @@ pub struct DataScopeManager {
 
 #[derive(Debug)]
 struct DataScopeManagerState {
-    // Map of Possible DataScope to Isolates
+    // Map of Possible DataScope to Isolates that are ready/active for inbound traffic routing
     available_scope_isolate_index:
         HashMap<BinaryServicesIndex, HashMap<DataScopeType, IndexSet<IsolateId>>>,
     // Map from Isolate instances to their current scope
@@ -54,6 +54,10 @@ struct DataScopeManagerState {
     isolate_max_scope_index: HashMap<IsolateId, DataScopeType>,
     // Tracks how many times an Isolate has been assigned to a sensitive session.
     sensitive_session_counts: HashMap<IsolateId, u64>,
+    // Tracks which isolates have been activated (Ready) for inbound routing.
+    active_isolates: HashSet<IsolateId>,
+    // Tracks Isolates that are retiring and should not be available for new requests.
+    retiring_isolates: HashSet<IsolateId>,
 }
 
 impl DataScopeManager {
@@ -65,6 +69,8 @@ impl DataScopeManager {
                 isolate_scope_index: HashMap::new(),
                 isolate_max_scope_index: HashMap::new(),
                 sensitive_session_counts: HashMap::new(),
+                active_isolates: HashSet::new(),
+                retiring_isolates: HashSet::new(),
             }),
             sensitive_session_threshold,
         }
@@ -90,6 +96,10 @@ impl DataScopeManager {
             ));
         }
 
+        if current_data_scope_type > allowed_data_scope_type {
+            return Err(DataScopeError::DisallowedByManifest);
+        }
+
         let mut state = self.state.lock().await;
 
         if state.isolate_scope_index.contains_key(&isolate_id) {
@@ -101,6 +111,29 @@ impl DataScopeManager {
 
         let _ = state.isolate_max_scope_index.insert(isolate_id, allowed_data_scope_type);
         let _ = state.isolate_scope_index.insert(isolate_id, current_data_scope_type);
+
+        Ok(())
+    }
+
+    /// Activates an Isolate in the [DataScopeManager] for inbound traffic routing.
+    ///
+    /// This is called when the Isolate reaches `IsolateState::Ready` and its gRPC channel is connected.
+    /// It inserts the Isolate into `available_scope_isolate_index` based on its current and allowed scopes.
+    pub async fn activate_isolate(&self, isolate_id: IsolateId) -> Result<(), DataScopeError> {
+        let mut state = self.state.lock().await;
+
+        let Some(&current_data_scope_type) = state.isolate_scope_index.get(&isolate_id) else {
+            return Err(DataScopeError::UnknownIsolateId);
+        };
+        let Some(&allowed_data_scope_type) = state.isolate_max_scope_index.get(&isolate_id) else {
+            return internal_error(isolate_id);
+        };
+        if state.active_isolates.contains(&isolate_id) {
+            return Err(DataScopeError::InternalError(format!(
+                "Isolate already active: {:?}",
+                isolate_id
+            )));
+        }
 
         let binary_services_index = isolate_id.get_binary_services_index();
         let scope_index =
@@ -116,10 +149,28 @@ impl DataScopeManager {
                 allowed_data_scope_type,
             );
         } else {
-            // current_data_scope_type > allowed_data_scope_type
             return Err(DataScopeError::DisallowedByManifest);
         }
 
+        state.active_isolates.insert(isolate_id);
+        Ok(())
+    }
+
+    fn retire_isolate_internal(
+        state: &mut DataScopeManagerState,
+        isolate_id: IsolateId,
+    ) -> Result<(), DataScopeError> {
+        if !state.isolate_scope_index.contains_key(&isolate_id) {
+            return Err(DataScopeError::UnknownIsolateId);
+        }
+
+        state.retiring_isolates.insert(isolate_id);
+        let binary_services_index = isolate_id.get_binary_services_index();
+        if let Some(scope_index) =
+            state.available_scope_isolate_index.get_mut(&binary_services_index)
+        {
+            remove_from_all_scope_index(scope_index, isolate_id);
+        }
         Ok(())
     }
 
@@ -148,14 +199,6 @@ impl DataScopeManager {
             return Err(DataScopeError::UnknownIsolateId);
         }
 
-        let binary_services_index = isolate_id.get_binary_services_index();
-        let scope_index_option =
-            state.available_scope_isolate_index.get_mut(&binary_services_index);
-        let Some(scope_index) = scope_index_option else {
-            // Ideally, should never happen.
-            return internal_error(isolate_id);
-        };
-
         let strictest_allowed_scope_option = state.isolate_max_scope_index.remove(&isolate_id);
         let Some(strictest_allowed_scope) = strictest_allowed_scope_option else {
             // Ideally, should never happen.
@@ -168,22 +211,33 @@ impl DataScopeManager {
             return internal_error(isolate_id);
         };
 
-        if current_data_scope == strictest_allowed_scope {
-            remove_from_single_scope_index(scope_index, isolate_id, current_data_scope);
-        } else if current_data_scope <= strictest_allowed_scope {
-            remove_from_to_scope_index(
-                scope_index,
-                isolate_id,
-                current_data_scope,
-                strictest_allowed_scope,
-            );
-        } else {
-            // Ideally, will never happen
-            // current_data_scope_type > allowed_data_scope_type
-            return internal_error(isolate_id);
+        let was_active = state.active_isolates.remove(&isolate_id);
+        if was_active {
+            let binary_services_index = isolate_id.get_binary_services_index();
+            let scope_index_option =
+                state.available_scope_isolate_index.get_mut(&binary_services_index);
+            let Some(scope_index) = scope_index_option else {
+                // Ideally, should never happen.
+                return internal_error(isolate_id);
+            };
+
+            if current_data_scope == strictest_allowed_scope {
+                remove_from_single_scope_index(scope_index, isolate_id, current_data_scope);
+            } else if current_data_scope <= strictest_allowed_scope {
+                remove_from_to_scope_index(
+                    scope_index,
+                    isolate_id,
+                    current_data_scope,
+                    strictest_allowed_scope,
+                );
+            } else {
+                // Ideally, will never happen
+                return internal_error(isolate_id);
+            }
         }
 
         state.sensitive_session_counts.remove(&isolate_id);
+        state.retiring_isolates.remove(&isolate_id);
         Ok(())
     }
 
@@ -265,10 +319,7 @@ impl DataScopeManager {
             *count_entry += 1;
 
             if *count_entry >= self.sensitive_session_threshold {
-                // Propagate internal errors up the chain
-                // Ideally remove Isolate should never fail because Get Isolate should not
-                // choose an Isolate that is already removed
-                Self::remove_isolate_internal(state, isolate_id)?;
+                Self::retire_isolate_internal(state, isolate_id)?;
                 return Ok(Some(IsolateState::Retiring));
             }
         }
@@ -293,23 +344,10 @@ impl DataScopeManager {
         let mut state_guard = self.state.lock().await;
         let state = &mut *state_guard;
 
-        let DataScopeManagerState {
-            available_scope_isolate_index,
-            isolate_scope_index,
-            isolate_max_scope_index,
-            ..
-        } = state;
-
-        let binary_services_index = isolate_id.get_binary_services_index();
-        let scope_index = available_scope_isolate_index
-            .get_mut(&binary_services_index)
-            .ok_or(DataScopeError::InvalidIsolateServiceIndex)?;
-
-        let Some(current_data_scope) = isolate_scope_index.get(&isolate_id).copied() else {
+        let Some(&current_data_scope) = state.isolate_scope_index.get(&isolate_id) else {
             return Err(DataScopeError::UnknownIsolateId);
         };
-        let Some(strictest_allowed_scope) = isolate_max_scope_index.get(&isolate_id).copied()
-        else {
+        let Some(&strictest_allowed_scope) = state.isolate_max_scope_index.get(&isolate_id) else {
             return internal_error(isolate_id);
         };
 
@@ -317,15 +355,27 @@ impl DataScopeManager {
             return Err(DataScopeError::DisallowedByManifest);
         }
 
-        if requested_scope >= current_data_scope {
-            change_isolate_scope(
-                scope_index,
-                isolate_scope_index,
-                isolate_id,
-                requested_scope,
-                current_data_scope,
-                strictest_allowed_scope,
-            );
+        if requested_scope > current_data_scope {
+            state.isolate_scope_index.insert(isolate_id, requested_scope);
+
+            if state.active_isolates.contains(&isolate_id)
+                && !state.retiring_isolates.contains(&isolate_id)
+            {
+                let binary_services_index = isolate_id.get_binary_services_index();
+                let scope_index = state
+                    .available_scope_isolate_index
+                    .get_mut(&binary_services_index)
+                    .ok_or(DataScopeError::InvalidIsolateServiceIndex)?;
+
+                change_isolate_scope(
+                    scope_index,
+                    &mut state.isolate_scope_index,
+                    isolate_id,
+                    requested_scope,
+                    current_data_scope,
+                    strictest_allowed_scope,
+                );
+            }
         }
         Ok(())
     }
@@ -341,19 +391,25 @@ impl DataScopeManager {
         let mut state_guard = self.state.lock().await;
         let state = &mut *state_guard;
 
-        let Some(current_data_scope) = state.isolate_max_scope_index.get(&req.isolate_id).copied()
+        let Some(current_data_scope) = state.isolate_scope_index.get(&req.isolate_id).copied()
         else {
             return Err(DataScopeError::UnknownIsolateId);
         };
 
-        let binary_services_index = req.isolate_id.get_binary_services_index();
-        let scope_index = state
-            .available_scope_isolate_index
-            .get_mut(&binary_services_index)
-            .ok_or(DataScopeError::InternalError("Scope index not found".to_string()))?;
-
         state.isolate_max_scope_index.insert(req.isolate_id, current_data_scope);
-        freeze_data_scope_index(scope_index, req.isolate_id, current_data_scope);
+
+        if state.active_isolates.contains(&req.isolate_id)
+            && !state.retiring_isolates.contains(&req.isolate_id)
+        {
+            let binary_services_index = req.isolate_id.get_binary_services_index();
+            let scope_index =
+                state
+                    .available_scope_isolate_index
+                    .get_mut(&binary_services_index)
+                    .ok_or(DataScopeError::InternalError("Scope index not found".to_string()))?;
+
+            freeze_data_scope_index(scope_index, req.isolate_id, current_data_scope);
+        }
         Ok(())
     }
 
@@ -364,7 +420,6 @@ impl DataScopeManager {
     ) -> Result<GetIsolateScopeResponse, DataScopeError> {
         let state = self.state.lock().await;
 
-        // TODO: Add support for retiring Isolates
         if let Some(current_scope) = state.isolate_scope_index.get(&req.isolate_id) {
             let sensitive_session_count =
                 state.sensitive_session_counts.get(&req.isolate_id).copied().or(Some(0));

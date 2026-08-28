@@ -126,6 +126,7 @@ impl ExternalProxyChannel for MockExternalProxy {
         &self,
         _: IsolateId,
         mut from_bridge_rx: Receiver<InvokeEzRequest>,
+        _timeout: Option<std::time::Duration>,
     ) -> Result<Receiver<Result<InvokeEzResponse, Status>>, ExternalProxyConnectorError> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
         let received_from_bridge_count = self.received_from_bridge_count.clone();
@@ -198,6 +199,7 @@ impl OutboundEzToEzClient for MockEzToEzOutboundHandler {
         &self,
         _first_request_metadata: Option<&ControlPlaneMetadata>,
         mut from_local_rx: Receiver<InvokeEzRequest>,
+        _timeout: Option<std::time::Duration>,
     ) -> anyhow::Result<Receiver<Result<InvokeEzResponse>>> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
         let (to_caller_tx, to_caller_rx) = mpsc::channel(1);
@@ -1117,6 +1119,7 @@ async fn notify_isolate_state_failure() {
             isolate_id: harness.isolate_id,
         })
         .await;
+    harness.isolate_state_manager.mark_channel_connected(harness.isolate_id).await.unwrap();
 
     let (tx, mut rx) = setup_notify_state_stream(&mut harness.client)
         .await
@@ -1150,6 +1153,7 @@ async fn poll_isolate_state_success() {
             isolate_id: harness.isolate_id,
         })
         .await;
+    harness.isolate_state_manager.mark_channel_connected(harness.isolate_id).await.unwrap();
 
     harness
         .isolate_state_manager

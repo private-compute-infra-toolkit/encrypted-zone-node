@@ -37,7 +37,7 @@ use external_proxy_connector::ExternalProxyConnectorError;
 use ez_error_trait::ToEzError;
 use fileshare_manager::FileshareManager;
 use futures::stream::{Stream, StreamExt};
-use grpc_connector::try_parse_grpc_timeout;
+use grpc_connector::get_grpc_timeout_or_log;
 use interceptor::{Interceptor, RequestType};
 use isolate_info::{IsolateId, IsolateServiceInfo, Route};
 use isolate_service_mapper::IsolateServiceMapper;
@@ -126,6 +126,8 @@ impl IsolateEzBridge for IsolateEzBridgeService {
         &self,
         request: Request<Streaming<InvokeEzRequest>>,
     ) -> Result<Response<Self::StreamInvokeEzStream>, Status> {
+        let timeout = get_grpc_timeout_or_log(request.metadata());
+
         let (invoke_ez_response_tx, invoke_ez_response_rx) = channel(CHANNEL_SIZE);
         let invoke_ez_response_stream = ReceiverStream::new(invoke_ez_response_rx);
 
@@ -135,7 +137,7 @@ impl IsolateEzBridge for IsolateEzBridgeService {
             self.metrics.clone(),
         );
 
-        let stream_handler = StreamHandler::new(self, invoke_ez_response_tx);
+        let stream_handler = StreamHandler::new(self, invoke_ez_response_tx, timeout);
         tokio::spawn(async move {
             stream_handler.process_invoke_ez_requests(invoke_ez_request_stream).await;
         });
@@ -143,7 +145,7 @@ impl IsolateEzBridge for IsolateEzBridgeService {
     }
 
     async fn invoke_ez(&self, request: Request<InvokeEzRequest>) -> InvokeEzResult {
-        let timeout = try_parse_grpc_timeout(request.metadata()).unwrap_or(None);
+        let timeout = get_grpc_timeout_or_log(request.metadata());
         let deadline = timeout.and_then(|t| Instant::now().checked_add(t));
         let req = request.into_inner();
 
@@ -480,12 +482,14 @@ struct StreamHandler {
     metrics: IsolateEzServiceMetrics,
     interceptor: Interceptor,
     shared_memory_manager: SharedMemManager,
+    timeout: Option<std::time::Duration>,
 }
 
 impl StreamHandler {
     fn new(
         service: &IsolateEzBridgeService,
         response_tx: Sender<Result<InvokeEzResponse, Status>>,
+        timeout: Option<std::time::Duration>,
     ) -> Self {
         let restrictions_enforcer = RestrictionsEnforcer {
             isolate_id: service.isolate_id,
@@ -507,6 +511,7 @@ impl StreamHandler {
             metrics: service.metrics.clone(),
             interceptor: service.interceptor.clone(),
             shared_memory_manager: service.shared_memory_manager.clone(),
+            timeout,
         }
     }
 
@@ -650,6 +655,7 @@ impl StreamHandler {
             .remote_streaming_connect(
                 first_req_clone.control_plane_metadata.as_ref(),
                 from_local_rx,
+                self.timeout,
             )
             .await;
 
@@ -767,29 +773,32 @@ impl StreamHandler {
         });
 
         // Get the response stream from the connector.
-        let mut from_connector_stream =
-            match connector.stream_proxy_external(self.isolate_id, to_connector_rx).await {
-                Ok(stream) => stream,
-                Err(e) => {
-                    let _ = self
-                        .response_tx
-                        .send(Err(match e {
-                            ExternalProxyConnectorError::StreamFailed(status) => *status,
-                            _ => Status::internal(format!("Proxy RPC failed: {e:?}")),
-                        }))
-                        .await;
-                    return;
-                }
-            };
+        let mut from_connector_stream = match connector
+            .stream_proxy_external(self.isolate_id, to_connector_rx, self.timeout)
+            .await
+        {
+            Ok(stream) => stream,
+            Err(e) => {
+                let _ = self
+                    .response_tx
+                    .send(Err(match e {
+                        ExternalProxyConnectorError::StreamFailed(status) => *status,
+                        _ => Status::internal(format!("Proxy RPC failed: {e:?}")),
+                    }))
+                    .await;
+                return;
+            }
+        };
 
         // Spawn a task to pipe all responses from the connector back to the client.
         let restrictions_enforcer = self.restrictions_enforcer.clone();
         let metrics = self.metrics.clone();
+
         tokio::spawn(async move {
-            while let Some(response) = from_connector_stream.recv().await {
+            while let Some(response_res) = from_connector_stream.recv().await {
                 let _timer = metrics.track_message_processing(metric_attr.response());
-                // The connector now sends InvokeEzResponse directly, with errors inside the status field.
-                if restrictions_enforcer.stream_validate_invoke_ez_resp(response).await.is_err() {
+                if restrictions_enforcer.stream_validate_invoke_ez_resp(response_res).await.is_err()
+                {
                     log::info!("Client response channel closed.");
                     break;
                 }
@@ -806,8 +815,10 @@ impl StreamHandler {
     {
         let metric_attr = invoke_req_stream.attributes().clone();
 
-        let junction_channel =
-            self.isolate_junction.stream_invoke_isolate(Some(self.isolate_id), false).await;
+        let junction_channel = self
+            .isolate_junction
+            .stream_invoke_isolate(Some(self.isolate_id), false, self.timeout)
+            .await;
         let to_junction = junction_channel.client_to_junction;
         let mut from_junction = junction_channel.junction_to_client;
 

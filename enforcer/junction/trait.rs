@@ -46,6 +46,7 @@ pub trait Junction: Send + Sync + DynClone {
         &self,
         client_isolate_id_option: Option<IsolateId>,
         is_from_public_api: bool,
+        timeout: Option<std::time::Duration>,
     ) -> JunctionChannels;
 
     /// Establish connection with Isolate server. Typically used when starting a new

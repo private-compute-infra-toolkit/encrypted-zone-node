@@ -33,16 +33,17 @@ use thiserror::Error;
 use tokio::sync::broadcast;
 
 /// Maintains [IsolateState] for each Isolate and validates the state transitions.
-/// It also delays the Isolates being added to DataScopeManager before they are ready.
-/// Once an Isolate is ready, it is added to DataScopeManager after which it can start
-/// receiving requests.
+/// It also delays the Isolates being activated in DataScopeManager before they are ready.
+/// Once an Isolate is ready and its channel connected, it is activated in DataScopeManager
+/// after which it can start receiving requests.
 #[derive(Clone, Debug)]
 pub struct IsolateStateManager {
     isolate_state_map: Arc<DashMap<IsolateId, IsolateState>>,
-    unready_isolate_map: Arc<DashMap<IsolateId, AddIsolateRequest>>,
     data_scope_requester: DataScopeRequester,
     container_manager_requester: ContainerManagerRequester,
     in_flight_request_counts: Arc<DashMap<IsolateId, AtomicUsize>>,
+    sdk_ready_map: Arc<DashMap<IsolateId, bool>>,
+    channel_ready_map: Arc<DashMap<IsolateId, bool>>,
     ready_notifier: Arc<broadcast::Sender<BinaryServicesIndex>>,
     ready_binary_services_map: Arc<DashMap<BinaryServicesIndex, HashSet<IsolateId>>>,
     // TODO: Add another map here to store the Isolates that are in MULTI-USER scope.
@@ -70,10 +71,11 @@ impl IsolateStateManager {
         let (ready_notifier, _) = broadcast::channel(128);
         Self {
             isolate_state_map: Arc::new(DashMap::new()),
-            unready_isolate_map: Arc::new(DashMap::new()),
             data_scope_requester,
             container_manager_requester,
             in_flight_request_counts: Arc::new(DashMap::new()),
+            sdk_ready_map: Arc::new(DashMap::new()),
+            channel_ready_map: Arc::new(DashMap::new()),
             ready_notifier: Arc::new(ready_notifier),
             ready_binary_services_map: Arc::new(DashMap::new()),
         }
@@ -81,17 +83,22 @@ impl IsolateStateManager {
 
     /// Registers a new Isolate, initializing its state to `IsolateState::Starting`.
     ///
-    /// The Isolate is held in a "pending" state and is not yet active in the `DataScopeManager`.
-    /// It will be fully added to the `DataScopeManager` only after its state is updated to
-    /// `IsolateState::Ready` via the `update_state` method.
+    /// The Isolate scope is registered with `DataScopeManager` immediately so that outbound
+    /// requests from the starting container succeed, but it will only be activated for inbound
+    /// traffic routing once both the SDK reports `IsolateState::Ready` and the Junction channel is connected.
     ///
     /// # Arguments
     ///
     /// * `add_isolate_request` - The request containing the details of the Isolate to add.
     pub async fn add_isolate(&self, add_isolate_request: AddIsolateRequest) {
-        self.isolate_state_map.insert(add_isolate_request.isolate_id, IsolateState::Starting);
-        self.in_flight_request_counts.insert(add_isolate_request.isolate_id, AtomicUsize::new(0));
-        self.unready_isolate_map.insert(add_isolate_request.isolate_id, add_isolate_request);
+        let isolate_id = add_isolate_request.isolate_id;
+        self.isolate_state_map.insert(isolate_id, IsolateState::Starting);
+        self.in_flight_request_counts.insert(isolate_id, AtomicUsize::new(0));
+        self.sdk_ready_map.insert(isolate_id, false);
+        self.channel_ready_map.insert(isolate_id, false);
+        if let Err(e) = self.data_scope_requester.add_isolate(add_isolate_request).await {
+            log::error!("Failed to register isolate with DataScopeRequester: {:?}", e);
+        }
     }
 
     /// Pre-registers an Isolate's `BinaryServicesIndex` and maximum allowed data scope.
@@ -168,8 +175,9 @@ impl IsolateStateManager {
     ) -> DataScopeManagerResponse<RemoveIsolateResponse> {
         let isolate_id = remove_isolate_request.isolate_id;
         self.isolate_state_map.remove(&isolate_id);
-        self.unready_isolate_map.remove(&isolate_id);
         self.in_flight_request_counts.remove(&isolate_id);
+        self.sdk_ready_map.remove(&isolate_id);
+        self.channel_ready_map.remove(&isolate_id);
         let binary_index = isolate_id.get_binary_services_index();
         if let Some(mut set) = self.ready_binary_services_map.get_mut(&binary_index) {
             set.remove(&isolate_id);
@@ -187,6 +195,34 @@ impl IsolateStateManager {
                 }
             }
         }
+    }
+
+    /// Marks the gRPC channel connection to the Isolate as established.
+    pub async fn mark_channel_connected(&self, isolate_id: IsolateId) -> Result<()> {
+        self.channel_ready_map.insert(isolate_id, true);
+        self.check_and_promote_to_ready(isolate_id).await
+    }
+
+    async fn check_and_promote_to_ready(&self, isolate_id: IsolateId) -> Result<()> {
+        let sdk_ready = self.sdk_ready_map.get(&isolate_id).map(|v| *v).unwrap_or(false);
+        let channel_ready = self.channel_ready_map.get(&isolate_id).map(|v| *v).unwrap_or(false);
+
+        if sdk_ready && channel_ready {
+            let mut promote = false;
+            if let Some(mut state_ref) = self.isolate_state_map.get_mut(&isolate_id) {
+                if *state_ref.value() == IsolateState::Starting {
+                    *state_ref.value_mut() = IsolateState::Ready;
+                    promote = true;
+                }
+            }
+            if promote {
+                self.data_scope_requester.activate_isolate(isolate_id).await?;
+                let binary_index = isolate_id.get_binary_services_index();
+                self.ready_binary_services_map.entry(binary_index).or_default().insert(isolate_id);
+                let _ = self.ready_notifier.send(binary_index);
+            }
+        }
+        Ok(())
     }
 
     /// Updates the state of an Isolate and performs actions based on the new state.
@@ -216,7 +252,10 @@ impl IsolateStateManager {
 
         let old_state = *isolate_id_current_state_ref_mut.value();
         validate_state_transition(old_state, isolate_state)?;
-        *isolate_id_current_state_ref_mut.value_mut() = isolate_state;
+
+        if isolate_state != IsolateState::Ready {
+            *isolate_id_current_state_ref_mut.value_mut() = isolate_state;
+        }
         drop(isolate_id_current_state_ref_mut); // drop ref to minimize contention for DashMap
 
         let binary_index = isolate_id.get_binary_services_index();
@@ -228,6 +267,8 @@ impl IsolateStateManager {
 
         match isolate_state {
             IsolateState::Idle => {
+                self.sdk_ready_map.insert(isolate_id, false);
+                self.channel_ready_map.insert(isolate_id, false);
                 let _ = self
                     .container_manager_requester
                     .reset_container(ResetIsolateRequest { isolate_id })
@@ -236,29 +277,12 @@ impl IsolateStateManager {
                 Ok(())
             }
             IsolateState::Ready => {
-                let (_isolate_id, add_isolate_request) = self
-                    .unready_isolate_map
-                    .remove(&isolate_id)
-                    .context("Unrecognized IsolateId received for update_state, InternalError")?;
-
-                self.data_scope_requester.add_isolate(add_isolate_request).await?;
-                self.ready_binary_services_map.entry(binary_index).or_default().insert(isolate_id);
-                let _ = self.ready_notifier.send(binary_index);
-                Ok(())
+                self.sdk_ready_map.insert(isolate_id, true);
+                self.check_and_promote_to_ready(isolate_id).await
             }
             IsolateState::Retiring => {
-                // Remove the Isolate Id if it is marked retiring so that Junction doesn't assign it new requests
-                let result = self
-                    .data_scope_requester
-                    .remove_isolate(RemoveIsolateRequest { isolate_id })
-                    .await;
-                if let Some(err) = result.err() {
-                    // It's possible the Isolate was already removed (e.g., due to sensitive session retirement).
-                    // In that case, we can safely ignore the error.
-                    if !matches!(err, DataScopeError::UnknownIsolateId) {
-                        return Err(err.into());
-                    }
-                }
+                self.sdk_ready_map.insert(isolate_id, false);
+                self.channel_ready_map.insert(isolate_id, false);
                 Ok(())
             }
             _ => Ok(()),
@@ -267,34 +291,18 @@ impl IsolateStateManager {
 
     /// Freezes the DataScope for an Isolate, preventing future changes to its data access permissions.
     ///
-    /// The behavior depends on the Isolate's current state:
-    /// - If the Isolate is not yet `Ready` (i.e., it's in the pending `unready_isolate_map`),
-    ///   this method locks its `allowed_data_scope_type` to its `current_data_scope_type` locally.
-    /// - If the Isolate is already active (`Ready`), the request is forwarded to the `DataScopeManager`
-    ///   to be frozen there.
-    ///
     /// # Arguments
     ///
     /// * `freeze_isolate_request` - The request containing the ID of the Isolate whose scope should be frozen.
     ///
     /// # Returns
     ///
-    /// The response from the `DataScopeManager` or an immediate success response if handled locally.
+    /// The response from the `DataScopeManager`.
     pub async fn freeze_scope(
         &self,
         freeze_isolate_request: FreezeIsolateScopeRequest,
     ) -> DataScopeManagerResponse<()> {
-        let add_isolate_req_option =
-            self.unready_isolate_map.remove(&freeze_isolate_request.isolate_id);
-
-        match add_isolate_req_option {
-            Some((_isolate_id, mut add_isolate_req)) => {
-                add_isolate_req.allowed_data_scope_type = add_isolate_req.current_data_scope_type;
-                self.unready_isolate_map.insert(freeze_isolate_request.isolate_id, add_isolate_req);
-                Ok(())
-            }
-            None => self.data_scope_requester.freeze_isolate_scope(freeze_isolate_request).await,
-        }
+        self.data_scope_requester.freeze_isolate_scope(freeze_isolate_request).await
     }
 
     /// Returns a list of all Isolates and their current states.

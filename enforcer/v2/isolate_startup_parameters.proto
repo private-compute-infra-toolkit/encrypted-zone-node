@@ -1,0 +1,31 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package enforcer.v2;
+
+import "enforcer/v2/common.proto";
+
+// Parameters required to start an Isolate.
+message IsolateStartupParameters {
+  // Identifies the target isolate by name and publisher.
+  IsolateType identifier = 1;
+  // Command line arguments supplied dynamically at runtime.
+  repeated string command_line_arguments = 2;
+  // Environment variables supplied dynamically at runtime.
+  repeated string environment_variables = 3;
+  // Number of isolate container instances to maintain.
+  int32 number_of_isolates = 4;
+}

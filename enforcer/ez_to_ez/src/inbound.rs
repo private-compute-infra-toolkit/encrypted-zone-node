@@ -22,7 +22,7 @@ use ez_to_ez_service_proto::enforcer::v1::{
     ez_to_ez_api_server::{EzToEzApi, EzToEzApiServer},
     EzCallRequest, EzCallResponse,
 };
-use grpc_connector::try_parse_grpc_timeout;
+use grpc_connector::get_grpc_timeout_or_log;
 use junction_trait::{Junction, JunctionChannels};
 use metrics::{
     common::{MetricAttributes, ServiceMetrics},
@@ -71,7 +71,7 @@ impl EzToEzApi for InboundEzToEzHandler {
         &self,
         request: Request<EzCallRequest>,
     ) -> Result<Response<EzCallResponse>, Status> {
-        let timeout = try_parse_grpc_timeout(request.metadata()).unwrap_or(None);
+        let timeout = get_grpc_timeout_or_log(request.metadata());
         let deadline = timeout.and_then(|t| Instant::now().checked_add(t));
 
         let ez_call_request = request.into_inner();
@@ -123,6 +123,7 @@ impl EzToEzApi for InboundEzToEzHandler {
         &self,
         request: Request<Streaming<EzCallRequest>>,
     ) -> Result<Response<Self::EzStreamingCallStream>, Status> {
+        let timeout = get_grpc_timeout_or_log(request.metadata());
         let ez_call_request_stream = request.into_inner();
 
         // Create the response stream to send back to the remote enforcer.
@@ -131,11 +132,13 @@ impl EzToEzApi for InboundEzToEzHandler {
         let isolate_junction = self.isolate_junction.clone();
 
         let JunctionChannels { client_to_junction: client_to_junction_tx, mut junction_to_client } =
-            isolate_junction.stream_invoke_isolate(None, false).await;
+            isolate_junction.stream_invoke_isolate(None, false, timeout).await;
+
+        let to_remote_response_stream = ReceiverStream::new(to_remote_response_rx);
 
         let (mut ez_call_request_stream, to_remote_response_rx) = observed_stream::pair(
             ez_call_request_stream,
-            ReceiverStream::new(to_remote_response_rx),
+            to_remote_response_stream,
             self.metrics.clone(),
         );
 

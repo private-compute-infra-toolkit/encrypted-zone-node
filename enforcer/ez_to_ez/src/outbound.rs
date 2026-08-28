@@ -214,6 +214,7 @@ impl<MetricsImpl: ServiceMetrics> OutboundEzToEzClient for OutboundEzToEzHandler
         &self,
         first_request_metadata: Option<&ControlPlaneMetadata>,
         from_local_rx: mpsc::Receiver<InvokeEzRequest>,
+        timeout: Option<std::time::Duration>,
     ) -> Result<mpsc::Receiver<anyhow::Result<InvokeEzResponse>>> {
         let channel = self.get_or_create_channel(first_request_metadata).await?;
         let mut client = EzToEzApiClient::new(channel);
@@ -224,7 +225,10 @@ impl<MetricsImpl: ServiceMetrics> OutboundEzToEzClient for OutboundEzToEzHandler
         );
 
         let request_stream = ReceiverStream::new(channels.req_rx);
-        let request = tonic::Request::new(request_stream);
+        let mut request = tonic::Request::new(request_stream);
+        if let Some(t) = timeout {
+            request.set_timeout(t);
+        }
 
         tokio::spawn(Self::handle_outbound_requests(from_local_rx, channels.req_tx));
 

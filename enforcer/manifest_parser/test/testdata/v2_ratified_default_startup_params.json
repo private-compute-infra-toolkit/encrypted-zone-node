@@ -1,0 +1,12 @@
+{
+  "ratified_isolate_descriptors": [
+    {
+      "isolate_type": {
+        "isolate_name": "ezpkg://default.ratified.com",
+        "publisher_id": "EZ_Trusted"
+      },
+      "package_filename": "enforcer/container/test_data/test_binary.tar",
+      "binary_filename": "/usr/local/bin/main"
+    }
+  ]
+}

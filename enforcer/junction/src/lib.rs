@@ -55,9 +55,9 @@ use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 pub(crate) const CHANNEL_SIZE: usize = 128;
-const RETRY_COUNT: usize = 60;
-const RETRY_DELAY_MILLIS: u64 = 1000;
-const RETRY_SCALING: u64 = 2;
+const RETRY_COUNT: usize = 2400;
+const RETRY_DELAY_MILLIS: u64 = 50;
+const RETRY_SCALING: u64 = 1;
 
 #[derive(Debug)]
 struct DestinationIsolateInfo {
@@ -243,6 +243,7 @@ impl Junction for IsolateJunction {
         &self,
         request_source_isolate_id_option: Option<IsolateId>,
         is_from_public_api: bool,
+        timeout: Option<std::time::Duration>,
     ) -> JunctionChannels {
         let (client_to_junction_tx, client_to_junction_rx) = channel(CHANNEL_SIZE);
         let (junction_to_client_tx, junction_to_client_rx) = channel(CHANNEL_SIZE);
@@ -260,6 +261,7 @@ impl Junction for IsolateJunction {
                     junction_to_client_tx,
                     request_source_isolate_id_option,
                     is_from_public_api,
+                    timeout,
                 )
                 .await;
         });
@@ -284,6 +286,7 @@ impl Junction for IsolateJunction {
         // Store the `GrpcChannelPool`, we will use this `GrpcChannelPool` to make rpc requests
         // to the `Isolate` for each connect_client/streaming_connect.
         self.isolate_channel_pool_map.insert(isolate_id, channel_pool);
+        self.state_manager.mark_channel_connected(isolate_id).await?;
 
         Ok(())
     }
@@ -296,6 +299,7 @@ impl IsolateJunction {
         junction_to_client_tx: Sender<Result<InvokeIsolateResponse, EzError>>,
         request_source_isolate_id_option: Option<IsolateId>,
         is_from_public_api: bool,
+        timeout: Option<std::time::Duration>,
     ) {
         // receive initial request to setup long lived stream with Isolate
         let Some(mut initial_invoke_request) = client_to_junction_rx.recv().await else {
@@ -369,6 +373,7 @@ impl IsolateJunction {
                     metric_attr,
                     request_context,
                     metrics_context_rx,
+                    timeout,
                 )
                 .await;
         }
@@ -426,6 +431,7 @@ impl IsolateJunction {
             MetricAttributes,
             metrics::common::CallTracker<JunctionMetrics>,
         )>,
+        timeout: Option<std::time::Duration>,
     ) {
         let (junction_to_isolate_tx, junction_to_isolate_rx) =
             channel::<InvokeIsolateRequest>(CHANNEL_SIZE);
@@ -453,8 +459,9 @@ impl IsolateJunction {
                 .await;
         });
 
-        let connect_result =
-            self.establish_isolate_streaming_rpc(destination_isolate_id, outbound_stream).await;
+        let connect_result = self
+            .establish_isolate_streaming_rpc(destination_isolate_id, outbound_stream, timeout)
+            .await;
         let Ok(invoke_isolate_response_stream) = connect_result else {
             let connect_error = connect_result.unwrap_err();
             let connect_ez_error = EzError::Status(match connect_error.downcast_ref::<Status>() {
@@ -485,6 +492,7 @@ impl IsolateJunction {
         &self,
         isolate_id: IsolateId,
         outbound_stream: ReceiverStream<InvokeIsolateRequest>,
+        timeout: Option<std::time::Duration>,
     ) -> anyhow::Result<Streaming<InvokeIsolateResponse>> {
         let Some(isolate_channel_pool_ref) = self.isolate_channel_pool_map.get(&isolate_id) else {
             log::info!("Missing isolate connection from connection map for isolate {}", isolate_id);
@@ -496,7 +504,12 @@ impl IsolateJunction {
 
         let mut client = EzIsolateBridgeClient::new(isolate_channel_pool.next_channel());
 
-        let inbound = client.stream_invoke_isolate(outbound_stream).await?;
+        let mut request = tonic::Request::new(outbound_stream);
+        if let Some(t) = timeout {
+            request.set_timeout(t);
+        }
+
+        let inbound = client.stream_invoke_isolate(request).await?;
         let invoke_isolate_response_stream = inbound.into_inner();
 
         Ok(invoke_isolate_response_stream)

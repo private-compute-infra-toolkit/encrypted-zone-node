@@ -66,10 +66,9 @@ fn test_load_initial_snis_v1() {
 
 #[test]
 fn test_load_initial_snis_v2() {
-    let setup = SetupManifest::load_from_path(
-        "enforcer/manifest_parser/test/testdata/test_manifest_v2_setup.json",
-    )
-    .expect("Failed to load setup manifest");
+    let setup =
+        SetupManifest::load_from_path("enforcer/manifest_parser/test/testdata/v2_setup.json")
+            .expect("Failed to load setup manifest");
     let boot_manifest = BootManifest::V2(setup);
     let snis = load_initial_snis(&boot_manifest);
     assert_eq!(snis.len(), 1);
@@ -576,7 +575,7 @@ async fn test_e2e_mtls_streaming() {
 
     let (req_tx, req_rx) = tokio::sync::mpsc::channel(10);
     let mut res_rx =
-        ctx.outbound_handler.remote_streaming_connect(Some(&meta), req_rx).await.unwrap();
+        ctx.outbound_handler.remote_streaming_connect(Some(&meta), req_rx, None).await.unwrap();
 
     let stream_request = enforcer_proto::enforcer::v1::InvokeEzRequest {
         control_plane_metadata: Some(meta),

@@ -77,7 +77,7 @@ impl SetupManifest {
     }
 
     /// Converts the setup isolate manifest into a [`ParsedIsolate`].
-    pub fn into_parsed_isolate(self) -> ParsedIsolate {
+    pub fn into_parsed_isolate(self) -> Result<ParsedIsolate> {
         convert_setup_descriptor_to_parsed_isolate(
             self.setup_isolate_manifest.setup_isolate_descriptor.unwrap_or_default(),
         )
@@ -88,8 +88,9 @@ impl SetupManifest {
         self.setup_isolate_manifest
             .setup_isolate_descriptor
             .as_ref()
-            .map(|d| IsolateIdentity::new(d.isolate_name.clone(), d.publisher_id.clone()))
-            .expect("setup_isolate_descriptor must be present in SetupManifest")
+            .and_then(|d| d.isolate_type.as_ref())
+            .map(|it| IsolateIdentity::new(it.isolate_name.clone(), it.publisher_id.clone()))
+            .expect("setup_isolate_descriptor and isolate_type must be present in SetupManifest")
     }
 }
 
@@ -103,20 +104,19 @@ impl WorkloadManifests {
     }
 
     /// Flattens workload descriptors into a sequence of [`ParsedIsolate`]s.
-    pub fn into_parsed_isolates(self) -> Vec<ParsedIsolate> {
-        let ratified_iter = self
-            .ratified_isolate_manifest
-            .into_iter()
-            .flat_map(|m| m.ratified_isolate_descriptors)
-            .map(convert_ratified_descriptor_to_parsed_isolate);
-
-        let opaque_iter = self
-            .opaque_isolate_manifest
-            .into_iter()
-            .flat_map(|m| m.opaque_isolate_descriptors)
-            .map(convert_opaque_descriptor_to_parsed_isolate);
-
-        ratified_iter.chain(opaque_iter).collect()
+    pub fn into_parsed_isolates(self) -> Result<Vec<ParsedIsolate>> {
+        let mut isolates = Vec::new();
+        if let Some(manifest) = self.ratified_isolate_manifest {
+            for desc in manifest.ratified_isolate_descriptors {
+                isolates.push(convert_ratified_descriptor_to_parsed_isolate(desc)?);
+            }
+        }
+        if let Some(manifest) = self.opaque_isolate_manifest {
+            for desc in manifest.opaque_isolate_descriptors {
+                isolates.push(convert_opaque_descriptor_to_parsed_isolate(desc)?);
+            }
+        }
+        Ok(isolates)
     }
 
     /// Extracts [`IsolateIdentity`] entries across workload descriptors for mTLS SNI configuration.
@@ -125,13 +125,15 @@ impl WorkloadManifests {
             .ratified_isolate_manifest
             .iter()
             .flat_map(|m| &m.ratified_isolate_descriptors)
-            .map(|d| IsolateIdentity::new(d.isolate_name.clone(), d.publisher_id.clone()));
+            .filter_map(|d| d.isolate_type.as_ref())
+            .map(|it| IsolateIdentity::new(it.isolate_name.clone(), it.publisher_id.clone()));
 
         let opaque_iter = self
             .opaque_isolate_manifest
             .iter()
             .flat_map(|m| &m.opaque_isolate_descriptors)
-            .map(|d| IsolateIdentity::new(d.isolate_name.clone(), d.publisher_id.clone()));
+            .filter_map(|d| d.isolate_type.as_ref())
+            .map(|it| IsolateIdentity::new(it.isolate_name.clone(), it.publisher_id.clone()));
 
         ratified_iter.chain(opaque_iter).collect()
     }

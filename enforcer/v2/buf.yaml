@@ -22,12 +22,14 @@ lint:
     - COMMENTS
   ignore_only:
     COMMENTS:
+      - enforcer/v2/common.proto
       - enforcer/v2/data_scope_type.proto
       - enforcer/v2/ez_backend_dependencies.proto
       - enforcer/v2/ez_service_spec.proto
       - enforcer/v2/intercepting_services.proto
       - enforcer/v2/isolate_metrics_policy.proto
       - enforcer/v2/isolate_runtime_config.proto
+      - enforcer/v2/isolate_startup_parameters.proto
       - enforcer/v2/opaque_isolate_manifest.proto
       - enforcer/v2/ratified_isolate_manifest.proto
       - enforcer/v2/setup_isolate_manifest.proto

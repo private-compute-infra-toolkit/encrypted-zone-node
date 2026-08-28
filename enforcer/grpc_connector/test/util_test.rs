@@ -7,8 +7,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use grpc_connector::try_parse_grpc_timeout;
 use grpc_connector::GrpcChannelPool;
+use grpc_connector::{get_grpc_timeout_or_log, try_parse_grpc_timeout};
 use grpc_connector_test_proto::enforcer::grpc_connector::test::{
     test_service_server::{TestService, TestServiceServer},
     TestRequest, TestResponse,
@@ -258,4 +258,14 @@ fn test_parse_large_values() {
         try_parse_grpc_timeout(&make_meta("grpc-timeout", "18446744073709551615S")).unwrap(),
         Some(Duration::from_secs(u64::MAX))
     );
+}
+
+#[test]
+fn test_get_grpc_timeout_or_log() {
+    assert_eq!(
+        get_grpc_timeout_or_log(&make_meta("grpc-timeout", "3S")),
+        Some(Duration::from_secs(3))
+    );
+    assert_eq!(get_grpc_timeout_or_log(&MetadataMap::new()), None);
+    assert_eq!(get_grpc_timeout_or_log(&make_meta("grpc-timeout", "invalid")), None);
 }

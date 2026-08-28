@@ -57,7 +57,8 @@ async fn test_external_proxy_metrics() {
     let request1 = create_generic_test_request(vec![vec![10, 20, 30]]);
     tx.send(request1.clone()).await.unwrap();
 
-    let mut response_receiver = connector.stream_proxy_external(isolate_id, rx).await.unwrap();
+    let mut response_receiver =
+        connector.stream_proxy_external(isolate_id, rx, None).await.unwrap();
 
     let request2 = create_generic_test_request(vec![vec![40, 50, 60]]);
     tx.send(request2.clone()).await.unwrap();

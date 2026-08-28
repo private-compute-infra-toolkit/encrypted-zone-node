@@ -152,6 +152,44 @@ async fn test_call_propagates_timeout() {
 }
 
 #[tokio::test]
+async fn test_stream_call_propagates_timeout() {
+    let (port, shutdown_tx, fake_junction) = start_api_server().await;
+
+    let session_metadata = SessionMetadata { session_id: port as u64, ..Default::default() };
+
+    let valid_request = CallRequest {
+        operator_domain: "test_domain".to_string(),
+        service_name: "test_service".to_string(),
+        method_name: "test_method".to_string(),
+        session_metadata: Some(session_metadata.clone()),
+        input_params: Some(CallParameters::default()),
+        ..Default::default()
+    };
+
+    let (client_tx, client_rx) =
+        tokio::sync::mpsc::channel(EZ_PUBLIC_API_RESPONSE_TEST_CHANNEL_SIZE);
+    let request_stream = tokio_stream::wrappers::ReceiverStream::new(client_rx);
+    let mut request = Request::new(request_stream);
+    request.metadata_mut().insert("grpc-timeout", MetadataValue::from_static("5S"));
+
+    tokio::spawn(async move {
+        let mut client = EzPublicApiClient::connect(format!("http://localhost:{}", port))
+            .await
+            .expect("failed to connect to EzPublicApi");
+        let mut stream = client.stream_call(request).await.unwrap().into_inner();
+        let _ = client_tx.send(valid_request).await;
+        let _ = stream.message().await;
+    })
+    .await
+    .unwrap();
+
+    let _ = shutdown_tx.send(());
+
+    let captured_timeout = fake_junction.last_stream_timeout.lock().unwrap();
+    assert_eq!(*captured_timeout, Some(Duration::from_secs(5)));
+}
+
+#[tokio::test]
 async fn test_call_succeeds() {
     let (port, shutdown_tx, _) = start_api_server().await;
 

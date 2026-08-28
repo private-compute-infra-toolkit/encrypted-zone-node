@@ -71,7 +71,7 @@ async fn test_filter_metrics() {
 #[tokio::test]
 async fn test_enrich_metrics() {
     let policy = IsolateMetricsPolicy::default();
-    let receiver = create_test_receiver(policy).await;
+    let receiver = create_test_receiver_with_instance_id(policy, "1".to_string()).await;
 
     let mut request = create_test_request(vec![create_test_metric(
         "allowed_gauge",
@@ -83,35 +83,36 @@ async fn test_enrich_metrics() {
     assert_eq!(request.resource_metrics.len(), 1);
     let rm = &request.resource_metrics[0];
 
-    // Verify resource attributes are empty/do not contain isolate identity attributes
+    // Verify resource attributes are enriched with isolate identity attributes
     let resource_attrs = &rm.resource.as_ref().unwrap().attributes;
-    assert!(resource_attrs.iter().all(|kv| kv.key != "ez_component_name"
-        && kv.key != "ez_isolate_name"
-        && kv.key != "ez_publisher_id"
-        && kv.key != "ez_isolate_type"
-        && kv.key != "ez_enforcer_version"
-        && kv.key != "ez_isolate_instance_id"));
-
-    // Verify scope attributes are enriched
-    let sm = &rm.scope_metrics[0];
-    let scope = sm.scope.as_ref().unwrap();
-    assert_eq!(scope.attributes.len(), 6);
-    assert!(scope.attributes.iter().any(|kv| kv.key == "ez_component_name"
-        && kv.value.as_ref().unwrap().value == Some(Value::StringValue("isolate".to_string()))));
-    assert!(scope.attributes.iter().any(|kv| kv.key == "ez_isolate_name"
+    assert_eq!(resource_attrs.len(), 3);
+    assert!(resource_attrs.iter().any(|kv| kv.key == "ez_isolate_name"
         && kv.value.as_ref().unwrap().value
             == Some(Value::StringValue("test-isolate".to_string()))));
-    assert!(scope.attributes.iter().any(|kv| kv.key == "ez_publisher_id"
+    assert!(resource_attrs.iter().any(|kv| kv.key == "ez_publisher_id"
         && kv.value.as_ref().unwrap().value
             == Some(Value::StringValue("test-publisher".to_string()))));
+    assert!(resource_attrs.iter().any(|kv| kv.key == "ez_isolate_instance_id"
+        && kv.value.as_ref().unwrap().value == Some(Value::StringValue("1".to_string()))));
+    assert!(resource_attrs.iter().all(|kv| kv.key != "ez_component_name"
+        && kv.key != "ez_isolate_type"
+        && kv.key != "ez_enforcer_version"));
+
+    // Verify scope attributes are enriched with runtime metadata
+    let sm = &rm.scope_metrics[0];
+    let scope = sm.scope.as_ref().unwrap();
+    assert_eq!(scope.attributes.len(), 3);
+    assert!(scope.attributes.iter().any(|kv| kv.key == "ez_component_name"
+        && kv.value.as_ref().unwrap().value == Some(Value::StringValue("isolate".to_string()))));
     assert!(scope.attributes.iter().any(|kv| kv.key == "ez_isolate_type"
         && kv.value.as_ref().unwrap().value == Some(Value::StringValue("opaque".to_string()))));
     assert!(scope
         .attributes
         .iter()
         .any(|kv| kv.key == "ez_enforcer_version" && kv.value.as_ref().unwrap().value.is_some()));
-    assert!(scope.attributes.iter().any(|kv| kv.key == "ez_isolate_instance_id"
-        && kv.value.as_ref().unwrap().value == Some(Value::StringValue("1".to_string()))));
+    assert!(scope.attributes.iter().all(|kv| kv.key != "ez_isolate_name"
+        && kv.key != "ez_publisher_id"
+        && kv.key != "ez_isolate_instance_id"));
 
     // Verify datapoint attributes are unchanged
     let metric = &sm.metrics[0];
@@ -421,7 +422,7 @@ async fn test_filter_metrics_coverage_disable_filtering_and_purging() {
         isolate_name: "test-isolate".to_string(),
         publisher_id: "test-publisher".to_string(),
         is_ratified: false,
-        isolate_instance_id: InstanceIdGenerator::generate(),
+        isolate_instance_id: InstanceIdGenerator::generate().into(),
         otel_endpoint: None,
         max_decoding_message_size: 4 * 1024 * 1024,
         disable_filtering: true,
@@ -472,8 +473,8 @@ async fn test_filter_metrics_coverage_disable_filtering_and_purging() {
 
     let rm_purged = &request_purged.resource_metrics[0];
     let resource_attrs = &rm_purged.resource.as_ref().unwrap().attributes;
-    // Should have 1 attribute: custom_resource_attr (identity ones were purged and moved to datapoints)
-    assert_eq!(resource_attrs.len(), 1);
+    // Should have 4 attributes: custom_resource_attr + 3 enriched isolate resource attributes
+    assert_eq!(resource_attrs.len(), 4);
 
     // Verify custom_resource_attr was retained
     let custom_attr = resource_attrs.iter().find(|kv| kv.key == "custom_resource_attr").unwrap();
@@ -482,20 +483,22 @@ async fn test_filter_metrics_coverage_disable_filtering_and_purging() {
         Some(Value::StringValue("keep-me".to_string()))
     );
 
-    // Verify identity attributes are now in the scope attributes instead of resource attributes
-    let sm = &rm_purged.scope_metrics[0];
-    let scope = sm.scope.as_ref().unwrap();
-    let identity_attr = scope.attributes.iter().find(|kv| kv.key == "ez_isolate_name").unwrap();
+    // Verify identity attributes are now in the resource attributes instead of scope attributes
+    let identity_attr = resource_attrs.iter().find(|kv| kv.key == "ez_isolate_name").unwrap();
     assert_eq!(
         identity_attr.value.as_ref().unwrap().value,
         Some(Value::StringValue("test-isolate".to_string()))
     );
+    let sm = &rm_purged.scope_metrics[0];
+    let scope = sm.scope.as_ref().unwrap();
+    assert_eq!(scope.attributes.len(), 3);
+    assert!(scope.attributes.iter().all(|kv| kv.key != "ez_isolate_name"));
 }
 
 #[tokio::test]
 async fn test_enrich_metrics_anti_spoofing_instance_id() {
     let policy = IsolateMetricsPolicy::default();
-    let receiver = create_test_receiver(policy).await;
+    let receiver = create_test_receiver_with_instance_id(policy, "1".to_string()).await;
 
     let mut request = ExportMetricsServiceRequest {
         resource_metrics: vec![ResourceMetrics {
@@ -537,21 +540,26 @@ async fn test_enrich_metrics_anti_spoofing_instance_id() {
 
     let rm = &request.resource_metrics[0];
     let resource_attrs = &rm.resource.as_ref().unwrap().attributes;
-    // Malicious instance id must be purged from resource
-    assert_eq!(resource_attrs.len(), 1);
-    assert_eq!(resource_attrs[0].key, "custom_resource_tag");
+    // Malicious instance id must be purged and replaced with verified instance id in resource
+    assert_eq!(resource_attrs.len(), 4);
+    let custom_tag = resource_attrs.iter().find(|kv| kv.key == "custom_resource_tag").unwrap();
+    assert_eq!(
+        custom_tag.value.as_ref().unwrap().value,
+        Some(Value::StringValue("valid_tag".to_string()))
+    );
 
-    let sm = &rm.scope_metrics[0];
-    let scope = sm.scope.as_ref().unwrap();
-    assert_eq!(scope.attributes.len(), 6);
-
-    // Verified instance id must be injected with value "1"
+    // Verified instance id must be injected into resource with value "1"
     let instance_id_attr =
-        scope.attributes.iter().find(|kv| kv.key == "ez_isolate_instance_id").unwrap();
+        resource_attrs.iter().find(|kv| kv.key == "ez_isolate_instance_id").unwrap();
     assert_eq!(
         instance_id_attr.value.as_ref().unwrap().value,
         Some(Value::StringValue("1".to_string()))
     );
+
+    let sm = &rm.scope_metrics[0];
+    let scope = sm.scope.as_ref().unwrap();
+    assert_eq!(scope.attributes.len(), 3);
+    assert!(scope.attributes.iter().all(|kv| kv.key != "ez_isolate_instance_id"));
 }
 
 #[tokio::test]
@@ -574,7 +582,7 @@ async fn test_filter_metrics_coverage_uds_channel_pool_initialization() {
         isolate_name: "test-isolate".to_string(),
         publisher_id: "test-publisher".to_string(),
         is_ratified: false,
-        isolate_instance_id: InstanceIdGenerator::generate(),
+        isolate_instance_id: InstanceIdGenerator::generate().into(),
         otel_endpoint: Some(otel_endpoint),
         max_decoding_message_size: 4 * 1024 * 1024,
         disable_filtering: false,
@@ -672,7 +680,7 @@ async fn test_filter_metrics_empty_allowlist_removal() {
 }
 
 async fn create_test_receiver(policy: IsolateMetricsPolicy) -> IsolateMetricsReceiver {
-    create_test_receiver_with_instance_id(policy, InstanceIdGenerator::generate()).await
+    create_test_receiver_with_instance_id(policy, InstanceIdGenerator::generate().into()).await
 }
 
 async fn create_test_receiver_with_instance_id(
@@ -711,15 +719,13 @@ async fn test_enrich_metrics_dynamic_instance_id_restart() {
     let mut request_2 = create_test_request(vec![create_test_metric("test_metric", vec![])]);
     receiver_2.enrich_metrics(&mut request_2);
 
-    let scope_1 = request_1.resource_metrics[0].scope_metrics[0].scope.as_ref().unwrap();
-    let scope_2 = request_2.resource_metrics[0].scope_metrics[0].scope.as_ref().unwrap();
+    let res_1 = request_1.resource_metrics[0].resource.as_ref().unwrap();
+    let res_2 = request_2.resource_metrics[0].resource.as_ref().unwrap();
 
-    let id_attr_1 =
-        scope_1.attributes.iter().find(|kv| kv.key == "ez_isolate_instance_id").unwrap();
-    let id_attr_2 =
-        scope_2.attributes.iter().find(|kv| kv.key == "ez_isolate_instance_id").unwrap();
+    let id_attr_1 = res_1.attributes.iter().find(|kv| kv.key == "ez_isolate_instance_id").unwrap();
+    let id_attr_2 = res_2.attributes.iter().find(|kv| kv.key == "ez_isolate_instance_id").unwrap();
 
-    // Verify that receiver_1 and receiver_2 properly set the expected instance_id
+    // Verify that receiver_1 and receiver_2 properly set the expected instance_id in resource attributes
     assert_eq!(id_attr_1.value.as_ref().unwrap().value, Some(Value::StringValue(instance_id_1)));
     assert_eq!(id_attr_2.value.as_ref().unwrap().value, Some(Value::StringValue(instance_id_2)));
     assert_ne!(id_attr_1.value, id_attr_2.value);

@@ -312,6 +312,7 @@ impl ExternalProxyChannel for ExternalProxyConnector {
         &self,
         isolate_id: IsolateId,
         from_bridge_rx: Receiver<InvokeEzRequest>,
+        timeout: Option<std::time::Duration>,
     ) -> Result<Receiver<Result<InvokeEzResponse, Status>>, ExternalProxyConnectorError> {
         let mut client = EzExternalProxyServiceClient::new(self.client_channel_pool.next_channel())
             .max_decoding_message_size(self.max_decoding_message_size);
@@ -325,7 +326,11 @@ impl ExternalProxyChannel for ExternalProxyConnector {
         let (metadata_tx, metadata_rx) = oneshot::channel();
 
         let request_stream = ReceiverStream::new(channels.req_rx);
-        let request = tonic::Request::new(request_stream);
+        let mut request = tonic::Request::new(request_stream);
+
+        if let Some(t) = timeout {
+            request.set_timeout(t);
+        }
 
         tokio::spawn(Self::handle_requests(
             isolate_id,

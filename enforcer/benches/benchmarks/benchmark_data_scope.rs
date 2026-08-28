@@ -106,11 +106,15 @@ impl DsmBenchmarkManager {
         let binary_service_index = add_isolate_request.isolate_id.get_binary_services_index();
         let max_data_scope = add_isolate_request.allowed_data_scope_type;
         let isolate_id = add_isolate_request.isolate_id;
-
         self.data_scope_requester
             .add_isolate(add_isolate_request)
             .await
             .context("Failed to add isolate")?;
+
+        self.data_scope_requester
+            .activate_isolate(isolate_id)
+            .await
+            .context("Failed to activate isolate")?;
 
         for data_scope in DATA_SCOPES {
             if data_scope > max_data_scope {

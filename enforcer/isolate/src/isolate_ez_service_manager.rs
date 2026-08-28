@@ -19,7 +19,7 @@ use enforcer_proto::enforcer::v1::isolate_ez_bridge_server::IsolateEzBridgeServe
 use external_proxy_connector::ExternalProxyChannel;
 use fileshare_manager::FileshareManager;
 use isolate_ez_service::{IsolateEzBridgeDependencies, IsolateEzBridgeService};
-use isolate_info::{InstanceIdGenerator, IsolateId};
+use isolate_info::IsolateId;
 use isolate_service_mapper::IsolateServiceMapper;
 use junction_trait::Junction;
 use manifest_proto::enforcer::v1::IsolateMetricsPolicy;
@@ -73,6 +73,7 @@ pub struct StartIsolateEzServerArgs {
     pub otel_metrics_address: String,
     pub metrics_policy: IsolateMetricsPolicy,
     pub isolate_type: isolate_info::IsolateType,
+    pub isolate_instance_id: String,
 }
 
 impl IsolateEzServiceManager {
@@ -105,6 +106,7 @@ impl IsolateEzServiceManager {
                     args.isolate_type.isolate_name,
                     args.isolate_type.publisher_id,
                     is_ratified,
+                    args.isolate_instance_id,
                 )
                 .await;
         });
@@ -181,6 +183,7 @@ impl IsolateEzServiceManager {
         isolate_name: String,
         publisher_id: String,
         is_ratified: bool,
+        isolate_instance_id: String,
     ) {
         let uds_result = UnixListener::bind(&address);
         let uds = uds_result.expect("Failed to bind to OTel metrics UDS");
@@ -191,7 +194,7 @@ impl IsolateEzServiceManager {
             isolate_name,
             publisher_id,
             is_ratified,
-            isolate_instance_id: InstanceIdGenerator::generate(),
+            isolate_instance_id,
             otel_endpoint: self.deps.otel_endpoint.clone(),
             max_decoding_message_size: self.deps.max_decoding_message_size,
             disable_filtering: self.deps.disable_metrics_filtering,

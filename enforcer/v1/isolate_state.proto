@@ -37,5 +37,6 @@ enum IsolateState {
   ISOLATE_STATE_IDLE = 11;
   // Isolate is being gracefully shut down.
   // It will finish in-flight requests but not accept new ones.
+  // This is only set by the Enforcer internally.
   ISOLATE_STATE_RETIRING = 12;
 }

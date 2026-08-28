@@ -15,7 +15,8 @@
 use container_manager_request::{ContainerManagerRequest, ResetIsolateResponse};
 use container_manager_requester::ContainerManagerRequester;
 use data_scope::request::{
-    AddIsolateRequest, FreezeIsolateScopeRequest, GetIsolateRequest, RemoveIsolateRequest,
+    AddIsolateRequest, FreezeIsolateScopeRequest, GetIsolateRequest, GetIsolateScopeRequest,
+    RemoveIsolateRequest,
 };
 use data_scope::requester::DataScopeRequester;
 use data_scope_proto::enforcer::v1::DataScopeType;
@@ -47,6 +48,7 @@ impl TestHarness {
             IsolateStateManager::new(data_scope_requester.clone(), container_manager_requester);
         let isolate_id = IsolateId::new(*TEST_BINARY_SERVICES_INDEX);
         state_manager.add_isolate(create_add_isolate_request(isolate_id)).await;
+        state_manager.mark_channel_connected(isolate_id).await.unwrap();
         Self {
             state_manager,
             data_scope_requester,
@@ -249,6 +251,26 @@ async fn test_freeze_scope_succeeds_for_ready_isolate() -> Result<(), Box<dyn st
 }
 
 #[tokio::test]
+async fn test_freeze_scope_succeeds_for_retiring_isolate() -> Result<(), Box<dyn std::error::Error>>
+{
+    let mut harness = TestHarness::new().await;
+    harness.advance_to_state(IsolateState::Retiring).await;
+
+    let freeze_req = FreezeIsolateScopeRequest { isolate_id: harness.isolate_id };
+    let result: Result<(), _> = harness.state_manager.freeze_scope(freeze_req).await;
+
+    assert!(result.is_ok());
+
+    let scope_res = harness
+        .data_scope_requester
+        .get_isolate_scope(GetIsolateScopeRequest { isolate_id: harness.isolate_id })
+        .await?;
+    assert_eq!(scope_res.current_scope, DataScopeType::Public);
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_valid_transition_ready_to_idle() -> Result<(), Box<dyn std::error::Error>> {
     let mut harness = TestHarness::new().await;
     harness.advance_to_state(IsolateState::Ready).await;
@@ -267,11 +289,6 @@ async fn test_valid_transition_ready_to_idle() -> Result<(), Box<dyn std::error:
 async fn test_valid_transition_retiring_to_idle() -> Result<(), Box<dyn std::error::Error>> {
     let mut harness = TestHarness::new().await;
     harness.advance_to_state(IsolateState::Retiring).await;
-
-    assert!(
-        harness.data_scope_requester.get_isolate(create_get_isolate_request()).await.is_err(),
-        "get_isolate should fail after isolate is retiring"
-    );
 
     let listener_task = harness.spawn_reset_listener();
 
@@ -485,6 +502,7 @@ async fn test_is_isolate_ready_multiple_replicas() -> Result<(), Box<dyn std::er
     let isolate_id1 = harness.isolate_id;
     let isolate_id2 = IsolateId::new(binary_index);
     harness.state_manager.add_isolate(create_add_isolate_request(isolate_id2)).await;
+    harness.state_manager.mark_channel_connected(isolate_id2).await?;
 
     assert!(!harness.state_manager.is_isolate_ready(binary_index));
 
@@ -509,6 +527,35 @@ async fn test_is_isolate_ready_multiple_replicas() -> Result<(), Box<dyn std::er
         !harness.state_manager.is_isolate_ready(binary_index),
         "Binary service should not be ready when all isolates have retired"
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_readiness_barrier_requires_both_sdk_and_channel(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let data_scope_requester = DataScopeRequester::new(u64::MAX);
+    let (container_manager_request_tx, _container_manager_request_rx) =
+        tokio::sync::mpsc::channel(128);
+    let container_manager_requester = ContainerManagerRequester::new(container_manager_request_tx);
+    let state_manager =
+        IsolateStateManager::new(data_scope_requester.clone(), container_manager_requester);
+    let binary_index = *TEST_BINARY_SERVICES_INDEX;
+    let isolate_id = IsolateId::new(binary_index);
+
+    state_manager.add_isolate(create_add_isolate_request(isolate_id)).await;
+    assert_eq!(state_manager.get_isolate_state(isolate_id), Some(IsolateState::Starting));
+    assert!(!state_manager.is_isolate_ready(binary_index));
+
+    // Case 1: SDK reports ready, but channel is not connected yet -> should remain Starting
+    state_manager.update_state(isolate_id, IsolateState::Ready).await?;
+    assert_eq!(state_manager.get_isolate_state(isolate_id), Some(IsolateState::Starting));
+    assert!(!state_manager.is_isolate_ready(binary_index));
+
+    // Channel connects -> now both are true, should promote to Ready
+    state_manager.mark_channel_connected(isolate_id).await?;
+    assert_eq!(state_manager.get_isolate_state(isolate_id), Some(IsolateState::Ready));
+    assert!(state_manager.is_isolate_ready(binary_index));
 
     Ok(())
 }

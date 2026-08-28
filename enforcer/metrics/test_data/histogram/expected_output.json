@@ -3,7 +3,26 @@
     "resourceMetrics": [
       {
         "resource": {
-          "attributes": [],
+          "attributes": [
+            {
+              "key": "ez_isolate_name",
+              "value": {
+                "stringValue": "ezpkg://helloworld.com"
+              }
+            },
+            {
+              "key": "ez_publisher_id",
+              "value": {
+                "stringValue": "helloworld_domain"
+              }
+            },
+            {
+              "key": "ez_isolate_instance_id",
+              "value": {
+                "stringValue": "1"
+              }
+            }
+          ],
           "droppedAttributesCount": 0,
           "entityRefs": []
         },
@@ -20,18 +39,6 @@
                   }
                 },
                 {
-                  "key": "ez_isolate_name",
-                  "value": {
-                    "stringValue": "ezpkg://helloworld.com"
-                  }
-                },
-                {
-                  "key": "ez_publisher_id",
-                  "value": {
-                    "stringValue": "helloworld_domain"
-                  }
-                },
-                {
                   "key": "ez_isolate_type",
                   "value": {
                     "stringValue": "opaque"
@@ -41,12 +48,6 @@
                   "key": "ez_enforcer_version",
                   "value": {
                     "stringValue": "1.23.45"
-                  }
-                },
-                {
-                  "key": "ez_isolate_instance_id",
-                  "value": {
-                    "stringValue": "1"
                   }
                 }
               ],

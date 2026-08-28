@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## 0.23.0 (2026-08-28)
+
+
+### EZ Policy Enforcer
+
+* **enforcer:** Clamp max scope to current scope on freeze
+* **enforcer:** Decouple isolate scope reg & extend Junction retry
+* **enforcer:** define manifest v2 IsolateStartupParameters protos
+* **enforcer:** dynamic ez_isolate_instance_id generator per isolate
+* **enforcer:** move isolate identity attributes to resource attributes
+* **enforcer:** move runtime parameters out of v2 manifest
+* **enforcer:** plumb isolate_instance_id into isolate server args
+* **enforcer:** Support isolate retiring in DSM
+* **enforcer:** Sync isolate readiness in DSM with Junction channel
+
+
+### Features
+
+* propagate timeout deadlines in streams
+
+
+### Documentation
+
+* **enforcer:** clarify InstanceId doc comment
+
 ## 0.22.0 (2026-08-24)
 
 

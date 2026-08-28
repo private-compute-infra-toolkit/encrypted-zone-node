@@ -41,7 +41,7 @@ async fn test_outbound_stream_metrics() {
 
     let (local_to_outbound, from_local_rx) = mpsc::channel(10);
     let mut outbound_to_local =
-        handler.remote_streaming_connect(None, from_local_rx).await.unwrap();
+        handler.remote_streaming_connect(None, from_local_rx, None).await.unwrap();
 
     let initial_request = create_test_request(Some(first_payload));
     local_to_outbound.send(initial_request).await.unwrap();

@@ -98,6 +98,7 @@ rust_test(
         "//enforcer/error:ez_error",
         "//enforcer/grpc_connector",
         "//enforcer/isolate:isolate_info",
+        "//enforcer/isolate:isolate_test_utils",
         "//enforcer/junction:junction_test_utils",
         "//enforcer/junction:junction_trait",
         "//enforcer/v1:data_scope_rust",

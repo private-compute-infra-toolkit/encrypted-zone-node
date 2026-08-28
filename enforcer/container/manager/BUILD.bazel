@@ -95,31 +95,12 @@ filegroup(
     ]),
 )
 
-rust_test(
-    name = "container_manager_tests",
-    size = "small",
-    srcs = [
-        "test/container_manager_tests.rs",
-    ],
-    # Add this line to enforce sequential execution
-    # This is important because we use global states
-    args = ["--test-threads=1"],
-    compile_data = [
-        "//enforcer/proto:manifest_v1_descriptor_set",
-        "//enforcer/proto:manifest_v2_descriptor_set",
-    ],
-    crate_root = "test/container_manager_tests.rs",
-    data = [
-        ":testdata",
-        "//enforcer/container/test_data:test_binary",
-        "//enforcer/manifest_parser:testdata",
-        "//enforcer/proto:manifest_v1_descriptor_set",
-        "//enforcer/proto:manifest_v2_descriptor_set",
-    ],
-    rustc_env = {
-        "TEST_MANIFEST_DESCRIPTOR_SET_PATH": "$(execpath //enforcer/proto:manifest_v1_descriptor_set)",
-        "TEST_MANIFEST_V2_DESCRIPTOR_SET_PATH": "$(execpath //enforcer/proto:manifest_v2_descriptor_set)",
-    },
+rust_library(
+    name = "container_manager_test_utils",
+    testonly = True,
+    srcs = ["test/test_utils.rs"],
+    crate_root = "test/test_utils.rs",
+    visibility = ["//visibility:public"],
     deps = [
         ":container_manager",
         ":container_manager_request",
@@ -154,6 +135,60 @@ rust_test(
         "@crates//:tokio-stream",
         "@crates//:tonic",
         "@crates//:tower",
+    ],
+)
+
+rust_test(
+    name = "v1_test",
+    size = "small",
+    srcs = [
+        "test/v1_test.rs",
+    ],
+    # Add this line to enforce sequential execution
+    # This is important because we use global states
+    args = ["--test-threads=1"],
+    data = [
+        ":testdata",
+        "//enforcer/container/test_data:test_binary",
+        "//enforcer/manifest_parser:testdata",
+    ],
+    deps = [
+        ":container_manager",
+        ":container_manager_request",
+        ":container_manager_test_utils",
+        "//enforcer/container:container_test_utils",
+        "//enforcer/data_scope",
+        "//enforcer/interceptor",
+        "//enforcer/isolate:isolate_info",
+        "//enforcer/v1:data_scope_rust",
+        "//enforcer/v1:enforcer_rust",
+        "//enforcer/v1:manifest_rust",
+        "@crates//:opentelemetry-proto",
+        "@crates//:tokio",
+    ],
+)
+
+rust_test(
+    name = "v2_test",
+    size = "small",
+    srcs = [
+        "test/v2_test.rs",
+    ],
+    # Add this line to enforce sequential execution
+    # This is important because we use global states
+    args = ["--test-threads=1"],
+    data = [
+        ":testdata",
+        "//enforcer/container/test_data:test_binary",
+        "//enforcer/manifest_parser:testdata",
+    ],
+    deps = [
+        ":container_manager_test_utils",
+        "//enforcer/container:container_test_utils",
+        "//enforcer/isolate:isolate_info",
+        "//enforcer/manifest_parser",
+        "//enforcer/v1:manifest_rust",
+        "@crates//:tokio",
     ],
 )
 

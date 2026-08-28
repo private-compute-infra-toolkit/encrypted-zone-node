@@ -12,14 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, ensure, Context, Result};
+use common_proto::enforcer::v2::IsolateType;
 use ez_backend_dependencies_proto::enforcer::v2::EzBackendDependency as EzBackendDependencyV2;
 use ez_service_spec_proto::enforcer::v2::EzServiceSpec as EzServiceSpecV2;
 use intercepting_services_proto::enforcer::v2::InterceptingServices as InterceptingServicesV2;
 use isolate_metrics_policy_proto::enforcer::v2::IsolateMetricsPolicy as IsolateMetricsPolicyV2;
+use isolate_startup_parameters_proto::enforcer::v2::IsolateStartupParameters;
 use manifest_proto::enforcer::v1::{
-    AllowedMetric, BinaryManifest, EzBackendDependency, EzMethodSpec, EzServiceSpec,
-    InterceptingServices, IsolateMetricsPolicy,
+    AllowedMetric, EzBackendDependency, EzMethodSpec, EzServiceSpec, InterceptingServices,
+    IsolateMetricsPolicy,
 };
 use opaque_isolate_manifest_proto::enforcer::v2::OpaqueIsolateDescriptor;
 use prost_reflect::prost::Message;
@@ -28,7 +30,7 @@ use ratified_isolate_manifest_proto::enforcer::v2::RatifiedIsolateDescriptor;
 use serde_json::de::Deserializer;
 use setup_isolate_manifest_proto::enforcer::v2::SetupIsolateDescriptor;
 
-use super::ParsedIsolate;
+use super::{IsolateKind, ParsedIsolate};
 
 /// Generic helper to deserialize a JSON string into a protobuf message.
 pub(crate) fn parse_proto_message<T: Message + Default>(
@@ -45,149 +47,136 @@ pub(crate) fn parse_proto_message<T: Message + Default>(
     dynamic_message.transcode_to().with_context(|| format!("couldn't transcode {message_name}"))
 }
 
-pub(crate) struct V2ToBinaryManifestArgs {
-    pub binary_filename: String,
-    pub command_line_arguments: Vec<String>,
-    pub unpacked_archive_size: i64,
-    pub disk_reservation_size: i64,
-    pub service_specs: Vec<EzServiceSpecV2>,
-    pub ez_backend_dependencies: Vec<EzBackendDependencyV2>,
-    pub environment_variables: Vec<String>,
-    pub number_of_isolates: i32,
-    pub is_ratified_isolate: bool,
-    pub services_to_intercept: Vec<InterceptingServicesV2>,
-    pub metrics_policy: Option<IsolateMetricsPolicyV2>,
-}
-
-pub(crate) fn build_binary_manifest_from_v2(args: V2ToBinaryManifestArgs) -> BinaryManifest {
-    BinaryManifest {
-        binary_filename: args.binary_filename,
-        command_line_arguments: args.command_line_arguments,
-        unpacked_archive_size: args.unpacked_archive_size,
-        disk_reservation_size: args.disk_reservation_size,
-        service_specs: convert_service_specs_v2_to_v1(args.service_specs),
-        ez_backend_dependencies: convert_backend_dependencies_v2_to_v1(
-            args.ez_backend_dependencies,
-        ),
-        environment_variables: args.environment_variables,
-        number_of_isolates: args.number_of_isolates,
-        is_ratified_isolate: args.is_ratified_isolate,
-        services_to_intercept: convert_intercepting_services_v2_to_v1(args.services_to_intercept),
-        metrics_policy: args.metrics_policy.map(convert_metrics_policy_v2_to_v1),
-    }
-}
-
 /// Converts a Setup isolate descriptor into a normalized [`ParsedIsolate`].
 pub(crate) fn convert_setup_descriptor_to_parsed_isolate(
     desc: SetupIsolateDescriptor,
-) -> ParsedIsolate {
-    ParsedIsolate {
-        isolate_name: desc.isolate_name,
-        publisher_id: desc.publisher_id,
+) -> Result<ParsedIsolate> {
+    let (isolate_name, publisher_id) = extract_isolate_identity(desc.isolate_type)?;
+    let number_of_isolates = extract_number_of_isolates(desc.startup_parameters.as_ref())?;
+
+    Ok(ParsedIsolate {
+        isolate_name,
+        publisher_id,
         package_filename: desc.package_filename,
-        binary_manifest: build_binary_manifest_from_v2(V2ToBinaryManifestArgs {
+        number_of_isolates,
+        service_specs: convert_service_specs_v2_to_v1(desc.service_specs)?,
+        ez_backend_dependencies: convert_backend_dependencies_v2_to_v1(
+            desc.ez_backend_dependencies,
+        )?,
+        metrics_policy: None,
+        kind: IsolateKind::Ratified {
             binary_filename: desc.binary_filename,
             command_line_arguments: desc.command_line_arguments,
-            unpacked_archive_size: desc.unpacked_archive_size,
-            disk_reservation_size: desc.disk_reservation_size,
-            service_specs: desc.service_specs,
-            ez_backend_dependencies: desc.ez_backend_dependencies,
             environment_variables: desc.environment_variables,
-            number_of_isolates: desc.number_of_isolates,
-            is_ratified_isolate: true,
-            services_to_intercept: desc.services_to_intercept,
-            metrics_policy: desc.metrics_policy,
-        }),
-    }
+            services_to_intercept: vec![],
+        },
+    })
 }
 
 /// Converts a Ratified isolate descriptor into a normalized [`ParsedIsolate`].
 pub(crate) fn convert_ratified_descriptor_to_parsed_isolate(
     desc: RatifiedIsolateDescriptor,
-) -> ParsedIsolate {
-    ParsedIsolate {
-        isolate_name: desc.isolate_name,
-        publisher_id: desc.publisher_id,
+) -> Result<ParsedIsolate> {
+    let (isolate_name, publisher_id) = extract_isolate_identity(desc.isolate_type)?;
+    let number_of_isolates = extract_number_of_isolates(desc.startup_parameters.as_ref())?;
+
+    Ok(ParsedIsolate {
+        isolate_name,
+        publisher_id,
         package_filename: desc.package_filename,
-        binary_manifest: build_binary_manifest_from_v2(V2ToBinaryManifestArgs {
+        number_of_isolates,
+        service_specs: convert_service_specs_v2_to_v1(desc.service_specs)?,
+        ez_backend_dependencies: convert_backend_dependencies_v2_to_v1(
+            desc.ez_backend_dependencies,
+        )?,
+        metrics_policy: desc.metrics_policy.map(convert_metrics_policy_v2_to_v1),
+        kind: IsolateKind::Ratified {
             binary_filename: desc.binary_filename,
             command_line_arguments: desc.command_line_arguments,
-            unpacked_archive_size: desc.unpacked_archive_size,
-            disk_reservation_size: desc.disk_reservation_size,
-            service_specs: desc.service_specs,
-            ez_backend_dependencies: desc.ez_backend_dependencies,
             environment_variables: desc.environment_variables,
-            number_of_isolates: desc.number_of_isolates,
-            is_ratified_isolate: true,
-            services_to_intercept: desc.services_to_intercept,
-            metrics_policy: desc.metrics_policy,
-        }),
-    }
+            services_to_intercept: convert_intercepting_services_v2_to_v1(
+                desc.services_to_intercept,
+            )?,
+        },
+    })
 }
 
 /// Converts an Opaque isolate descriptor into a normalized [`ParsedIsolate`].
 pub(crate) fn convert_opaque_descriptor_to_parsed_isolate(
     desc: OpaqueIsolateDescriptor,
-) -> ParsedIsolate {
-    ParsedIsolate {
-        isolate_name: desc.isolate_name,
-        publisher_id: desc.publisher_id,
+) -> Result<ParsedIsolate> {
+    let (isolate_name, publisher_id) = extract_isolate_identity(desc.isolate_type)?;
+    let number_of_isolates = extract_number_of_isolates(desc.startup_parameters.as_ref())?;
+
+    Ok(ParsedIsolate {
+        isolate_name,
+        publisher_id,
         package_filename: desc.package_filename,
-        binary_manifest: build_binary_manifest_from_v2(V2ToBinaryManifestArgs {
+        number_of_isolates,
+        service_specs: convert_service_specs_v2_to_v1(desc.service_specs)?,
+        ez_backend_dependencies: convert_backend_dependencies_v2_to_v1(
+            desc.ez_backend_dependencies,
+        )?,
+        metrics_policy: desc.metrics_policy.map(convert_metrics_policy_v2_to_v1),
+        kind: IsolateKind::Opaque {
             binary_filename: desc.binary_filename,
-            command_line_arguments: desc.command_line_arguments,
-            unpacked_archive_size: desc.unpacked_archive_size,
-            disk_reservation_size: desc.disk_reservation_size,
-            service_specs: desc.service_specs,
-            ez_backend_dependencies: desc.ez_backend_dependencies,
-            environment_variables: desc.environment_variables,
-            number_of_isolates: desc.number_of_isolates,
-            is_ratified_isolate: false,
-            services_to_intercept: desc.services_to_intercept,
-            metrics_policy: desc.metrics_policy,
-        }),
-    }
+            command_line_arguments: vec![],
+            environment_variables: vec![],
+        },
+    })
 }
 
-fn convert_service_specs_v2_to_v1(specs: Vec<EzServiceSpecV2>) -> Vec<EzServiceSpec> {
-    specs
-        .into_iter()
-        .map(|s| EzServiceSpec {
-            service_name: s.service_name,
-            method_specs: s
-                .method_specs
-                .into_iter()
-                .map(|m| EzMethodSpec {
-                    method_name: m.method_name,
-                    input_scope_types: m.input_scope_types,
-                    output_scope_types: m.output_scope_types,
-                })
-                .collect(),
-        })
-        .collect()
+fn convert_service_specs_v2_to_v1(specs: Vec<EzServiceSpecV2>) -> Result<Vec<EzServiceSpec>> {
+    let mut out = Vec::with_capacity(specs.len());
+    for s in specs {
+        ensure!(!s.service_name.is_empty(), "service_name cannot be empty in EzServiceSpec");
+        let mut method_specs = Vec::with_capacity(s.method_specs.len());
+        for m in s.method_specs {
+            ensure!(!m.method_name.is_empty(), "method_name cannot be empty in EzMethodSpec");
+            method_specs.push(EzMethodSpec {
+                method_name: m.method_name,
+                input_scope_types: m.input_scope_types,
+                output_scope_types: m.output_scope_types,
+            });
+        }
+        out.push(EzServiceSpec { service_name: s.service_name, method_specs });
+    }
+    Ok(out)
 }
 
 fn convert_backend_dependencies_v2_to_v1(
     deps: Vec<EzBackendDependencyV2>,
-) -> Vec<EzBackendDependency> {
-    deps.into_iter()
-        .map(|d| EzBackendDependency {
+) -> Result<Vec<EzBackendDependency>> {
+    let mut out = Vec::with_capacity(deps.len());
+    for d in deps {
+        ensure!(!d.service_name.is_empty(), "service_name cannot be empty in EzBackendDependency");
+        ensure!(!d.method_name.is_empty(), "method_name cannot be empty in EzBackendDependency");
+        out.push(EzBackendDependency {
             operator_domain: d.operator_domain,
             publisher_id: d.publisher_id,
             isolate_name: d.isolate_name,
             service_name: d.service_name,
             method_name: d.method_name,
             route_type: d.route_type,
-        })
-        .collect()
+        });
+    }
+    Ok(out)
 }
 
 fn convert_intercepting_services_v2_to_v1(
     intercepts: Vec<InterceptingServicesV2>,
-) -> Vec<InterceptingServices> {
-    intercepts
-        .into_iter()
-        .map(|i| InterceptingServices {
+) -> Result<Vec<InterceptingServices>> {
+    let mut out = Vec::with_capacity(intercepts.len());
+    for i in intercepts {
+        ensure!(
+            !i.intercepting_service_name.is_empty(),
+            "intercepting_service_name cannot be empty in InterceptingServices"
+        );
+        ensure!(
+            !i.interceptor_service_name.is_empty(),
+            "interceptor_service_name cannot be empty in InterceptingServices"
+        );
+        out.push(InterceptingServices {
             intercepting_operator_domain: i.intercepting_operator_domain,
             intercepting_publisher_id: i.intercepting_publisher_id,
             intercepting_isolate_name: i.intercepting_isolate_name,
@@ -198,8 +187,9 @@ fn convert_intercepting_services_v2_to_v1(
             interceptor_service_name: i.interceptor_service_name,
             interceptor_method_for_unary: i.interceptor_method_for_unary,
             interceptor_method_for_streaming: i.interceptor_method_for_streaming,
-        })
-        .collect()
+        });
+    }
+    Ok(out)
 }
 
 fn convert_metrics_policy_v2_to_v1(policy: IsolateMetricsPolicyV2) -> IsolateMetricsPolicy {
@@ -214,4 +204,21 @@ fn convert_metrics_policy_v2_to_v1(policy: IsolateMetricsPolicyV2) -> IsolateMet
             })
             .collect(),
     }
+}
+
+fn extract_isolate_identity(isolate_type: Option<IsolateType>) -> Result<(String, String)> {
+    let it = isolate_type.context("isolate_type must be specified")?;
+    ensure!(!it.isolate_name.is_empty(), "isolate_name cannot be empty in isolate_type");
+    ensure!(!it.publisher_id.is_empty(), "publisher_id cannot be empty in isolate_type");
+    Ok((it.isolate_name, it.publisher_id))
+}
+
+fn extract_number_of_isolates(
+    startup_parameters: Option<&IsolateStartupParameters>,
+) -> Result<i32> {
+    let num = startup_parameters.map_or(0, |sp| sp.number_of_isolates);
+    if num < 0 {
+        bail!("number_of_isolates cannot be negative, got {}", num);
+    }
+    Ok(num)
 }

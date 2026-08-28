@@ -53,6 +53,7 @@ fn get_mutex() -> &'static Mutex<()> {
 pub struct MockProxyService {
     pub call_count: Arc<AtomicUsize>,
     pub request_capture_tx: Option<Sender<EzExternalProxyRequest>>,
+    pub metadata_capture_tx: Option<Sender<tonic::metadata::MetadataMap>>,
 }
 
 #[tonic::async_trait]
@@ -64,6 +65,9 @@ impl EzExternalProxyService for MockProxyService {
         request: tonic::Request<EzExternalProxyRequest>,
     ) -> Result<tonic::Response<EzExternalProxyResponse>, tonic::Status> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
+        if let Some(metadata_tx) = &self.metadata_capture_tx {
+            metadata_tx.send(request.metadata().clone()).await.ok();
+        }
         let req = request.into_inner();
 
         if let Some(capture_channel) = &self.request_capture_tx {
@@ -83,6 +87,9 @@ impl EzExternalProxyService for MockProxyService {
         &self,
         request: tonic::Request<tonic::Streaming<EzExternalProxyRequest>>,
     ) -> Result<tonic::Response<Self::StreamCallStream>, tonic::Status> {
+        if let Some(metadata_tx) = &self.metadata_capture_tx {
+            metadata_tx.send(request.metadata().clone()).await.ok();
+        }
         let mut stream = request.into_inner();
         let (tx, rx) = mpsc::channel(10);
 
@@ -282,8 +289,11 @@ async fn test_connect_retries_and_succeeds() {
 async fn test_mock_proxy_service_unary_call() {
     let call_count = Arc::new(AtomicUsize::new(0));
     let (capture_tx, mut capture_rx) = mpsc::channel(10);
-    let mock_service =
-        MockProxyService { call_count: call_count.clone(), request_capture_tx: Some(capture_tx) };
+    let mock_service = MockProxyService {
+        call_count: call_count.clone(),
+        request_capture_tx: Some(capture_tx),
+        ..Default::default()
+    };
 
     // Create the test request data.
     let test_payload = vec![10, 20, 30];
@@ -397,7 +407,8 @@ async fn test_stream_proxy_external_end_to_end_streaming() {
     let request1 = create_generic_test_request(vec![vec![10, 20, 30]]);
     tx.send(request1.clone()).await.unwrap();
 
-    let mut response_receiver = connector.stream_proxy_external(isolate_id, rx).await.unwrap();
+    let mut response_receiver =
+        connector.stream_proxy_external(isolate_id, rx, None).await.unwrap();
 
     // Send a follow up request after the stream is established.
     let request2 = create_generic_test_request(vec![vec![40, 50, 60]]);
@@ -453,7 +464,8 @@ async fn stream_passes_for_ratified_isolate_with_userprivate_scope() {
     req_tx.send(create_scope_test_request(DataScopeType::UserPrivate)).await.unwrap();
     drop(req_tx); // Signals end of stream, necessary since connector now continues on error.
 
-    let mut response_receiver = connector.stream_proxy_external(isolate_id, req_rx).await.unwrap();
+    let mut response_receiver =
+        connector.stream_proxy_external(isolate_id, req_rx, None).await.unwrap();
 
     // Wait for the response to ensure the call completed
     let err_response = response_receiver.recv().await.expect("Should receive an error response");
@@ -489,7 +501,8 @@ async fn stream_fails_for_ratified_isolate_with_translation_error() {
     let malformed_request = create_generic_test_request(vec![vec![1, 2], vec![3, 4]]);
     req_tx.send(malformed_request).await.unwrap();
     drop(req_tx); // Signals end of stream, necessary since connector now continues on error.
-    let mut response_receiver = connector.stream_proxy_external(isolate_id, req_rx).await.unwrap();
+    let mut response_receiver =
+        connector.stream_proxy_external(isolate_id, req_rx, None).await.unwrap();
     let err_response = response_receiver.recv().await.expect("Should receive an error response");
     let status = err_response.expect_err("Response should have a status");
 
@@ -525,7 +538,8 @@ async fn stream_fails_for_opaque_isolate_with_userprivate_scope() {
     // Intentionally sending request before awaiting stream connection to prevent gRPC deadlock.
     req_tx.send(create_scope_test_request(DataScopeType::UserPrivate)).await.unwrap();
     drop(req_tx); // Signals end of stream, necessary since connector now continues on error.
-    let mut response_stream = connector.stream_proxy_external(isolate_id, req_rx).await.unwrap();
+    let mut response_stream =
+        connector.stream_proxy_external(isolate_id, req_rx, None).await.unwrap();
 
     // The call should be rejected with an error response.
     let response = response_stream.recv().await.unwrap();
@@ -550,6 +564,7 @@ async fn stream_passes_for_opaque_isolate_with_domainowned_scope() {
     let (server_address, shutdown_tx, _temp_dir) = setup_uds_server(MockProxyService {
         call_count: proxy_calls.clone(),
         request_capture_tx: None,
+        ..Default::default()
     })
     .await;
 
@@ -560,7 +575,8 @@ async fn stream_passes_for_opaque_isolate_with_domainowned_scope() {
     req_tx.send(create_scope_test_request(DataScopeType::DomainOwned)).await.unwrap();
     drop(req_tx);
 
-    let mut response_receiver = connector.stream_proxy_external(isolate_id, req_rx).await.unwrap();
+    let mut response_receiver =
+        connector.stream_proxy_external(isolate_id, req_rx, None).await.unwrap();
 
     // Wait for the response
     let _ =
@@ -774,22 +790,20 @@ async fn unary_fails_on_missing_control_plane_metadata() {
     let _ = shutdown_tx.send(());
 }
 
-/// Tests that the timeout is correctly propagated to the underlying connector.
+/// Tests that the timeout is correctly propagated to the underlying connector for unary requests.
 #[tokio::test]
 async fn test_external_proxy_connector_timeout_propagation() {
     let isolate_id = IsolateId::new(BinaryServicesIndex::new(true));
-    let (server_address, shutdown_tx, _temp_dir) =
-        setup_uds_server(MockProxyService::default()).await;
+    let (metadata_tx, mut metadata_rx) = mpsc::channel(1);
+    let mock_service =
+        MockProxyService { metadata_capture_tx: Some(metadata_tx), ..Default::default() };
+    let (server_address, shutdown_tx, _temp_dir) = setup_uds_server(mock_service).await;
 
     let connector = build_test_connector(server_address).await.unwrap();
     let test_datagrams = vec![vec![10, 20, 30]];
     let request = create_generic_test_request(test_datagrams.clone());
     let timeout = Duration::from_secs(5);
 
-    // To properly test timeout propagation, we would need to mock the inner gRPC client
-    // or have the mock service simulate a delay. Since the current MockProxyService
-    // responds immediately, we can only verify that the call completes within the timeout.
-    // A more thorough test would involve a mock service that respects the timeout.
     let response_result = tokio::time::timeout(
         timeout + Duration::from_secs(1), // Add a little buffer
         connector.proxy_external(isolate_id, request.clone(), Some(Instant::now() + timeout)),
@@ -799,6 +813,52 @@ async fn test_external_proxy_connector_timeout_propagation() {
     assert!(response_result.is_ok(), "Call should complete within the timeout");
     let inner_result = response_result.unwrap();
     assert!(inner_result.is_ok(), "Inner result should be successful");
+
+    let metadata = metadata_rx.recv().await.expect("Should capture request metadata");
+    let parsed_timeout = grpc_connector::try_parse_grpc_timeout(&metadata)
+        .expect("Should parse grpc-timeout header")
+        .expect("grpc-timeout should be present");
+    assert!(
+        parsed_timeout >= Duration::from_secs(4) && parsed_timeout <= Duration::from_secs(5),
+        "Timeout header value {parsed_timeout:?} should be close to 5s"
+    );
+
+    let _ = shutdown_tx.send(());
+}
+
+/// Tests that the timeout is correctly propagated to the underlying connector for streaming requests.
+#[tokio::test]
+async fn test_external_proxy_connector_stream_timeout_propagation() {
+    let isolate_id = IsolateId::new(BinaryServicesIndex::new(true));
+    let (metadata_tx, mut metadata_rx) = mpsc::channel(1);
+    let mock_service =
+        MockProxyService { metadata_capture_tx: Some(metadata_tx), ..Default::default() };
+    let (server_address, shutdown_tx, _temp_dir) = setup_uds_server(mock_service).await;
+
+    let connector = build_test_connector(server_address).await.unwrap();
+    let (tx, rx) = mpsc::channel(10);
+    let test_request = create_generic_test_request(vec![vec![1, 2, 3]]);
+    tx.send(test_request).await.unwrap();
+
+    let timeout = Duration::from_secs(10);
+    let mut response_receiver =
+        connector.stream_proxy_external(isolate_id, rx, Some(timeout)).await.unwrap();
+
+    let response = response_receiver
+        .recv()
+        .await
+        .expect("Should receive a response")
+        .expect("Response should be valid");
+    assert!(response.ez_response_payload.is_some());
+
+    let metadata = metadata_rx.recv().await.expect("Should capture request metadata");
+    let parsed_timeout = grpc_connector::try_parse_grpc_timeout(&metadata)
+        .expect("Should parse grpc-timeout header")
+        .expect("grpc-timeout should be present");
+    assert!(
+        parsed_timeout >= Duration::from_secs(9) && parsed_timeout <= Duration::from_secs(10),
+        "Streaming timeout header value {parsed_timeout:?} should be close to 10s"
+    );
 
     let _ = shutdown_tx.send(());
 }
@@ -839,7 +899,8 @@ async fn stream_returns_transformed_metadata_in_response() {
 
     req_tx.send(test_request).await.unwrap();
 
-    let mut response_receiver = connector.stream_proxy_external(isolate_id, res_rx).await.unwrap();
+    let mut response_receiver =
+        connector.stream_proxy_external(isolate_id, res_rx, None).await.unwrap();
 
     // Receive and verify response metadata
     let response = response_receiver

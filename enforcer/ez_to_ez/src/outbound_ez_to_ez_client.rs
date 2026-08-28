@@ -35,6 +35,7 @@ pub trait OutboundEzToEzClient: Send + Sync + DynClone {
         &self,
         first_request_metadata: Option<&ControlPlaneMetadata>,
         from_local_rx: Receiver<InvokeEzRequest>,
+        timeout: Option<std::time::Duration>,
     ) -> Result<Receiver<Result<InvokeEzResponse>>>;
 }
 

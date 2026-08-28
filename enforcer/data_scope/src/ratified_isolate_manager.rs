@@ -16,7 +16,7 @@ use crate::request::{
     AddIsolateRequest, GetIsolateRequest, GetIsolateResponse, GetIsolateScopeRequest,
     GetIsolateScopeResponse, RemoveIsolateRequest, RemoveIsolateResponse, ValidateIsolateRequest,
 };
-use dashmap::{mapref::one::Ref, DashMap};
+use dashmap::{mapref::one::Ref, DashMap, DashSet};
 use data_scope_proto::enforcer::v1::DataScopeType;
 use indexmap::set::IndexSet;
 use isolate_info::{BinaryServicesIndex, IsolateId};
@@ -37,6 +37,8 @@ pub struct RatifiedIsolateManager {
     isolates_map: Arc<DashMap<BinaryServicesIndex, IndexSet<IsolateId>>>,
     // Stores the maximum data scope for each BinaryServicesIndex.
     max_data_scope_map: Arc<DashMap<BinaryServicesIndex, DataScopeType>>,
+    // Stores all registered IsolateIds.
+    registered_isolates: Arc<DashSet<IsolateId>>,
 }
 
 impl RatifiedIsolateManager {
@@ -74,24 +76,45 @@ impl RatifiedIsolateManager {
             }
         }
 
-        let mut isolate_set = self.isolates_map.entry(binary_services_index).or_default();
-
-        if isolate_set.contains(&isolate_id) {
+        if !self.registered_isolates.insert(isolate_id) {
             return Err(DataScopeError::InternalError(format!(
                 "Isolate already exists: {:?}",
                 isolate_id
             )));
         }
 
-        isolate_set.insert(isolate_id);
         self.max_data_scope_map.insert(binary_services_index, allowed_data_scope_type);
+        self.isolates_map.entry(binary_services_index).or_default();
 
+        Ok(())
+    }
+
+    /// Activates a Ratified Isolate in the manager when it reaches `IsolateState::Ready`.
+    pub async fn activate_isolate(&self, isolate_id: IsolateId) -> Result<(), DataScopeError> {
+        if !isolate_id.is_ratified_isolate() {
+            log::error!("Trying to activate opaque isolate in RIM {:?}", isolate_id);
+            return Err(DataScopeError::InternalError(
+                "Trying to activate opaque isolate in RIM".to_string(),
+            ));
+        }
+
+        let binary_services_index = isolate_id.get_binary_services_index();
+        let mut isolate_set = self.isolates_map.entry(binary_services_index).or_default();
+
+        if isolate_set.contains(&isolate_id) {
+            return Err(DataScopeError::InternalError(format!(
+                "Isolate already active: {:?}",
+                isolate_id
+            )));
+        }
+
+        isolate_set.insert(isolate_id);
         Ok(())
     }
 
     /// Pre-registers a Ratified Isolate's `BinaryServicesIndex` and maximum allowed data scope.
     ///
-    /// This is distinct from `add_isolate` because `add_isolate` inserts a specific active `IsolateId`
+    /// This is distinct from `activate_isolate` because `activate_isolate` inserts a specific active `IsolateId`
     /// into `self.isolates_map` when an Isolate signals `IsolateState::Ready`. Pre-registering the
     /// index with an empty `IndexSet<IsolateId>` ensures that queries arriving before `Ready` return
     /// `DataScopeError::NoMatchingIsolates` (`ResourceExhausted`, retryable) rather than
@@ -113,15 +136,15 @@ impl RatifiedIsolateManager {
     ) -> Result<RemoveIsolateResponse, DataScopeError> {
         let RemoveIsolateRequest { isolate_id } = remove_isolate_request;
         let binary_services_index = isolate_id.get_binary_services_index();
-        let Some(mut isolate_set) = self.isolates_map.get_mut(&binary_services_index) else {
-            return Err(DataScopeError::InvalidIsolateServiceIndex);
-        };
 
-        if !isolate_set.contains(&isolate_id) {
+        if self.registered_isolates.remove(&isolate_id).is_none() {
             return Err(DataScopeError::UnknownIsolateId);
         }
 
-        isolate_set.swap_remove(&isolate_id);
+        if let Some(mut isolate_set) = self.isolates_map.get_mut(&binary_services_index) {
+            isolate_set.swap_remove(&isolate_id);
+        }
+
         Ok(RemoveIsolateResponse { isolate_id })
     }
 

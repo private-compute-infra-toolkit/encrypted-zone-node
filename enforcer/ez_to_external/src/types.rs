@@ -47,6 +47,7 @@ pub trait ExternalProxyChannel: std::fmt::Debug + Send + Sync {
         &self,
         isolate_id: IsolateId,
         mut from_bridge_rx: Receiver<InvokeEzRequest>,
+        timeout: Option<std::time::Duration>,
     ) -> Result<Receiver<Result<InvokeEzResponse, Status>>, ExternalProxyConnectorError>;
 
     /// Creates a clone of the channel which is returned as a trait object.

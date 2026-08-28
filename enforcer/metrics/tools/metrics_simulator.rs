@@ -14,7 +14,6 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use isolate_info::InstanceIdGenerator;
 use manifest_parser::v1::parse_manifest;
 use manifest_proto::enforcer::v1::ez_manifest::ManifestType;
 use manifest_proto::enforcer::v1::EzManifest;
@@ -111,7 +110,9 @@ fn main() -> Result<()> {
     // 3. Instantiate the IsolateMetricsReceiver locally inside tokio block
     let rt = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
 
-    let instance_id = InstanceIdGenerator::generate();
+    // Offline simulation uses a deterministic static isolate instance ID to ensure
+    // reproducible baseline outputs for tests.
+    let instance_id = "1".to_string();
 
     // Create baseline receiver (does filtering only)
     let baseline_receiver = rt.block_on(async {

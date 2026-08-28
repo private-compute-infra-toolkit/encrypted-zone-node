@@ -20,6 +20,7 @@ use crate::request::{
 use crate::{
     data_scope_manager::DataScopeManager, ratified_isolate_manager::RatifiedIsolateManager,
 };
+use isolate_info::IsolateId;
 use metrics::histogram;
 use std::time::Instant;
 
@@ -58,6 +59,15 @@ impl DataScopeRequester {
             self.ratified_isolate_manager.add_isolate(add_isolate_request).await
         } else {
             self.data_scope_manager.add_isolate(add_isolate_request).await
+        }
+    }
+
+    /// Activates an Isolate in DataScopeManager for inbound request routing once it is Ready.
+    pub async fn activate_isolate(&self, isolate_id: IsolateId) -> DataScopeManagerResponse<()> {
+        if isolate_id.is_ratified_isolate() {
+            self.ratified_isolate_manager.activate_isolate(isolate_id).await
+        } else {
+            self.data_scope_manager.activate_isolate(isolate_id).await
         }
     }
 

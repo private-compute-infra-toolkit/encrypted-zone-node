@@ -45,6 +45,7 @@ async fn add_isolate_with_state(isr: &IsolateStateManager, state: IsolateState) 
         isolate_id,
     };
     isr.add_isolate(add_isolate_request).await;
+    isr.mark_channel_connected(isolate_id).await.unwrap();
     if state != IsolateState::Starting {
         isr.update_state(isolate_id, state).await.unwrap();
     }
@@ -313,6 +314,7 @@ async fn test_health_report_includes_current_scope() {
         isolate_id,
     };
     isolate_state_manager.add_isolate(add_req).await;
+    isolate_state_manager.mark_channel_connected(isolate_id).await.unwrap();
     isolate_state_manager.update_state(isolate_id, IsolateState::Ready).await.unwrap();
     let health_manager = HealthManager::new(
         isolate_state_manager,
@@ -360,6 +362,7 @@ async fn test_health_report_includes_sensitive_session_count() {
         isolate_id,
     };
     isolate_state_manager.add_isolate(add_req).await;
+    isolate_state_manager.mark_channel_connected(isolate_id).await.unwrap();
     isolate_state_manager.update_state(isolate_id, IsolateState::Ready).await.unwrap();
 
     // Trigger sensitive session

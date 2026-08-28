@@ -309,6 +309,15 @@ async fn connect_tcp(
     Retry::start(retry_strategy, connect_action).await
 }
 
+/// Extracts the `grpc-timeout` header from gRPC metadata.
+/// If parsing fails, logs a debug message and returns `None`.
+pub fn get_grpc_timeout_or_log(headers: &tonic::metadata::MetadataMap) -> Option<Duration> {
+    try_parse_grpc_timeout(headers).unwrap_or_else(|e| {
+        log::debug!("Failed to parse grpc-timeout header: {e}");
+        None
+    })
+}
+
 /// Parses the `grpc-timeout` header from gRPC metadata.
 /// Follows the gRPC HTTP/2 spec for timeout encodings.
 pub fn try_parse_grpc_timeout(headers: &tonic::metadata::MetadataMap) -> Result<Option<Duration>> {
@@ -336,9 +345,6 @@ pub fn try_parse_grpc_timeout(headers: &tonic::metadata::MetadataMap) -> Result<
                 _ => anyhow::bail!("Invalid unit in grpc-timeout: {timeout_unit}"),
             }
         }
-        None => {
-            log::warn!("No grpc-timeout header found");
-            Ok(None)
-        }
+        None => Ok(None),
     }
 }

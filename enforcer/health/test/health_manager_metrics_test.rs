@@ -87,6 +87,7 @@ async fn test_health_manager_metrics_scenarios() {
         allowed_data_scope_type: DataScopeType::Public,
     })
     .await;
+    ism.mark_channel_connected(ready_isolate_id).await.expect("Failed to mark channel connected");
     ism.update_state(ready_isolate_id, IsolateState::Ready).await.expect("Failed to update state");
 
     let health_manager = HealthManager::new(ism.clone(), cm_req, mapper.clone(), ds_req);

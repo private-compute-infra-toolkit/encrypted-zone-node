@@ -284,7 +284,7 @@ async fn test_validate_streaming_request_scope_failure() {
 
     // Create streaming junction client channels
     let mut client_junction_channels =
-        test_harness.isolate_junction.stream_invoke_isolate(None, false).await;
+        test_harness.isolate_junction.stream_invoke_isolate(None, false, None).await;
 
     // Create InvokeIsolateRequest and expected response
     let invoke_isolate_request = create_random_request(
@@ -339,7 +339,7 @@ async fn test_streaming_subsequent_request_manifest_validation_failure() {
 
     // Create streaming junction client channels
     let mut client_junction_channels =
-        test_harness.isolate_junction.stream_invoke_isolate(None, false).await;
+        test_harness.isolate_junction.stream_invoke_isolate(None, false, None).await;
 
     // Send a valid initial request to establish the stream.
     let mut invoke_isolate_request = create_random_request(
@@ -379,7 +379,7 @@ async fn test_validate_streaming_request_scope_success() {
 
     // Create streaming junction client channels
     let mut client_junction_channels =
-        test_harness.isolate_junction.stream_invoke_isolate(None, false).await;
+        test_harness.isolate_junction.stream_invoke_isolate(None, false, None).await;
 
     // Create InvokeIsolateRequest and expected response
     let invoke_isolate_request = create_random_request(
@@ -423,9 +423,7 @@ async fn test_validate_streaming_request_scope_success() {
     let _ = test_harness.isolate_server_shutdown_tx.send(());
 }
 
-// TODO: Support scope retrieval for retiring Isolates.
 #[tokio::test]
-#[ignore]
 async fn test_isolate_retires_after_sensitive_session_and_resets_when_idle() {
     // Set a sensitive session threshold of 1.
     let mut test_harness = TestHarness::new_with_arguments(
@@ -456,7 +454,7 @@ async fn test_isolate_retires_after_sensitive_session_and_resets_when_idle() {
 
     // Create junction client channels, send the sensitive request, which increments the counter.
     let mut client_junction_channels =
-        test_harness.isolate_junction.stream_invoke_isolate(None, false).await;
+        test_harness.isolate_junction.stream_invoke_isolate(None, false, None).await;
     assert!(client_junction_channels
         .client_to_junction
         .send(invoke_isolate_request.clone())
@@ -477,7 +475,7 @@ async fn test_isolate_retires_after_sensitive_session_and_resets_when_idle() {
     assert!(reset_listener.await.unwrap(), "Container reset was not triggered");
 
     let mut client_junction_channels =
-        test_harness.isolate_junction.stream_invoke_isolate(None, false).await;
+        test_harness.isolate_junction.stream_invoke_isolate(None, false, None).await;
     assert!(client_junction_channels.client_to_junction.send(invoke_isolate_request).await.is_ok());
 
     let invoke_isolate_response_result_2 =
@@ -496,7 +494,7 @@ async fn test_junction_streaming_flow() {
 
     // Create streaming junction client channels
     let mut client_junction_channels =
-        test_harness.isolate_junction.stream_invoke_isolate(None, false).await;
+        test_harness.isolate_junction.stream_invoke_isolate(None, false, None).await;
 
     // Create InvokeIsolateRequest and expected response
     let invoke_isolate_request = create_random_request(
@@ -572,7 +570,7 @@ async fn test_junction_streaming_application_error_first_request() {
 
     // Create streaming junction client channels
     let mut client_junction_channels =
-        test_harness.isolate_junction.stream_invoke_isolate(None, false).await;
+        test_harness.isolate_junction.stream_invoke_isolate(None, false, None).await;
 
     // Create InvokeIsolateRequest and expected response
     let invoke_isolate_request = create_random_request(
@@ -605,7 +603,7 @@ async fn test_junction_streaming_application_error_subsequent_request() {
 
     // Create streaming junction client channels
     let mut client_junction_channels =
-        test_harness.isolate_junction.stream_invoke_isolate(None, false).await;
+        test_harness.isolate_junction.stream_invoke_isolate(None, false, None).await;
 
     // Create InvokeIsolateRequest and expected response
     let invoke_isolate_request = create_random_request(
@@ -710,9 +708,7 @@ async fn test_junction_supports_qualified_services() {
     assert_eq!(invoke_isolate_response, expected_invoke_isolate_response);
 }
 
-// TODO: Support scope retrieval for retiring Isolates.
 #[tokio::test]
-#[ignore]
 async fn test_junction_unary_flow_inflight_counter() {
     // Create IsolateJunction w/ fake echo Isolate
     let mut test_harness = TestHarness::new_with_arguments(
@@ -756,9 +752,7 @@ async fn test_junction_unary_flow_inflight_counter() {
     listener.await.unwrap();
 }
 
-// TODO: Support scope retrieval for retiring Isolates.
 #[tokio::test]
-#[ignore]
 async fn test_junction_streaming_flow_inflight_counter() {
     // Create IsolateJunction w/ fake echo Isolate
     let mut test_harness = TestHarness::new_with_arguments(
@@ -783,7 +777,7 @@ async fn test_junction_streaming_flow_inflight_counter() {
 
     // Create streaming junction client channels
     let mut client_junction_channels =
-        test_harness.isolate_junction.stream_invoke_isolate(None, false).await;
+        test_harness.isolate_junction.stream_invoke_isolate(None, false, None).await;
 
     // Send first InvokeIsolateRequest to IsolateJunction, incrementing counter to 1
     let invoke_isolate_request = create_random_request(
@@ -962,7 +956,7 @@ async fn test_streaming_scope_enforcement_failure_public_api() {
 
     // Create streaming junction client channels from the "public API".
     let mut client_junction_channels =
-        test_harness.isolate_junction.stream_invoke_isolate(None, true).await;
+        test_harness.isolate_junction.stream_invoke_isolate(None, true, None).await;
 
     // Create a request with a UserPrivate scope.
     let invoke_isolate_request = create_random_request(
@@ -997,7 +991,7 @@ async fn test_streaming_manifest_output_scope_failure_initial_request() {
 
     // Create streaming junction client channels.
     let mut client_junction_channels =
-        test_harness.isolate_junction.stream_invoke_isolate(None, false).await;
+        test_harness.isolate_junction.stream_invoke_isolate(None, false, None).await;
 
     // Create a request with a UserPrivate scope.
     // The fake Isolate will attempt to respond with MultiUserPrivate (UserPrivate + 1).
@@ -1034,7 +1028,7 @@ async fn test_enforcement_failure_scope_downgrade() {
 
     // Create streaming junction client channels.
     let mut client_junction_channels =
-        test_harness.isolate_junction.stream_invoke_isolate(None, false).await;
+        test_harness.isolate_junction.stream_invoke_isolate(None, false, None).await;
 
     // Create a request with a UserPrivate scope.
     // The fake Isolate will attempt to respond with Public (DomainOwned + 1).
@@ -1110,7 +1104,7 @@ async fn test_streaming_unspecified_scope_is_overridden() {
 
     // Create streaming junction client channels.
     let mut client_junction_channels =
-        test_harness.isolate_junction.stream_invoke_isolate(None, false).await;
+        test_harness.isolate_junction.stream_invoke_isolate(None, false, None).await;
 
     // Create a request with a UserPrivate scope. This will set the Isolate's current scope.
     let invoke_isolate_request = create_random_request(
@@ -1519,7 +1513,8 @@ async fn test_junction_streaming_deadlock_fix() {
         .await
         .is_ok());
 
-    let mut client_junction_channels = isolate_junction.stream_invoke_isolate(None, false).await;
+    let mut client_junction_channels =
+        isolate_junction.stream_invoke_isolate(None, false, None).await;
 
     let mut req1 = create_random_request(&isolate_service_info);
     req1.control_plane_metadata.as_mut().unwrap().destination_method_name =
@@ -1809,7 +1804,8 @@ async fn test_junction_streaming_request_shm_payload() {
         .await
         .is_ok());
 
-    let mut client_junction_channels = isolate_junction.stream_invoke_isolate(None, false).await;
+    let mut client_junction_channels =
+        isolate_junction.stream_invoke_isolate(None, false, None).await;
 
     let invoke_isolate_request = create_random_request(&isolate_service_info);
     assert!(client_junction_channels.client_to_junction.send(invoke_isolate_request).await.is_ok());
@@ -1969,7 +1965,8 @@ async fn test_junction_streaming_response_shm_payload() {
         .await
         .is_ok());
 
-    let mut client_junction_channels = isolate_junction.stream_invoke_isolate(None, false).await;
+    let mut client_junction_channels =
+        isolate_junction.stream_invoke_isolate(None, false, None).await;
 
     let invoke_isolate_request = create_random_request(&isolate_service_info);
     assert!(client_junction_channels.client_to_junction.send(invoke_isolate_request).await.is_ok());
@@ -2130,7 +2127,7 @@ async fn test_junction_streaming_half_close_without_http2_headers() {
         .await
         .is_ok());
 
-    let client_junction_channels = isolate_junction.stream_invoke_isolate(None, false).await;
+    let client_junction_channels = isolate_junction.stream_invoke_isolate(None, false, None).await;
 
     // Send the first request (which initiates the gRPC stream).
     // The server will intentionally NOT send HTTP/2 response headers back.

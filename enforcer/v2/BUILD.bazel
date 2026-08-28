@@ -20,6 +20,31 @@ load("@rules_pkg//pkg:mappings.bzl", "pkg_attributes", "pkg_files")
 load("@rules_rust_prost//:defs.bzl", "rust_prost_library")
 
 proto_library(
+    name = "common_proto",
+    srcs = ["common.proto"],
+    visibility = ["//visibility:public"],
+)
+
+cc_proto_library(
+    name = "common_cc_proto",
+    visibility = ["//visibility:public"],
+    deps = [":common_proto"],
+)
+
+rust_prost_library(
+    name = "common_rust_proto",
+    proto = ":common_proto",
+    visibility = ["//visibility:public"],
+)
+
+buf_lint_test(
+    name = "common_proto_lint",
+    size = "small",
+    config = ":buf.yaml",
+    targets = [":common_proto"],
+)
+
+proto_library(
     name = "data_scope_proto",
     srcs = ["data_scope_type.proto"],
     visibility = ["//visibility:public"],
@@ -177,14 +202,46 @@ buf_lint_test(
 )
 
 proto_library(
+    name = "isolate_startup_parameters_proto",
+    srcs = ["isolate_startup_parameters.proto"],
+    visibility = ["//visibility:public"],
+    deps = [":common_proto"],
+)
+
+cc_proto_library(
+    name = "isolate_startup_parameters_cc_proto",
+    visibility = ["//visibility:public"],
+    deps = [":isolate_startup_parameters_proto"],
+)
+
+rust_prost_library(
+    name = "isolate_startup_parameters_rust_proto",
+    proto = ":isolate_startup_parameters_proto",
+    visibility = ["//visibility:public"],
+)
+
+proto_descriptor_set(
+    name = "isolate_startup_parameters_descriptor_set",
+    visibility = ["//visibility:public"],
+    deps = [":isolate_startup_parameters_proto"],
+)
+
+buf_lint_test(
+    name = "isolate_startup_parameters_proto_lint",
+    size = "small",
+    config = ":buf.yaml",
+    targets = [":isolate_startup_parameters_proto"],
+)
+
+proto_library(
     name = "setup_isolate_manifest_proto",
     srcs = ["setup_isolate_manifest.proto"],
     visibility = ["//visibility:public"],
     deps = [
+        ":common_proto",
         ":ez_backend_dependencies_proto",
         ":ez_service_spec_proto",
-        ":intercepting_services_proto",
-        ":isolate_metrics_policy_proto",
+        ":isolate_startup_parameters_proto",
     ],
 )
 
@@ -218,10 +275,12 @@ proto_library(
     srcs = ["ratified_isolate_manifest.proto"],
     visibility = ["//visibility:public"],
     deps = [
+        ":common_proto",
         ":ez_backend_dependencies_proto",
         ":ez_service_spec_proto",
         ":intercepting_services_proto",
         ":isolate_metrics_policy_proto",
+        ":isolate_startup_parameters_proto",
     ],
 )
 
@@ -255,10 +314,11 @@ proto_library(
     srcs = ["opaque_isolate_manifest.proto"],
     visibility = ["//visibility:public"],
     deps = [
+        ":common_proto",
         ":ez_backend_dependencies_proto",
         ":ez_service_spec_proto",
-        ":intercepting_services_proto",
         ":isolate_metrics_policy_proto",
+        ":isolate_startup_parameters_proto",
     ],
 )
 
@@ -291,8 +351,10 @@ proto_descriptor_set(
     name = "manifest_descriptor_set",
     visibility = ["//visibility:public"],
     deps = [
+        ":common_proto",
         ":ez_backend_dependencies_proto",
         ":isolate_runtime_config_proto",
+        ":isolate_startup_parameters_proto",
         ":opaque_isolate_manifest_proto",
         ":ratified_isolate_manifest_proto",
         ":setup_isolate_manifest_proto",
