@@ -50,6 +50,10 @@ struct Args {
     /// Number of runs to aggregate for statistical utility comparison.
     #[arg(short, long, default_value_t = 1)]
     runs: usize,
+
+    /// Sort attributes lexicographically in output payloads for deterministic comparison in tests.
+    #[arg(long, default_value_t = false)]
+    sort_attributes: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -125,6 +129,7 @@ fn main() -> Result<()> {
             otel_endpoint: None,
             max_decoding_message_size: 4 * 1024 * 1024,
             disable_filtering: false,
+            ..Default::default()
         })
         .await
     })?;
@@ -140,6 +145,7 @@ fn main() -> Result<()> {
             otel_endpoint: None,
             max_decoding_message_size: 4 * 1024 * 1024,
             disable_filtering: false,
+            ..Default::default()
         })
         .await
     })?;
@@ -154,7 +160,11 @@ fn main() -> Result<()> {
 
     if let Some(ref out_path) = args.output_baseline {
         println!("Saving baseline metrics to: {:?}", out_path);
-        save_otlp_payloads(out_path, &baseline_payloads)?;
+        let mut baseline_out = baseline_payloads.clone();
+        if args.sort_attributes {
+            sort_payload_attributes(&mut baseline_out);
+        }
+        save_otlp_payloads(out_path, &baseline_out)?;
         println!("Saved baseline metrics successfully.");
     }
 
@@ -171,7 +181,11 @@ fn main() -> Result<()> {
         if run_idx == 0 {
             if let Some(ref out_path) = args.output_dp {
                 println!("Saving sample DP noised metrics to: {:?}", out_path);
-                save_otlp_payloads(out_path, &run_payloads)?;
+                let mut dp_out = run_payloads.clone();
+                if args.sort_attributes {
+                    sort_payload_attributes(&mut dp_out);
+                }
+                save_otlp_payloads(out_path, &dp_out)?;
                 println!("Saved DP metrics successfully.");
             }
         }
@@ -228,6 +242,22 @@ fn load_otlp_payloads(
     }
 
     Ok(requests)
+}
+
+/// Helper to sort attributes lexicographically by key in output payloads for deterministic comparison in tests.
+fn sort_payload_attributes(payloads: &mut [ExportMetricsServiceRequest]) {
+    for req in payloads {
+        for rm in &mut req.resource_metrics {
+            if let Some(ref mut res) = rm.resource {
+                res.attributes.sort_by(|a, b| a.key.cmp(&b.key));
+            }
+            for sm in &mut rm.scope_metrics {
+                if let Some(ref mut scope) = sm.scope {
+                    scope.attributes.sort_by(|a, b| a.key.cmp(&b.key));
+                }
+            }
+        }
+    }
 }
 
 /// Helper to save OTLP ExportMetricsServiceRequest payloads as a pretty-printed JSON array.

@@ -29,6 +29,10 @@ message EzIsolateHealthReport {
   // Having both start and end timestamps allows for a tight time bound on the
   // health data.
   int64 end_timestamp = 3;
+  // Indicates if all Isolates are ready to serve traffic.
+  // True when every registered Isolate type has at least one active,
+  // running replica connected to both Enforcer<->Isolate bridges.
+  bool are_isolates_ready = 4;
 }
 
 // Health report of a single Isolate.

@@ -43,6 +43,7 @@ rust_library(
 
 rust_test(
     name = "ez_error_test",
+    size = "small",
     srcs = ["test/ez_error_test.rs"],
     deps = [
         ":ez_error",

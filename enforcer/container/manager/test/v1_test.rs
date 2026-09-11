@@ -311,7 +311,11 @@ async fn test_isolate_reset() {
         .expect_err("Isolate should be unrecognized");
 
     let mut old_container_stopped = false;
-    for tracked_container in FakeContainer::get_tracker().iter() {
+    let containers: Vec<_> = FakeContainer::get_tracker()
+        .iter()
+        .map(|entry| (*entry.key(), entry.value().clone()))
+        .collect();
+    for (container_key, tracked_container) in containers {
         let binary_filename =
             tracked_container.binary_filename.to_owned().expect("Should have binary filename");
         if tracked_container.status == Status::Started
@@ -319,7 +323,7 @@ async fn test_isolate_reset() {
         {
             // If this assert fails, the test will timeout because the read end of the ready pipe will never be opened.
             assert!(
-                !fake_container_ids.contains(tracked_container.key()),
+                !fake_container_ids.contains(&container_key),
                 "This should be the new isolate not in fake_container_ids"
             );
             let isolate_ez_bridge_enforcer_side_uds_path =
@@ -333,7 +337,7 @@ async fn test_isolate_reset() {
         }
 
         // The old container for the precomputed backend should have stopped
-        if fake_container_ids.contains(tracked_container.key())
+        if fake_container_ids.contains(&container_key)
             && binary_filename.eq(PRECOMPUTED_BACKEND_BINARY)
         {
             assert_eq!(tracked_container.status, Status::Stopped);
@@ -670,18 +674,19 @@ async fn test_otel_endpoint_http() {
         check_container_started(vec![HELLOWORLD_BINARY]).await.expect("Container should start");
 
     let fake_container_id = isolate_and_uds_vec[0].0;
-    let tracker = FakeContainer::get_tracker();
-    let container_data = tracker.get(&fake_container_id).unwrap();
+    let (container_boot_mounts, isolate_ez_bridge_enforcer_side_uds_path) = {
+        let tracker = FakeContainer::get_tracker();
+        let container_data = tracker.get(&fake_container_id).unwrap();
+        (
+            container_data.boot_mounts.clone(),
+            container_data.isolate_ez_bridge_enforcer_side_uds_path.clone().unwrap(),
+        )
+    };
 
-    let isolate_ez_bridge_enforcer_side_uds_path =
-        container_data.isolate_ez_bridge_enforcer_side_uds_path.clone().unwrap();
     let _ = notify_isolate_ready(isolate_ez_bridge_enforcer_side_uds_path).await;
-    assert!(!container_data
-        .boot_mounts
+    assert!(!container_boot_mounts
         .iter()
         .any(|m| m.destination.to_string_lossy() == "/otlp_safe_metrics.sock"));
-    drop(container_data);
-    drop(tracker);
 
     harness.stop().await;
     ensure_isolate_stopped(fake_container_id).await.expect("Container should stop");
@@ -711,21 +716,22 @@ async fn test_otel_endpoint_unix_variant(endpoint_val: &str) {
         check_container_started(vec![HELLOWORLD_BINARY]).await.expect("Container should start");
 
     let fake_container_id = isolate_and_uds_vec[0].0;
-    let tracker = FakeContainer::get_tracker();
-    let container_data = tracker.get(&fake_container_id).unwrap();
+    let (container_boot_mounts, isolate_ez_bridge_enforcer_side_uds_path) = {
+        let tracker = FakeContainer::get_tracker();
+        let container_data = tracker.get(&fake_container_id).unwrap();
+        (
+            container_data.boot_mounts.clone(),
+            container_data.isolate_ez_bridge_enforcer_side_uds_path.clone().unwrap(),
+        )
+    };
 
-    let isolate_ez_bridge_enforcer_side_uds_path =
-        container_data.isolate_ez_bridge_enforcer_side_uds_path.clone().unwrap();
     let _ = notify_isolate_ready(isolate_ez_bridge_enforcer_side_uds_path).await;
 
     // Now it always sets it if Some
 
-    assert!(!container_data
-        .boot_mounts
+    assert!(!container_boot_mounts
         .iter()
         .any(|m| m.destination.to_string_lossy() == "/otlp_safe_metrics.sock"));
-    drop(container_data);
-    drop(tracker);
 
     harness.stop().await;
     ensure_isolate_stopped(fake_container_id).await.expect("Container should stop");
@@ -782,21 +788,12 @@ async fn test_otel_metrics_enrichment_isolate_name() {
         .as_ref()
         .expect("Scope should be present")
         .attributes;
-    let find_scope_attr = |key: &str| {
-        scope_attrs
-            .iter()
-            .find(|attr| attr.key == key)
-            .and_then(|attr| attr.value.as_ref())
-            .and_then(|v| match &v.value {
-                Some(Value::StringValue(s)) => Some(s.as_str()),
-                _ => None,
-            })
-    };
 
     assert_eq!(find_resource_attr("ez_isolate_name"), Some("ezpkg://helloworld.com"));
     assert_eq!(find_resource_attr("ez_publisher_id"), Some("helloworld_domain"));
-    assert_eq!(find_scope_attr("ez_component_name"), Some("isolate"));
-    assert_eq!(find_scope_attr("ez_isolate_type"), Some("opaque"));
+    assert_eq!(find_resource_attr("ez_component_name"), Some("isolate"));
+    assert_eq!(find_resource_attr("ez_isolate_type"), Some("opaque"));
+    assert!(scope_attrs.is_empty());
 
     server_handle.abort();
     drop(container_data);

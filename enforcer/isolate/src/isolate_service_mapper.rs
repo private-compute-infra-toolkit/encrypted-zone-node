@@ -122,6 +122,11 @@ impl IsolateServiceMapper {
         self.binary_services_index_info.read().await.get(binary_services_index).cloned()
     }
 
+    /// Retrieves all registered [BinaryServicesIndex] keys representing local isolate types.
+    pub async fn get_registered_binary_indices(&self) -> Vec<BinaryServicesIndex> {
+        self.binary_services_index_info.read().await.keys().cloned().collect()
+    }
+
     /// Adds a service that is a backend dependency (external, remote, or internal).
     ///
     /// This is used for services that are not part of a locally managed binary but are

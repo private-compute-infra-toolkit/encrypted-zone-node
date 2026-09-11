@@ -35,8 +35,6 @@ use tokio_stream::StreamExt;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status, Streaming};
 
-const EZ_TO_EZ_EMPTY_PAYLOAD_ERROR: &str = "Empty payload data from remote enforcer";
-
 pub struct FakeEzToEzProxy {
     pub response_delay: Option<Duration>,
 }
@@ -177,9 +175,10 @@ async fn test_outbound_unary_empty_payload() {
 
     let request = create_test_request(None);
 
-    let error = handler.remote_invoke(request, None).await.expect_err("remote_invoke should fail");
+    let response =
+        handler.remote_invoke(request, None).await.expect("remote_invoke should succeed");
 
-    assert_eq!(error.to_string(), EZ_TO_EZ_EMPTY_PAYLOAD_ERROR);
+    assert!(response.ez_response_payload.is_none());
 
     let _ = shutdown_tx.send(());
 }
@@ -272,6 +271,61 @@ async fn test_outbound_extensions_propagated() {
     let response = handler.remote_invoke(request, None).await.unwrap();
 
     assert_eq!(response.response_extensions, vec![9, 9, 9]);
+
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn test_outbound_streaming_empty_payload() {
+    let (port, shutdown_tx) = start_fake_proxy_server(None).await;
+    let server_address = format!("http://localhost:{}", port);
+    let handler =
+        OutboundEzToEzHandler::new(server_address, TestMetrics::default(), None).await.unwrap();
+
+    let (local_to_outbound, from_local_rx) = mpsc::channel(10);
+    let mut outbound_to_local =
+        handler.remote_streaming_connect(None, from_local_rx, None).await.unwrap();
+
+    // 1. Send an initial request with payload data.
+    let expected_payload = "initial payload";
+    let first_request = create_test_request(Some(expected_payload));
+    local_to_outbound.send(first_request).await.unwrap();
+
+    let first_response = outbound_to_local.recv().await.unwrap().unwrap();
+    let first_output_payload =
+        match first_response.ez_response_payload.unwrap().delivery_method.unwrap() {
+            DeliveryMethod::InlineData(inline) => inline.datagrams[0].clone(),
+            _ => panic!("Expected InlineData"),
+        };
+    assert_eq!(first_output_payload, expected_payload.as_bytes());
+
+    // 2. Send a trailing empty-payload request carrying response extensions (EOF frame).
+    let mut trailing_request = create_test_request(None);
+    let trailing_extensions = vec![1, 2, 3, 4];
+    trailing_request.control_plane_metadata.as_mut().unwrap().extensions =
+        trailing_extensions.clone();
+    local_to_outbound.send(trailing_request).await.unwrap();
+
+    let second_response = outbound_to_local.recv().await.unwrap().unwrap();
+    assert!(
+        second_response.ez_response_payload.is_none(),
+        "Expected ez_response_payload to be None for empty payload response"
+    );
+    assert_eq!(second_response.response_extensions, trailing_extensions);
+
+    // 3. Also verify an empty-payload response without extensions converts cleanly.
+    let empty_request = create_test_request(None);
+    local_to_outbound.send(empty_request).await.unwrap();
+
+    let third_response = outbound_to_local.recv().await.unwrap().unwrap();
+    assert!(
+        third_response.ez_response_payload.is_none(),
+        "Expected ez_response_payload to be None for empty payload response without extensions"
+    );
+    assert!(third_response.response_extensions.is_empty());
+
+    drop(local_to_outbound);
+    assert!(outbound_to_local.recv().await.is_none());
 
     let _ = shutdown_tx.send(());
 }

@@ -198,6 +198,7 @@ impl IsolateEzServiceManager {
             otel_endpoint: self.deps.otel_endpoint.clone(),
             max_decoding_message_size: self.deps.max_decoding_message_size,
             disable_filtering: self.deps.disable_metrics_filtering,
+            ..Default::default()
         })
         .await
         .expect("Failed to create IsolateMetricsReceiver");

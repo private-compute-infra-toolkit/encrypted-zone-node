@@ -17,9 +17,10 @@ pub mod dependency_graph;
 use anyhow::{ensure, Context, Result};
 use container::{Container, ContainerOptions, ContainerRoot, MountOptions, NetworkOptions};
 use container_manager_request::{
-    ContainerManagerRequest, GetRunStatusRequest, GetRunStatusResponse, MountDirectoryResponse,
-    MountFileResponse, MountReadOnlyDirectory, MountReadOnlyFile, MountWritableDirectory,
-    MountWritableFile, ResetIsolateRequest, ResetIsolateResponse,
+    ContainerManagerRequest, GetRunStatusRequest, GetRunStatusResponse,
+    GetSetupIsolateClientResponse, LoadWorkloadIsolatesResponse, LoadWorkloadManifestsResponse,
+    MountDirectoryResponse, MountFileResponse, MountReadOnlyDirectory, MountReadOnlyFile,
+    MountWritableDirectory, MountWritableFile, ResetIsolateRequest, ResetIsolateResponse,
 };
 use dashmap::DashMap;
 use data_scope::manifest_validator::ManifestValidator;
@@ -45,6 +46,7 @@ use manifest_proto::enforcer::v1::{
 };
 use nix::sys::stat::Mode;
 use nix::unistd::mkfifo;
+use setup_isolate_client::SetupIsolateClient;
 use shared_memory_manager::SharedMemManager;
 use state_manager::IsolateStateManager;
 use std::cmp::max;
@@ -94,6 +96,7 @@ pub struct ContainerManager<ContainerT: Container> {
     enable_syscall_filtering: bool,
     operator_role: String,
     isolate_arg_config: IsolateArgConfig,
+    setup_isolate_client: Option<Arc<SetupIsolateClient>>,
 }
 
 #[derive(Debug)]
@@ -144,7 +147,8 @@ pub(crate) struct ContainerStartupArgs {
     binary_filename: String,
     command_line_args: Vec<String>,
     strictest_scope: DataScopeType,
-    shared_root: Arc<TempDir>,
+    package_filename: String,
+    shared_root: Option<Arc<TempDir>>,
     bind_mounts: Vec<String>,
     env_vars: Vec<String>,
     publisher_id: String,
@@ -186,6 +190,29 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             },
         };
 
+        let mut setup_isolate_client = None;
+        let is_manifest_v1 = matches!(args.manifest_source, ManifestSource::V1 { .. });
+        let initial_isolates = match args.manifest_source {
+            ManifestSource::V1 { manifest_path } => {
+                let ez_manifest =
+                    parse_manifest(manifest_path).context("couldn't parse EzManifest")?;
+                flatten_manifest(ez_manifest).context("Failed to flatten EzManifest")?
+            }
+            ManifestSource::V2 { setup_isolate_manifest_path } => {
+                let setup_manifest = SetupManifest::load_from_path(setup_isolate_manifest_path)
+                    .context("Failed to load v2 setup isolate manifest")?;
+                let sni = setup_manifest.extract_sni_params();
+                setup_isolate_client = Some(Arc::new(SetupIsolateClient::new(
+                    args.isolate_junction.clone(),
+                    sni.publisher_id,
+                    sni.isolate_name,
+                )));
+                vec![setup_manifest
+                    .into_parsed_isolate()
+                    .context("Failed to parse setup isolate descriptor")?]
+            }
+        };
+
         let isolate_mngr = Self {
             isolate_container_map: Arc::new(DashMap::new()),
             container_startup_args_map: Arc::new(DashMap::new()),
@@ -203,24 +230,13 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             enable_syscall_filtering: args.enable_syscall_filtering,
             operator_role: args.operator_role.clone(),
             isolate_arg_config,
-        };
-
-        let initial_isolates = match args.manifest_source {
-            ManifestSource::V1 { manifest_path } => {
-                let ez_manifest =
-                    parse_manifest(manifest_path).context("couldn't parse EzManifest")?;
-                flatten_manifest(ez_manifest).context("Failed to flatten EzManifest")?
-            }
-            ManifestSource::V2 { setup_isolate_manifest_path } => {
-                let setup_manifest = SetupManifest::load_from_path(setup_isolate_manifest_path)
-                    .context("Failed to load v2 setup isolate manifest")?;
-                vec![setup_manifest
-                    .into_parsed_isolate()
-                    .context("Failed to parse setup isolate descriptor")?]
-            }
+            setup_isolate_client,
         };
 
         isolate_mngr.process_and_boot_isolates(initial_isolates).await?;
+        if is_manifest_v1 {
+            isolate_mngr.state_manager.set_isolates_registered();
+        }
 
         // Spawn to avoid blocking the constructor
         let mut isolate_mngr_clone = isolate_mngr.clone();
@@ -231,8 +247,9 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
         Ok(isolate_mngr)
     }
 
-    /// Dynamically loads and starts workload isolates (Ratified and Opaque) from v2 manifests.
-    pub async fn load_workload_isolates(
+    /// Parses and processes workload manifests (Ratified and Opaque) without launching isolates or unpacking packages.
+    /// Isolate package file paths are not processed here.
+    async fn load_workload_manifests(
         &self,
         workload_manifests: WorkloadManifests,
     ) -> Result<Vec<BinaryServicesIndex>> {
@@ -240,17 +257,56 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             .into_parsed_isolates()
             .context("Failed to parse workload isolates")?;
         ensure!(!workload_isolates.is_empty(), "workload isolates cannot be empty");
-        self.process_and_boot_isolates(workload_isolates).await
+        let indices = self.process_and_register_isolates(workload_isolates).await?;
+        self.build_and_validate_dependency_graph().await?;
+        self.state_manager.set_isolates_registered();
+        Ok(indices)
     }
 
-    async fn process_and_boot_isolates(
+    /// Starts workload isolates given a mapping of BinaryServicesIndex to updated package paths.
+    async fn load_workload_isolates(
+        &self,
+        isolate_packages: HashMap<BinaryServicesIndex, String>,
+    ) -> Result<Vec<BinaryServicesIndex>> {
+        ensure!(!isolate_packages.is_empty(), "isolate packages cannot be empty");
+        let target_indices = self.update_isolate_package_filenames(isolate_packages)?;
+        self.boot_isolates(&target_indices).await?;
+        Ok(target_indices)
+    }
+
+    pub async fn stop(&mut self) {
+        for mut isolate_id_container_ref in self.isolate_container_map.iter_mut() {
+            let stop_result = isolate_id_container_ref.value_mut().container.stop().await;
+            if stop_result.is_err() {
+                log::error!("Error while stopping container {:?}", stop_result.err());
+            }
+        }
+        // This will drop all values which will delete all tempDirs
+        self.isolate_container_map.clear();
+    }
+
+    fn update_isolate_package_filenames(
+        &self,
+        isolate_packages: HashMap<BinaryServicesIndex, String>,
+    ) -> Result<Vec<BinaryServicesIndex>> {
+        let mut target_indices = Vec::with_capacity(isolate_packages.len());
+        for (binary_index, package_path) in isolate_packages {
+            let mut startup_args = self
+                .container_startup_args_map
+                .get_mut(&binary_index)
+                .context("Registered isolate not found in startup args map")?;
+            startup_args.package_filename = package_path;
+            target_indices.push(binary_index);
+        }
+        Ok(target_indices)
+    }
+
+    // Used by v2 manifest to load manifests without booting the isolates.
+    async fn process_and_register_isolates(
         &self,
         isolates: Vec<ParsedIsolate>,
     ) -> Result<Vec<BinaryServicesIndex>> {
         let indices = self.process_isolates(isolates, &self.isolate_arg_config).await?;
-
-        // Register all intended Ratified Isolates globally *before* spawning any containers
-        // to ensure concurrent dependants gracefully retry with NoMatchingIsolates (ResourceExhausted).
         for binary_services_index in &indices {
             if let Some(entry) = self.container_startup_args_map.get(binary_services_index) {
                 self.state_manager
@@ -258,7 +314,12 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
                     .await;
             }
         }
+        Ok(indices)
+    }
 
+    async fn build_and_validate_dependency_graph(
+        &self,
+    ) -> Result<HashMap<BinaryServicesIndex, HashSet<BinaryServicesIndex>>> {
         let isolate_deps_map: HashMap<BinaryServicesIndex, Vec<EzBackendDependency>> = self
             .container_startup_args_map
             .iter()
@@ -272,20 +333,22 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
         .await
         .context("Failed to build isolate dependency graph")?;
         dependency_graph::validate_isolate_dependency_graph(&graph)?;
-        self.start_isolates(&indices, &graph).await?;
-
-        Ok(indices)
+        Ok(graph)
     }
 
-    pub async fn stop(&mut self) {
-        for mut isolate_id_container_ref in self.isolate_container_map.iter_mut() {
-            let stop_result = isolate_id_container_ref.value_mut().container.stop().await;
-            if stop_result.is_err() {
-                log::error!("Error while stopping container {:?}", stop_result.err());
-            }
-        }
-        // This will drop all values which will delete all tempDirs
-        self.isolate_container_map.clear();
+    async fn boot_isolates(&self, indices: &[BinaryServicesIndex]) -> Result<()> {
+        let graph = self.build_and_validate_dependency_graph().await?;
+        self.start_isolates(indices, &graph).await
+    }
+
+    // Used by v1 manifest to load the manifests and boot isolates.
+    async fn process_and_boot_isolates(
+        &self,
+        isolates: Vec<ParsedIsolate>,
+    ) -> Result<Vec<BinaryServicesIndex>> {
+        let indices = self.process_and_register_isolates(isolates).await?;
+        self.boot_isolates(&indices).await?;
+        Ok(indices)
     }
 
     async fn process_isolates(
@@ -410,19 +473,14 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             env_vars.push(format!("EZ_BACKEND_DEPENDENCIES={}", serialized_deps));
         }
         env_vars.push(format!("EZ_OPERATOR_ROLE={}", self.operator_role));
-        let package_filename = isolate.package_filename.clone();
-        let shared_root =
-            tokio::task::spawn_blocking(move || utils::unpack_file_system(&package_filename))
-                .await
-                .context("Failed to run spawn_blocking for file system unpack")?
-                .context("Failed to unpack file system")?;
 
         let container_startup_args = ContainerStartupArgs {
             binary_filename: isolate.binary_filename().to_string(),
             // Copy is required because command_line_args is now owned by container_startup_args.
             command_line_args: command_line_args.to_vec(),
             strictest_scope,
-            shared_root: Arc::new(shared_root),
+            package_filename: isolate.package_filename.clone(),
+            shared_root: None,
             bind_mounts,
             env_vars,
             publisher_id: isolate.publisher_id.clone(),
@@ -609,6 +667,24 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
                 ContainerManagerRequest::GetRunStatus { req, resp } => {
                     let _ = resp.send(self.process_get_run_status_request(req).await);
                 }
+                ContainerManagerRequest::LoadWorkloadManifests { req, resp } => {
+                    let result = self.load_workload_manifests(req.workload_manifests).await.map(
+                        |registered_indices| LoadWorkloadManifestsResponse { registered_indices },
+                    );
+                    let _ = resp.send(result);
+                }
+                ContainerManagerRequest::LoadWorkloadIsolates { req, resp } => {
+                    let result = self
+                        .load_workload_isolates(req.isolate_packages)
+                        .await
+                        .map(|loaded_indices| LoadWorkloadIsolatesResponse { loaded_indices });
+                    let _ = resp.send(result);
+                }
+                ContainerManagerRequest::GetSetupIsolateClient { resp } => {
+                    let _ = resp.send(Ok(GetSetupIsolateClientResponse {
+                        client: self.setup_isolate_client.clone(),
+                    }));
+                }
             }
         }
     }
@@ -624,7 +700,12 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
 
         let isolate_id = request.isolate_id;
         log::info!("adding isolate: {isolate_id:?}");
-        let root = Arc::clone(&container_startup_args.shared_root);
+        let root = Arc::clone(
+            container_startup_args
+                .shared_root
+                .as_ref()
+                .context("shared_root is not initialized for isolate")?,
+        );
         // Check that DEV_SHM_PATH exists and is a directory.
         if !std::path::Path::new(DEV_SHM_PATH).is_dir() {
             anyhow::bail!("directory not found: {}", DEV_SHM_PATH);
@@ -633,7 +714,7 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             .prefix(&container_startup_args.publisher_id)
             .tempdir_in(DEV_SHM_PATH)?;
         log::info!("sharing_dir: {sharing_dir:?}");
-        let mut container = ContainerT::new(ContainerRoot::ReadOnlyRoot(root))?;
+        let mut container = ContainerT::new(ContainerRoot::ReadOnlyRoot(root), None)?;
 
         let ez_isolate_bridge_enforcer_side_uds_path =
             get_ez_isolate_bridge_enforcer_side_uds_path(&sharing_dir);
@@ -942,6 +1023,26 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
         indices: &[BinaryServicesIndex],
         dep_graph: &HashMap<BinaryServicesIndex, HashSet<BinaryServicesIndex>>,
     ) -> Result<()> {
+        for &binary_services_index in indices {
+            let mut startup_args_entry = self
+                .container_startup_args_map
+                .get_mut(&binary_services_index)
+                .context("Unrecognized BinaryServicesIndex while starting isolates")?;
+            if startup_args_entry.shared_root.is_none() {
+                let package_filename = startup_args_entry.package_filename.clone();
+                let shared_root = tokio::task::spawn_blocking(move || {
+                    utils::unpack_file_system(&package_filename)
+                })
+                .await
+                .context("Failed to run spawn_blocking for file system unpack")?
+                .context(format!(
+                    "Failed to unpack file system from {:?}",
+                    startup_args_entry.package_filename
+                ))?;
+                startup_args_entry.shared_root = Some(Arc::new(shared_root));
+            }
+        }
+
         for &binary_services_index in indices {
             if let Some(entry) = self.container_startup_args_map.get(&binary_services_index) {
                 let num_isolates = entry.number_of_isolates;

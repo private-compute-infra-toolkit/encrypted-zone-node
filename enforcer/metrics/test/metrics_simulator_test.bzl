@@ -14,7 +14,7 @@
 
 load("@bazel_skylib//rules:diff_test.bzl", "diff_test")
 
-def metrics_simulator_test(*, name, manifest, input, expected):
+def metrics_simulator_test(*, name, manifest, input, expected, size = "small", **kwargs):
     """Executes the ez_metrics_simulator tool and asserts output values against a checked-in telemetry baseline JSON.
 
     Args:
@@ -22,6 +22,8 @@ def metrics_simulator_test(*, name, manifest, input, expected):
         manifest: Label to the manifest JSON file (e.g., "test_data/baseline/manifest.json").
         input: Label to the raw telemetry input JSON file (e.g., "test_data/baseline/metrics_input.json").
         expected: Label to the expected output baseline JSON file (e.g., "test_data/baseline/expected_output.json").
+        size: Size of the test (defaults to "small").
+        **kwargs: Additional attributes passed to diff_test.
     """
     actual_out_name = name + "_actual_output.json"
     genrule_name = name + "_run"
@@ -34,7 +36,7 @@ def metrics_simulator_test(*, name, manifest, input, expected):
             input,
         ],
         outs = [actual_out_name],
-        cmd = "ENFORCER_VERSION_OVERRIDE=1.23.45 $(location //enforcer/metrics:ez_metrics_simulator) --manifest $(location {}) --input $(location {}) --output-baseline $@".format(manifest, input),
+        cmd = "ENFORCER_VERSION_OVERRIDE=1.23.45 $(location //enforcer/metrics:ez_metrics_simulator) --manifest $(location {}) --input $(location {}) --sort-attributes --output-baseline $@".format(manifest, input),
         tools = ["//enforcer/metrics:ez_metrics_simulator"],
     )
 
@@ -43,4 +45,6 @@ def metrics_simulator_test(*, name, manifest, input, expected):
         name = name,
         file1 = expected,
         file2 = ":" + actual_out_name,
+        size = size,
+        **kwargs
     )

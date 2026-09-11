@@ -5,21 +5,39 @@
         "resource": {
           "attributes": [
             {
-              "key": "ez_isolate_name",
+              "key": "ez_component_name",
               "value": {
-                "stringValue": "ezpkg://helloworld.com"
+                "stringValue": "isolate"
               }
             },
             {
-              "key": "ez_publisher_id",
+              "key": "ez_enforcer_version",
               "value": {
-                "stringValue": "helloworld_domain"
+                "stringValue": "1.23.45"
               }
             },
             {
               "key": "ez_isolate_instance_id",
               "value": {
                 "stringValue": "1"
+              }
+            },
+            {
+              "key": "ez_isolate_name",
+              "value": {
+                "stringValue": "ezpkg://helloworld.com"
+              }
+            },
+            {
+              "key": "ez_isolate_type",
+              "value": {
+                "stringValue": "opaque"
+              }
+            },
+            {
+              "key": "ez_publisher_id",
+              "value": {
+                "stringValue": "helloworld_domain"
               }
             }
           ],
@@ -31,26 +49,7 @@
             "scope": {
               "name": "",
               "version": "",
-              "attributes": [
-                {
-                  "key": "ez_component_name",
-                  "value": {
-                    "stringValue": "isolate"
-                  }
-                },
-                {
-                  "key": "ez_isolate_type",
-                  "value": {
-                    "stringValue": "opaque"
-                  }
-                },
-                {
-                  "key": "ez_enforcer_version",
-                  "value": {
-                    "stringValue": "1.23.45"
-                  }
-                }
-              ],
+              "attributes": [],
               "droppedAttributesCount": 0
             },
             "metrics": [],

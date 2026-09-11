@@ -31,7 +31,7 @@ const SHARED_MEMORY_FILE_RO: &str = "ez_container_ro";
 fn create_container(bundle_path: &str) -> anyhow::Result<(Box<dyn Container>, TempDir)> {
     let root_dir = tempfile::Builder::new().prefix("test_runc_state").tempdir()?;
     let container =
-        Box::new(ContainerCustom::new(ContainerRoot::TarImagePath(bundle_path.to_string()))?);
+        Box::new(ContainerCustom::new(ContainerRoot::TarImagePath(bundle_path.to_string()), None)?);
     Ok((container, root_dir))
 }
 

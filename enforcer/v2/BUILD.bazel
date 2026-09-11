@@ -394,3 +394,25 @@ rust_prost_library(
     proto = ":ez_management_proto",
     visibility = ["//visibility:public"],
 )
+
+proto_library(
+    name = "setup_isolate_proto",
+    srcs = ["setup_isolate.proto"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@com_google_protobuf//:timestamp_proto",
+    ],
+)
+
+rust_prost_library(
+    name = "setup_isolate_rust_proto",
+    proto = ":setup_isolate_proto",
+    visibility = ["//visibility:public"],
+)
+
+buf_lint_test(
+    name = "setup_isolate_proto_lint",
+    size = "small",
+    config = ":buf.yaml",
+    targets = [":setup_isolate_proto"],
+)

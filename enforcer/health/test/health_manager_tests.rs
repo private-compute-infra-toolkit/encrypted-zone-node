@@ -128,6 +128,7 @@ async fn test_health_manager() {
     assert!(report.end_timestamp >= report.start_timestamp);
     // Make sure the report has the expected Isolates.
     assert_eq!(report.isolates.len(), 4);
+    assert!(!report.are_isolates_ready);
     // Make sure the Isolates in the report have expected values.
     let isolates_by_id: HashMap<String, _> =
         report.isolates.into_iter().map(|i| (i.isolate_id.clone(), i)).collect();
@@ -400,6 +401,239 @@ async fn test_health_report_includes_sensitive_session_count() {
     assert_eq!(health.isolate_id, isolate_id.to_string());
     assert_eq!(health.current_scope, Some(DataScopeType::UserPrivate as i32));
     assert_eq!(health.sensitive_session_count, Some(1));
+}
+
+#[tokio::test]
+async fn test_health_manager_are_isolates_ready_conditions() {
+    let (tx, mut rx) = mpsc::channel(1);
+    let container_manager_requester = ContainerManagerRequester::new(tx);
+    let data_scope_requester = DataScopeRequester::new(0);
+    let isolate_state_manager =
+        IsolateStateManager::new(data_scope_requester.clone(), container_manager_requester.clone());
+
+    let mapper = IsolateServiceMapper::default();
+    let service_info_1 = IsolateServiceInfo {
+        operator_domain: "example.com".to_string(),
+        service_name: "service1".to_string(),
+        publisher_id: "publisher1".to_string(),
+        isolate_name: "isolate1".to_string(),
+    };
+    let binary_index_1 = mapper
+        .new_binary_index(
+            vec![service_info_1],
+            false,
+            "publisher1".to_string(),
+            "isolate1".to_string(),
+        )
+        .await
+        .unwrap();
+    let isolate_id_1a = IsolateId::new(binary_index_1);
+    let isolate_id_1b = IsolateId::new(binary_index_1);
+
+    let service_info_2 = IsolateServiceInfo {
+        operator_domain: "example.com".to_string(),
+        service_name: "service2".to_string(),
+        publisher_id: "publisher2".to_string(),
+        isolate_name: "isolate2".to_string(),
+    };
+    let binary_index_2 = mapper
+        .new_binary_index(
+            vec![service_info_2],
+            false,
+            "publisher2".to_string(),
+            "isolate2".to_string(),
+        )
+        .await
+        .unwrap();
+    let isolate_id_2a = IsolateId::new(binary_index_2);
+    let isolate_id_2b = IsolateId::new(binary_index_2);
+
+    let health_manager = HealthManager::new(
+        isolate_state_manager.clone(),
+        container_manager_requester,
+        mapper.clone(),
+        data_scope_requester.clone(),
+    );
+
+    let container_statuses = Arc::new(Mutex::new(HashMap::<IsolateId, ContainerRunStatus>::new()));
+    let container_statuses_clone = container_statuses.clone();
+
+    // Mock container manager
+    tokio::spawn(async move {
+        while let Some(request) = rx.recv().await {
+            match request {
+                ContainerManagerRequest::GetRunStatus { req, resp } => {
+                    let status = container_statuses_clone
+                        .lock()
+                        .unwrap()
+                        .get(&req.isolate_id)
+                        .cloned()
+                        .unwrap_or(ContainerRunStatus::Running);
+                    let (rss_bytes, peak_rss_bytes, virt_bytes, shared_bytes, data_bytes) =
+                        if status == ContainerRunStatus::Running {
+                            (Some(100_000_000), None, None, None, None)
+                        } else {
+                            (None, None, None, None, None)
+                        };
+                    let _ = resp.send(Ok(GetRunStatusResponse {
+                        status,
+                        rss_bytes,
+                        peak_rss_bytes,
+                        virt_bytes,
+                        shared_bytes,
+                        data_bytes,
+                        restart_count: if status == ContainerRunStatus::Running { 0 } else { 1 },
+                    }));
+                }
+                ContainerManagerRequest::ResetIsolateRequest { req: _, resp } => {
+                    let _ = resp.send(Ok(ResetIsolateResponse {}));
+                }
+                _ => {}
+            }
+        }
+    });
+
+    // 1. Condition: Empty registered binary indices -> are_isolates_ready is false even if isolates are registered
+    {
+        let (empty_tx, _empty_rx) = mpsc::channel(1);
+        let empty_cm_req = ContainerManagerRequester::new(empty_tx);
+        let empty_ism =
+            IsolateStateManager::new(data_scope_requester.clone(), empty_cm_req.clone());
+        let empty_hm = HealthManager::new(
+            empty_ism.clone(),
+            empty_cm_req,
+            IsolateServiceMapper::default(),
+            data_scope_requester.clone(),
+        );
+        empty_ism.set_isolates_registered();
+        empty_hm.run().await;
+        assert!(!empty_hm.get_report().await.are_isolates_ready);
+    }
+
+    // 2. Condition: Isolates not registered and no isolates added -> false
+    health_manager.run().await;
+    assert!(!health_manager.get_report().await.are_isolates_ready);
+
+    // --- Build up to fully ready baseline ---
+    // Add isolate_1a for binary_index_1: Ready and Running
+    isolate_state_manager
+        .add_isolate(AddIsolateRequest {
+            current_data_scope_type: DataScopeType::Public,
+            allowed_data_scope_type: DataScopeType::Public,
+            isolate_id: isolate_id_1a,
+        })
+        .await;
+    isolate_state_manager.mark_channel_connected(isolate_id_1a).await.unwrap();
+    isolate_state_manager.update_state(isolate_id_1a, IsolateState::Ready).await.unwrap();
+
+    // Add isolate_2a for binary_index_2: Ready and Running
+    isolate_state_manager
+        .add_isolate(AddIsolateRequest {
+            current_data_scope_type: DataScopeType::Public,
+            allowed_data_scope_type: DataScopeType::Public,
+            isolate_id: isolate_id_2a,
+        })
+        .await;
+    isolate_state_manager.mark_channel_connected(isolate_id_2a).await.unwrap();
+    isolate_state_manager.update_state(isolate_id_2a, IsolateState::Ready).await.unwrap();
+
+    // Still not ready because isolates are not registered
+    health_manager.run().await;
+    assert!(!health_manager.get_report().await.are_isolates_ready);
+
+    // Set isolates_registered -> Baseline Ready State reached!
+    isolate_state_manager.set_isolates_registered();
+    health_manager.run().await;
+    assert!(health_manager.get_report().await.are_isolates_ready);
+
+    // --- Test each condition independently by mutating from ready -> verifying false -> restoring -> verifying true ---
+
+    // 3. Condition: Container run status must be Running (testing Exited, Signaled, NotFound)
+    container_statuses.lock().unwrap().insert(isolate_id_1a, ContainerRunStatus::Exited(1));
+    health_manager.run().await;
+    assert!(!health_manager.get_report().await.are_isolates_ready);
+    container_statuses.lock().unwrap().insert(isolate_id_1a, ContainerRunStatus::Running);
+    health_manager.run().await;
+    assert!(health_manager.get_report().await.are_isolates_ready);
+
+    container_statuses.lock().unwrap().insert(isolate_id_1a, ContainerRunStatus::Signaled(9));
+    health_manager.run().await;
+    assert!(!health_manager.get_report().await.are_isolates_ready);
+    container_statuses.lock().unwrap().insert(isolate_id_1a, ContainerRunStatus::Running);
+    health_manager.run().await;
+    assert!(health_manager.get_report().await.are_isolates_ready);
+
+    container_statuses.lock().unwrap().insert(isolate_id_1a, ContainerRunStatus::NotFound);
+    health_manager.run().await;
+    assert!(!health_manager.get_report().await.are_isolates_ready);
+    container_statuses.lock().unwrap().insert(isolate_id_1a, ContainerRunStatus::Running);
+    health_manager.run().await;
+    assert!(health_manager.get_report().await.are_isolates_ready);
+
+    // 4. Condition: Isolate state must be Ready (testing Retiring and Starting)
+    isolate_state_manager.update_state(isolate_id_2a, IsolateState::Retiring).await.unwrap();
+    health_manager.run().await;
+    assert!(!health_manager.get_report().await.are_isolates_ready);
+
+    // Adding isolate_2b in Starting state does not yet make it ready
+    isolate_state_manager
+        .add_isolate(AddIsolateRequest {
+            current_data_scope_type: DataScopeType::Public,
+            allowed_data_scope_type: DataScopeType::Public,
+            isolate_id: isolate_id_2b,
+        })
+        .await;
+    health_manager.run().await;
+    assert!(!health_manager.get_report().await.are_isolates_ready);
+
+    // Update isolate_2b to Ready -> system returns to ready
+    isolate_state_manager.mark_channel_connected(isolate_id_2b).await.unwrap();
+    isolate_state_manager.update_state(isolate_id_2b, IsolateState::Ready).await.unwrap();
+    health_manager.run().await;
+    assert!(health_manager.get_report().await.are_isolates_ready);
+
+    // 5. Condition: Multi-type requirement (all registered binary indices must be satisfied)
+    // Failing isolate_2b leaves binary_index_2 unsatisfied
+    container_statuses.lock().unwrap().insert(isolate_id_2b, ContainerRunStatus::Exited(1));
+    health_manager.run().await;
+    assert!(!health_manager.get_report().await.are_isolates_ready);
+    container_statuses.lock().unwrap().insert(isolate_id_2b, ContainerRunStatus::Running);
+    health_manager.run().await;
+    assert!(health_manager.get_report().await.are_isolates_ready);
+
+    // 6. Condition: Multi-replica redundancy for the same binary index
+    // Add isolate_1b in Ready and Running state for binary_index_1
+    isolate_state_manager
+        .add_isolate(AddIsolateRequest {
+            current_data_scope_type: DataScopeType::Public,
+            allowed_data_scope_type: DataScopeType::Public,
+            isolate_id: isolate_id_1b,
+        })
+        .await;
+    isolate_state_manager.mark_channel_connected(isolate_id_1b).await.unwrap();
+    isolate_state_manager.update_state(isolate_id_1b, IsolateState::Ready).await.unwrap();
+    health_manager.run().await;
+    assert!(health_manager.get_report().await.are_isolates_ready);
+
+    // If isolate_1a fails (Exited), the manager remains ready because isolate_1b is ready
+    container_statuses.lock().unwrap().insert(isolate_id_1a, ContainerRunStatus::Exited(137));
+    health_manager.run().await;
+    assert!(health_manager.get_report().await.are_isolates_ready);
+
+    // If isolate_1b ALSO fails (Exited), now binary_index_1 has no ready replica -> false
+    container_statuses.lock().unwrap().insert(isolate_id_1b, ContainerRunStatus::Exited(1));
+    health_manager.run().await;
+    assert!(!health_manager.get_report().await.are_isolates_ready);
+
+    // Restoring isolate_1b makes it ready again
+    container_statuses.lock().unwrap().insert(isolate_id_1b, ContainerRunStatus::Running);
+    health_manager.run().await;
+    assert!(health_manager.get_report().await.are_isolates_ready);
+
+    // Restoring isolate_1a as well
+    container_statuses.lock().unwrap().insert(isolate_id_1a, ContainerRunStatus::Running);
+    health_manager.run().await;
+    assert!(health_manager.get_report().await.are_isolates_ready);
 }
 
 #[test]

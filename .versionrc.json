@@ -39,7 +39,9 @@
     { "type": "perf", "scope": "mtls", "section": "Performance mTLS" },
     { "type": "perf", "section": "Performance" },
 
+    { "type": "docs", "scope": "gemini", "section": "Gemini" },
     { "type": "docs", "section": "Documentation" },
+
     { "type": "internal", "hidden": true },
     { "type": "chore", "hidden": true },
     { "type": "test", "hidden": true },

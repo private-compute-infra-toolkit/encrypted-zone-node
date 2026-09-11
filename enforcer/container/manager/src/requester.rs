@@ -13,11 +13,15 @@
 // limitations under the License.
 
 use anyhow::Result;
-use container_manager_request::{
-    ContainerManagerRequest, GetRunStatusRequest, GetRunStatusResponse, MountDirectoryResponse,
+pub use container_manager_request::{
+    ContainerManagerRequest, GetRunStatusRequest, GetRunStatusResponse,
+    GetSetupIsolateClientResponse, LoadWorkloadIsolatesRequest, LoadWorkloadIsolatesResponse,
+    LoadWorkloadManifestsRequest, LoadWorkloadManifestsResponse, MountDirectoryResponse,
     MountFileResponse, MountReadOnlyDirectory, MountReadOnlyFile, MountWritableDirectory,
     MountWritableFile, ResetIsolateRequest, ResetIsolateResponse,
 };
+use setup_isolate_client::SetupIsolateClient;
+use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 /// Requester to send requests to ContainerManager. Consumers are encouraged to clone the requester.
@@ -112,6 +116,40 @@ impl ContainerManagerRequester {
         })
         .await;
         response_rx.await?
+    }
+
+    /// Send request to ContainerManager to load workload manifests.
+    pub async fn load_workload_manifests(
+        &self,
+        req: LoadWorkloadManifestsRequest,
+    ) -> Result<LoadWorkloadManifestsResponse> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.send_request(ContainerManagerRequest::LoadWorkloadManifests {
+            req,
+            resp: response_tx,
+        })
+        .await;
+        response_rx.await?
+    }
+
+    /// Send request to ContainerManager to load workload isolates.
+    pub async fn load_workload_isolates(
+        &self,
+        req: LoadWorkloadIsolatesRequest,
+    ) -> Result<LoadWorkloadIsolatesResponse> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.send_request(ContainerManagerRequest::LoadWorkloadIsolates { req, resp: response_tx })
+            .await;
+        response_rx.await?
+    }
+
+    /// Send request to ContainerManager to get the SetupIsolateClient, if available.
+    pub async fn get_setup_isolate_client(&self) -> Result<Option<Arc<SetupIsolateClient>>> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.send_request(ContainerManagerRequest::GetSetupIsolateClient { resp: response_tx })
+            .await;
+        let response = response_rx.await??;
+        Ok(response.client)
     }
 
     async fn send_request(&self, container_manager_request: ContainerManagerRequest) {

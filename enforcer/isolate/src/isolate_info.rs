@@ -45,18 +45,29 @@ pub struct IsolateType {
     pub isolate_name: String,
 }
 
-pub static ISOLATE_SERVICES_REGISTRY: Lazy<
-    std::sync::RwLock<std::collections::HashMap<BinaryServicesIndex, IsolateType>>,
-> = Lazy::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
+#[derive(Default)]
+struct IsolateServicesRegistry {
+    type_to_index: std::collections::HashMap<IsolateType, BinaryServicesIndex>,
+    index_to_type: std::collections::HashMap<BinaryServicesIndex, IsolateType>,
+}
+
+static ISOLATE_SERVICES_REGISTRY: Lazy<std::sync::RwLock<IsolateServicesRegistry>> =
+    Lazy::new(|| std::sync::RwLock::new(IsolateServicesRegistry::default()));
 
 pub fn register_isolate_type(index: BinaryServicesIndex, isolate_type: IsolateType) {
     let mut registry = ISOLATE_SERVICES_REGISTRY.write().unwrap_or_else(|e| e.into_inner());
-    registry.insert(index, isolate_type);
+    registry.type_to_index.insert(isolate_type.clone(), index);
+    registry.index_to_type.insert(index, isolate_type);
 }
 
 pub fn get_isolate_type(index: &BinaryServicesIndex) -> Option<IsolateType> {
     let registry = ISOLATE_SERVICES_REGISTRY.read().unwrap_or_else(|e| e.into_inner());
-    registry.get(index).cloned()
+    registry.index_to_type.get(index).cloned()
+}
+
+pub fn get_binary_services_index(isolate_type: &IsolateType) -> Option<BinaryServicesIndex> {
+    let registry = ISOLATE_SERVICES_REGISTRY.read().unwrap_or_else(|e| e.into_inner());
+    registry.type_to_index.get(isolate_type).copied()
 }
 
 pub fn get_isolate_name(index: &BinaryServicesIndex) -> String {

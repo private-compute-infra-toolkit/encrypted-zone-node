@@ -32,6 +32,7 @@ rust_library(
     name = "container",
     srcs = [
         "src/container.rs",
+        "src/state_reset.rs",
     ],
     proc_macro_deps = ["@crates//:derivative"],
     visibility = ["//visibility:public"],
@@ -79,6 +80,7 @@ rust_test(
         ":utils",
         "@crates//:anyhow",
         "@crates//:libc",
+        "@crates//:nix",
         "@crates//:tempfile",
         "@crates//:tokio",
     ],

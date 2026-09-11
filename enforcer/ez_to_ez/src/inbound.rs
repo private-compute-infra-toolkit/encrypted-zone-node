@@ -22,7 +22,9 @@ use ez_to_ez_service_proto::enforcer::v1::{
     ez_to_ez_api_server::{EzToEzApi, EzToEzApiServer},
     EzCallRequest, EzCallResponse,
 };
-use grpc_connector::get_grpc_timeout_or_log;
+use grpc_connector::{
+    get_grpc_timeout_or_log, INITIAL_CONNECTION_WINDOW_SIZE, INITIAL_STREAM_WINDOW_SIZE,
+};
 use junction_trait::{Junction, JunctionChannels};
 use metrics::{
     common::{MetricAttributes, ServiceMetrics},
@@ -300,9 +302,22 @@ pub async fn launch_server(
     tls_config: Option<InboundTlsConfig>,
 ) {
     log::info!("Starting inbound EZ-to-EZ server at {}...", address);
-    let server_builder = Server::builder().add_service(
-        EzToEzApiServer::new(handler).max_decoding_message_size(max_decoding_message_size),
-    );
+    // Extra HTTP/2 configuration is required to tunnel the TLS traffic over an tunnel
+    // on the Proxy side. This is required for performance improvement.
+    // TODO: Allow overriding window sizes via environment variables if needed.
+    let server_builder = if tls_config.is_some() {
+        Server::builder()
+            .initial_stream_window_size(Some(INITIAL_STREAM_WINDOW_SIZE))
+            .initial_connection_window_size(INITIAL_CONNECTION_WINDOW_SIZE)
+            .http2_adaptive_window(Some(false))
+            .add_service(
+                EzToEzApiServer::new(handler).max_decoding_message_size(max_decoding_message_size),
+            )
+    } else {
+        Server::builder().add_service(
+            EzToEzApiServer::new(handler).max_decoding_message_size(max_decoding_message_size),
+        )
+    };
 
     let server_result = if let Some(path) = address.strip_prefix("unix:") {
         // Attempt to remove the old socket file if it exists.

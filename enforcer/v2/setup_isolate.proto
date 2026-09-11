@@ -1,0 +1,130 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package enforcer.v2;
+
+import "google/protobuf/timestamp.proto";
+
+// Service implemented by the pluggable Setup Isolate.
+// The Enforcer (or other ratified isolates) calls this service to bootstrap
+// its certificates.
+service SetupService {
+  // Generates an unsigned CSR for the given public key.
+  rpc GetTlsCsr(GetTlsCsrRequest) returns (GetTlsCsrResponse) {}
+
+  // Fetches the signed mTLS certificate chain and trust anchors.
+  rpc FetchMtlsCertificate(FetchTlsCertificateRequest) returns (FetchTlsCertificateResponse) {}
+
+  // Fetches the signed Frontend TLS certificate chain and trust anchors.
+  rpc FetchFrontendTlsCertificate(FetchFrontendTlsCertificateRequest) returns (FetchFrontendTlsCertificateResponse) {}
+
+  // Validates whether the isolate package endorsements are valid and match expected claims.
+  rpc ValidateIsolateEndorsement(ValidateIsolateEndorsementRequest) returns (ValidateIsolateEndorsementResponse) {}
+}
+
+// Request to get an unsigned CSR.
+message GetTlsCsrRequest {
+  // Raw public key bytes (DER-encoded).
+  bytes public_key = 1;
+}
+
+// Response containing the unsigned CSR.
+message GetTlsCsrResponse {
+  // Unsigned CSR in DER format.
+  bytes unsigned_certificate_signing_request = 1;
+}
+
+// Request to fetch the signed mTLS certificate.
+message FetchTlsCertificateRequest {
+  // The signed CSR bytes (DER-encoded) after authorization.
+  bytes signed_certificate_signing_request = 1;
+}
+
+// Response containing the signed mTLS certificate chain.
+message FetchTlsCertificateResponse {
+  // DER-encoded X.509 certificate chain (leaf first).
+  repeated bytes certificate_chain = 1;
+  // DER-encoded X.509 trust anchors.
+  repeated bytes trust_anchors = 2;
+}
+
+// Request to fetch the signed Frontend TLS certificate.
+message FetchFrontendTlsCertificateRequest {
+  // The signed CSR bytes (DER-encoded).
+  bytes signed_certificate_signing_request = 1;
+}
+
+// Response containing the signed Frontend TLS certificate chain.
+message FetchFrontendTlsCertificateResponse {
+  // DER-encoded X.509 certificate chain.
+  repeated bytes certificate_chain = 1;
+  // DER-encoded X.509 trust anchors.
+  repeated bytes trust_anchors = 2;
+}
+
+// Expected claims to validate against the isolate package endorsement.
+message ExpectedClaims {
+  // Expected publisher ID in the endorsement.
+  string publisher_id = 1;
+  // Expected isolate name in the endorsement.
+  string isolate_name = 2;
+}
+
+// Request to validate isolate package endorsements.
+message ValidateIsolateEndorsementRequest {
+  // Expected claims that the endorsement must satisfy.
+  ExpectedClaims expected_claims = 1;
+  // Package Endorsement data. This remains opaque to the Enforcer. The EzManagementService and Setup Isolate should know how to parse this.
+  bytes isolate_package_endorsement = 2;
+  // Expected SHA256 digest of the isolate package. This should match the digest (hash) of the package in IsolatePackageEndorsement.
+  string package_digest_sha256 = 3;
+}
+
+// Represents the validity time range for an endorsement.
+message Validity {
+  // Timestamp before which the endorsement is not valid.
+  google.protobuf.Timestamp not_before = 1;
+  // Timestamp after which the endorsement is not valid.
+  google.protobuf.Timestamp not_after = 2;
+}
+
+// Response containing the isolate package endorsement validation result.
+message ValidateIsolateEndorsementResponse {
+  // Errors that can occur during isolate endorsement validation.
+  enum IsolateEndorsementValidationError {
+    // Unspecified validation error.
+    ISOLATE_ENDORSEMENT_VALIDATION_ERROR_UNSPECIFIED = 0;
+    // Failed to parse the endorsement, confirmation JSON, keyset, or claims.
+    ISOLATE_ENDORSEMENT_VALIDATION_ERROR_PARSING_FAILURE = 1;
+    // Publisher ID in the endorsement does not match the expected publisher ID.
+    ISOLATE_ENDORSEMENT_VALIDATION_ERROR_PUBLISHER_ID_MISMATCH = 2;
+    // Workload ID in the endorsement does not match the expected isolate name.
+    ISOLATE_ENDORSEMENT_VALIDATION_ERROR_ISOLATE_NAME_MISMATCH = 3;
+    // Cryptographic endorsement verification failed.
+    ISOLATE_ENDORSEMENT_VALIDATION_ERROR_VERIFICATION_FAILED = 4;
+    // Endorsement validity period is missing or invalid.
+    ISOLATE_ENDORSEMENT_VALIDATION_ERROR_INVALID_VALIDITY_PERIOD = 5;
+    // Package digest SHA256 in the endorsement does not match the expected package digest.
+    ISOLATE_ENDORSEMENT_VALIDATION_ERROR_PACKAGE_DIGEST_MISMATCH = 6;
+  }
+
+  // Validity period of the endorsement if validation succeeded. If absent, consider the endorsement to be invalid.
+  Validity validity = 1;
+  // Validation error encountered, if any.
+  IsolateEndorsementValidationError validation_error = 2;
+  // Detailed error message if validation failed.
+  string error_message = 3;
+}

@@ -15,7 +15,9 @@
 use anyhow::{ensure, Context, Result};
 use container_manager::{ContainerManager, ContainerManagerArgs, ManifestSource};
 use container_manager_request::ContainerManagerRequest;
-use container_manager_requester::ContainerManagerRequester;
+pub use container_manager_requester::{
+    ContainerManagerRequester, LoadWorkloadIsolatesRequest, LoadWorkloadManifestsRequest,
+};
 use container_test_utils::{FakeContainer, Status};
 use data_scope::error::DataScopeError;
 use data_scope::manifest_validator::ManifestValidator;
@@ -35,7 +37,7 @@ use isolate_ez_service_manager::{IsolateEzServiceManager, IsolateEzServiceManage
 use isolate_info::{BinaryServicesIndex, IsolateId, IsolateServiceIndex, IsolateServiceInfo};
 use isolate_service_mapper::IsolateServiceMapper;
 use junction_test_utils::FakeJunction;
-use manifest_parser_test_utils::load_workload_manifests_from_paths;
+pub use manifest_parser_test_utils::load_workload_manifests_from_paths;
 use manifest_proto::enforcer::v1::IsolateRuntimeConfigs;
 use opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_server::{
     MetricsService, MetricsServiceServer,
@@ -49,6 +51,7 @@ use payload_proto::enforcer::v1::{
 use shared_memory_manager::SharedMemManager;
 use simple_tonic_stream::SimpleStreamingWrapper;
 use state_manager::{IsolateStateManager, IsolateStateManagerError};
+use std::collections::HashMap;
 use std::fs::OpenOptions;
 use tokio::net::{TcpListener, UnixStream};
 use tokio::sync::mpsc::channel;
@@ -176,7 +179,20 @@ impl TestHarness {
         opaque_path: Option<&str>,
     ) -> Result<()> {
         let workload_manifests = load_workload_manifests_from_paths(ratified_path, opaque_path)?;
-        self.container_manager.load_workload_isolates(workload_manifests).await?;
+        let parsed_isolates = workload_manifests.clone().into_parsed_isolates()?;
+        let resp = self
+            .container_manager_requester
+            .load_workload_manifests(LoadWorkloadManifestsRequest { workload_manifests })
+            .await?;
+        let indices = resp.registered_indices;
+        let isolate_packages: HashMap<BinaryServicesIndex, String> = indices
+            .into_iter()
+            .zip(parsed_isolates)
+            .map(|(idx, i)| (idx, i.package_filename))
+            .collect();
+        self.container_manager_requester
+            .load_workload_isolates(LoadWorkloadIsolatesRequest { isolate_packages })
+            .await?;
         Ok(())
     }
 
@@ -305,7 +321,7 @@ pub async fn start_isolate_ez_bridge(
         let isolate_fifo_path = format!("{}.ready", uds_path);
         OpenOptions::new().read(true).open(isolate_fifo_path).unwrap();
     });
-    timeout(Duration::from_millis(100), open_future)
+    timeout(Duration::from_secs(5), open_future)
         .await
         .map_err(|_| anyhow::anyhow!("Timeout waiting for Isolate EZ server to be ready."))?
         .map_err(|e| anyhow::anyhow!("Failed to open ready pipe: {}", e))?;
@@ -346,7 +362,9 @@ pub async fn notify_ready(
 
     let mut invoke_isolate_response_stream: SimpleStreamingWrapper<NotifyIsolateStateResponse> =
         inbound.into_inner().into();
-    let response = invoke_isolate_response_stream.message().await;
+    let response = timeout(Duration::from_secs(5), invoke_isolate_response_stream.message())
+        .await
+        .context("Timeout waiting for Notify Isolate State Response")?;
     ensure!(response.is_some(), "Failed to receive Notify Isolate State Response");
     Ok(response.unwrap())
 }
@@ -463,23 +481,40 @@ pub async fn start_and_ready_containers_in_dependency_order(
     timeout(Duration::from_secs(10), async {
         loop {
             let tracker = FakeContainer::get_tracker();
-            for entry in tracker.iter() {
-                let container_id = *entry.key();
+            let candidates: Vec<_> = tracker
+                .iter()
+                .filter_map(|entry| {
+                    let container_id = *entry.key();
+                    if readied_container_ids.contains(&container_id) {
+                        return None;
+                    }
+                    let container_data = entry.value();
+                    if let Some(actual_binary_filename) = &container_data.binary_filename {
+                        if binary_file_names.contains(&actual_binary_filename.as_str())
+                            && container_data.status == Status::Started
+                        {
+                            return container_data
+                                .isolate_ez_bridge_enforcer_side_uds_path
+                                .as_ref()
+                                .map(|uds_path| (container_id, uds_path.clone()));
+                        }
+                    }
+                    None
+                })
+                .collect();
+            for (container_id, uds_path) in candidates {
                 if readied_container_ids.contains(&container_id) {
                     continue;
                 }
-                let container_data = entry.value();
-                if let Some(actual_binary_filename) = &container_data.binary_filename {
-                    if binary_file_names.contains(&actual_binary_filename.as_str())
-                        && container_data.status == Status::Started
-                    {
-                        if let Some(uds_path) =
-                            &container_data.isolate_ez_bridge_enforcer_side_uds_path
-                        {
-                            let _client = notify_isolate_ready(uds_path.clone()).await?;
-                            readied_container_ids.insert(container_id);
-                            results.push((container_id, uds_path.clone()));
-                        }
+                match notify_isolate_ready(uds_path.clone()).await {
+                    Ok(_client) => {
+                        readied_container_ids.insert(container_id);
+                        results.push((container_id, uds_path));
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "Failed to notify container {container_id} ready, will retry: {e:?}"
+                        );
                     }
                 }
             }

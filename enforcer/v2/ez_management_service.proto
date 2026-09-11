@@ -36,11 +36,18 @@ service EzManagementService {
   // by the manifests as IsolatePackageChunks.
   // 3. For each package successfully loaded, the Enforcer sends a
   // LoadIsolatesResult.
+  // 4. The proxy sends an AllPackagesLoadedResponse to signal that all packages
+  // have been loaded.
   rpc LoadIsolates(stream LoadIsolatesRequest) returns (stream LoadIsolatesResponse) {}
 }
 
 // Request message indicating the Enforcer is ready to load packages.
 message ReadyToLoadPackagesRequest {
+  // Empty for now, but fields can be added safely later.
+}
+
+// Response message indicating that all isolate packages have been loaded.
+message AllPackagesLoadedResponse {
   // Empty for now, but fields can be added safely later.
 }
 
@@ -69,21 +76,30 @@ message LoadIsolatesRequest {
   }
 }
 
+// Wrapper for a RatifiedIsolateManifest and its corresponding endorsements.
+message RatifiedIsolateManifestPayload {
+  // The manifest describing the isolate configuration and packages.
+  enforcer.v2.RatifiedIsolateManifest manifest = 1;
+  // Endorsement data for the manifest. This data will be sent to setup_isolate for validation.
+  bytes manifest_endorsements = 2;
+}
+
 // Response message for loading isolates.
 // The proxy sends responses on this stream containing the manifests and package
 // chunks.
 message LoadIsolatesResponse {
   // The payload sent from the management service to the Enforcer.
   oneof response {
-    // Ratified Isolate Manifest describing the isolate configuration and
-    // packages.
-    enforcer.v2.RatifiedIsolateManifest ratified_isolate_manifest = 1;
+    // Ratified Isolate Manifest and its endorsements.
+    RatifiedIsolateManifestPayload ratified_isolate_manifest = 1;
     // Opaque Isolate Manifest describing the isolate configuration and
     // packages.
     enforcer.v2.OpaqueIsolateManifest opaque_isolate_manifest = 2;
     // An individual isolate package chunk to be loaded.
     // Package endorsements are expected to be part of the overall package tar.
     IsolatePackageChunk isolate_package_chunk = 3;
+    // Signal sent by the management service indicating all packages have been loaded.
+    AllPackagesLoadedResponse all_packages_loaded = 4;
   }
 }
 
@@ -91,7 +107,7 @@ message LoadIsolatesResponse {
 message IsolatePackageChunk {
   // Identifier for the package being processed. Useful for parallel processing
   // without relying on strict sequence ordering. Expected to be provided only
-  // in the first chunk.
+  // in the first chunk. This should match the package_filename in the isolate_manifest.
   string package_name = 1;
   // Sequence number for this chunk, starting from 0.
   int32 chunk_sequence = 2;
@@ -100,6 +116,14 @@ message IsolatePackageChunk {
   bytes package_tar_chunk = 3;
   // Indicates if this is the last chunk.
   bool is_last_chunk = 4;
+  // Endorsement data for this specific isolate package. This data will be sent
+  // to setup_isolate for validation. Expected to be provided only in the first
+  // chunk (where chunk_sequence = 0) and only for Ratified Isolates.
+  // This is kept opaque (bytes) to abstract the endorsement type from Enforcer
+  // protos, allowing EZ to support alternative transparency stacks. The
+  // expected wire format agreed between the proxy and Setup Isolate is a
+  // serialized setup_isolate.v1.IsolatePackageEndorsement proto message.
+  bytes isolate_package_endorsements = 5;
 }
 
 // Errors that can occur during isolate package or manifest loading.

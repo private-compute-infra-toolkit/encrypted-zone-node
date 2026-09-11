@@ -2,6 +2,40 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## 0.24.0 (2026-09-11)
+
+
+### EZ Policy Enforcer
+
+* **enforcer:** Add are_isolates_ready field
+* **enforcer:** Add endorsements to ez_management_service
+* **enforcer:** Add safety timeout to notify_ready response stream
+* **enforcer:** Add setup_isolate_client library
+* **enforcer:** Allow empty responses in ez-to-ez calls
+* **enforcer:** Copy setup_isolate proto
+* **enforcer:** Implement EzManagementService client
+* **enforcer:** Include unspecified route types in dependency graph
+* **enforcer:** Integrate setup_isolate_client with ContainerManager
+* **enforcer:** Isolate unretiring in DSM
+* **enforcer:** move isolate runtime attributes to resource attributes
+* **enforcer:** Retry container readiness check in polling loop
+* **enforcer:** StateResetEngine and Container reset support
+* **enforcer:** Support parsing v2 workload manifests lazily
+* **enforcer:** Sync retire state update, async reset
+* **enforcer:** typed isolate attributes with collision validation
+* **enforcer:** use custom types for isolate attributes
+* **enforcer:** Validate chunk sequence in EzManagementClient
+
+
+### Gemini
+
+* **gemini:** codify testing of public interfaces and contracts
+
+
+### Bug Fixes
+
+* **mTLS:** http2 disable window_update
+
 ## 0.23.0 (2026-08-28)
 
 

@@ -14,13 +14,14 @@
 
 use container::{
     Container, ContainerOptions, ContainerRoot, ContainerRunStatus, MountOptions, NetworkOptions,
-    SeccompAction, SeccompProfile, SeccompRule,
+    SeccompAction, SeccompProfile, SeccompRule, StateResetEngine, StateResetSession,
 };
 use container_custom::ContainerCustom;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, Interest};
@@ -84,7 +85,7 @@ fn default_container_opts(operation: &str, mount_src: Option<PathBuf>) -> Contai
 }
 
 fn default_container() -> ContainerCustom {
-    ContainerCustom::new(ContainerRoot::TarImagePath(BUNDLE_PATH.to_string())).unwrap()
+    ContainerCustom::new(ContainerRoot::TarImagePath(BUNDLE_PATH.to_string()), None).unwrap()
 }
 
 #[tokio::test]
@@ -128,6 +129,14 @@ async fn container_new_unexpected_calls_fails() {
         container.mount_readonly("source", "destination").unwrap_err().to_string(),
         "Can only mount file in a started container"
     );
+    assert_eq!(
+        container.checkpoint().await.unwrap_err().to_string(),
+        "Can only checkpoint a started container"
+    );
+    assert_eq!(
+        container.reset().await.unwrap_err().to_string(),
+        "Can only reset a started container"
+    );
 }
 
 #[tokio::test]
@@ -137,6 +146,10 @@ async fn container_started_unexpected_calls_fails() {
     container.start(&opts).await.unwrap();
     assert!(container.start(&opts).await.is_err());
     assert!(container.delete().await.is_err());
+    assert_eq!(
+        container.reset().await.unwrap_err().to_string(),
+        "Container has not been checkpointed"
+    );
 }
 
 #[tokio::test]
@@ -154,6 +167,14 @@ async fn container_stopped_unexpected_calls_fails() {
     assert_eq!(
         container.mount_readonly("source", "destination").unwrap_err().to_string(),
         "Can only mount file in a started container"
+    );
+    assert_eq!(
+        container.checkpoint().await.unwrap_err().to_string(),
+        "Can only checkpoint a started container"
+    );
+    assert_eq!(
+        container.reset().await.unwrap_err().to_string(),
+        "Can only reset a started container"
     );
 }
 
@@ -178,12 +199,12 @@ async fn container_reusable_fs() {
     let server_handle_1 =
         handle(UnixListener::bind(uds_dir_1.path().join("isolate_ipc")).unwrap(), 100);
     let mut container_1 =
-        ContainerCustom::new(ContainerRoot::ReadOnlyRoot(Arc::clone(&root))).unwrap();
+        ContainerCustom::new(ContainerRoot::ReadOnlyRoot(Arc::clone(&root)), None).unwrap();
     let uds_dir_2 = tempfile::Builder::new().prefix("test_uds_2").tempdir().unwrap();
     let server_handle_2 =
         handle(UnixListener::bind(uds_dir_2.path().join("isolate_ipc")).unwrap(), 100);
     let mut container_2 =
-        ContainerCustom::new(ContainerRoot::ReadOnlyRoot(Arc::clone(&root))).unwrap();
+        ContainerCustom::new(ContainerRoot::ReadOnlyRoot(Arc::clone(&root)), None).unwrap();
     // Start both containers.
     container_1
         .start(&default_container_opts("read-file", Some(uds_dir_1.path().to_path_buf())))
@@ -413,7 +434,7 @@ async fn container_prevents_symlink_file_truncation() {
     };
 
     // 5. Start the container, which will fail because O_NOFOLLOW prevents opening the symlink
-    let mut container = ContainerCustom::new(ContainerRoot::ReadOnlyRoot(root)).unwrap();
+    let mut container = ContainerCustom::new(ContainerRoot::ReadOnlyRoot(root), None).unwrap();
     let start_result = container.start(&opts).await;
     assert!(start_result.is_err(), "Expected container start to fail due to symlink rejection");
 
@@ -451,7 +472,7 @@ async fn container_prevents_intermediate_symlink_traversal() {
     };
 
     // 5. Start the container
-    let mut container = ContainerCustom::new(ContainerRoot::ReadOnlyRoot(root)).unwrap();
+    let mut container = ContainerCustom::new(ContainerRoot::ReadOnlyRoot(root), None).unwrap();
     let start_result = container.start(&opts).await;
 
     // The container should fail to start because the intermediate symlink is detected and rejected
@@ -504,4 +525,155 @@ async fn container_seccomp_errno() {
         "Container should have reported EPERM from seccomp"
     );
     assert_eq!(status, ContainerRunStatus::Exited(0));
+}
+
+#[derive(Debug, Default)]
+struct MockResetSession {
+    checkpoint_calls: Arc<AtomicUsize>,
+    reset_calls: Arc<AtomicUsize>,
+}
+
+impl StateResetSession for MockResetSession {
+    fn checkpoint(&mut self) -> anyhow::Result<()> {
+        self.checkpoint_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn reset(&mut self) -> anyhow::Result<usize> {
+        self.reset_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(1)
+    }
+}
+
+#[derive(Debug, Default)]
+struct MockResetEngine {
+    create_session_calls: Arc<AtomicUsize>,
+    checkpoint_calls: Arc<AtomicUsize>,
+    reset_calls: Arc<AtomicUsize>,
+    recorded_pid: Arc<std::sync::Mutex<Option<i32>>>,
+}
+
+impl StateResetEngine for MockResetEngine {
+    fn create_session(
+        &self,
+        pid: i32,
+        _checkpoint_dir: PathBuf,
+        _sandbox_root: Option<PathBuf>,
+    ) -> anyhow::Result<Box<dyn StateResetSession>> {
+        self.create_session_calls.fetch_add(1, Ordering::SeqCst);
+        *self.recorded_pid.lock().unwrap() = Some(pid);
+        Ok(Box::new(MockResetSession {
+            checkpoint_calls: Arc::clone(&self.checkpoint_calls),
+            reset_calls: Arc::clone(&self.reset_calls),
+        }))
+    }
+}
+
+#[derive(Debug, Default)]
+struct FailingResetSession;
+
+impl StateResetSession for FailingResetSession {
+    fn checkpoint(&mut self) -> anyhow::Result<()> {
+        anyhow::bail!("FSR checkpoint failed")
+    }
+
+    fn reset(&mut self) -> anyhow::Result<usize> {
+        anyhow::bail!("FSR reset failed")
+    }
+}
+
+#[derive(Debug, Default)]
+struct FailingResetEngine;
+
+impl StateResetEngine for FailingResetEngine {
+    fn create_session(
+        &self,
+        _pid: i32,
+        _checkpoint_dir: PathBuf,
+        _sandbox_root: Option<PathBuf>,
+    ) -> anyhow::Result<Box<dyn StateResetSession>> {
+        Ok(Box::new(FailingResetSession))
+    }
+}
+
+#[tokio::test]
+async fn container_checkpoint_and_reset_workflow() {
+    let checkpoint_calls = Arc::new(AtomicUsize::new(0));
+    let reset_calls = Arc::new(AtomicUsize::new(0));
+    let create_session_calls = Arc::new(AtomicUsize::new(0));
+    let recorded_pid = Arc::new(std::sync::Mutex::new(None));
+
+    let engine = Arc::new(MockResetEngine {
+        create_session_calls: Arc::clone(&create_session_calls),
+        checkpoint_calls: Arc::clone(&checkpoint_calls),
+        reset_calls: Arc::clone(&reset_calls),
+        recorded_pid: Arc::clone(&recorded_pid),
+    });
+
+    let root = ContainerRoot::TarImagePath(BUNDLE_PATH.to_string());
+    let mut container = ContainerCustom::new(root, Some(engine)).unwrap();
+    let opts = default_container_opts("sleep", None);
+    container.start(&opts).await.unwrap();
+
+    // Reset before checkpoint should fail.
+    assert_eq!(
+        container.reset().await.unwrap_err().to_string(),
+        "Container has not been checkpointed"
+    );
+
+    // Initial checkpoint should succeed.
+    container.checkpoint().await.unwrap();
+    assert_eq!(create_session_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(checkpoint_calls.load(Ordering::SeqCst), 1);
+    assert!(recorded_pid.lock().unwrap().is_some());
+
+    // Checkpointing a second time should fail.
+    assert_eq!(
+        container.checkpoint().await.unwrap_err().to_string(),
+        "Container has already been checkpointed"
+    );
+    assert_eq!(checkpoint_calls.load(Ordering::SeqCst), 1);
+
+    // Reset should succeed.
+    container.reset().await.unwrap();
+    assert_eq!(reset_calls.load(Ordering::SeqCst), 1);
+
+    container.stop().await.unwrap();
+    container.delete().await.unwrap();
+}
+
+#[tokio::test]
+async fn container_checkpoint_engine_error_propagates() {
+    let engine = Arc::new(FailingResetEngine);
+    let root = ContainerRoot::TarImagePath(BUNDLE_PATH.to_string());
+    let mut container = ContainerCustom::new(root, Some(engine)).unwrap();
+    let opts = default_container_opts("sleep", None);
+    container.start(&opts).await.unwrap();
+
+    assert_eq!(container.checkpoint().await.unwrap_err().to_string(), "FSR checkpoint failed");
+
+    // Since checkpoint failed, session was not saved, so reset should fail as not checkpointed.
+    assert_eq!(
+        container.reset().await.unwrap_err().to_string(),
+        "Container has not been checkpointed"
+    );
+
+    container.stop().await.unwrap();
+    container.delete().await.unwrap();
+}
+
+#[tokio::test]
+async fn container_checkpoint_without_engine_fails() {
+    let root = ContainerRoot::TarImagePath(BUNDLE_PATH.to_string());
+    let mut container = ContainerCustom::new(root, None).unwrap();
+    let opts = default_container_opts("sleep", None);
+    container.start(&opts).await.unwrap();
+
+    assert_eq!(
+        container.checkpoint().await.unwrap_err().to_string(),
+        "Fast State Reset is not configured or supported in this environment"
+    );
+
+    container.stop().await.unwrap();
+    container.delete().await.unwrap();
 }

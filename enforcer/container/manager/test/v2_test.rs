@@ -12,9 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use container_manager_test_utils::*;
 use container_test_utils::FakeContainer;
-use isolate_info::IsolateServiceInfo;
+use isolate_info::{BinaryServicesIndex, IsolateServiceInfo};
 use manifest_parser::v2::WorkloadManifests;
 use manifest_proto::enforcer::v1::IsolateRuntimeConfigs;
 
@@ -213,6 +215,82 @@ async fn test_v2_explicit_startup_parameters_scaling() {
 }
 
 #[tokio::test]
+async fn test_v2_load_workload_manifests_without_starting_isolates() {
+    let mut harness = TestHarness::new_v2(
+        "enforcer/manifest_parser/test/testdata/v2_setup.json",
+        &IsolateRuntimeConfigs::default(),
+        "test_operator".to_string(),
+    )
+    .await
+    .expect("ContainerManager should start with v2 setup manifest");
+    let setup_containers =
+        check_container_started(vec![SETUP_BINARY]).await.expect("Setup container should start");
+    assert_eq!(setup_containers.len(), 1);
+    let (_fake_container_id, isolate_ez_bridge_enforcer_side_uds_path) =
+        setup_containers[0].clone();
+    let _client = notify_isolate_ready(isolate_ez_bridge_enforcer_side_uds_path)
+        .await
+        .expect("Setup isolate should be ready");
+    let workload_manifests = load_workload_manifests_from_paths(
+        Some("enforcer/manifest_parser/test/testdata/v2_ratified.json"),
+        Some("enforcer/manifest_parser/test/testdata/v2_opaque.json"),
+    )
+    .expect("Should parse workload manifests");
+    let response = harness
+        .container_manager_requester
+        .load_workload_manifests(LoadWorkloadManifestsRequest {
+            workload_manifests: workload_manifests.clone(),
+        })
+        .await
+        .expect("Should load workload manifests without starting isolates");
+    let indices = response.registered_indices;
+    assert_eq!(indices.len(), 3);
+    let greeter_index = harness
+        .isolate_service_mapper
+        .get_service_index(&IsolateServiceInfo {
+            operator_domain: RATIFIED_ISOLATE_DOMAIN.to_string(),
+            service_name: GREETER_SERVICE.to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("Ratified Greeter should be registered");
+    assert!(service_info_has_valid_binary_index(&greeter_index));
+    let auth_index = harness
+        .isolate_service_mapper
+        .get_service_index(&IsolateServiceInfo {
+            operator_domain: RATIFIED_ISOLATE_DOMAIN.to_string(),
+            service_name: AUTH_SERVICE.to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("Ratified AuthService should be registered");
+    assert!(service_info_has_valid_binary_index(&auth_index));
+    let isolate_packages: HashMap<BinaryServicesIndex, String> = indices
+        .into_iter()
+        .zip(workload_manifests.into_parsed_isolates().expect("Failed to parse workload isolates"))
+        .map(|(idx, i)| (idx, i.package_filename))
+        .collect();
+    let started_response = harness
+        .container_manager_requester
+        .load_workload_isolates(LoadWorkloadIsolatesRequest { isolate_packages })
+        .await
+        .expect("Should start workload isolates via load_workload_isolates");
+    assert_eq!(started_response.loaded_indices.len(), 3);
+    let workload_containers = start_and_ready_containers_in_dependency_order(vec![
+        HELLOWORLD_BINARY,
+        HELLOWORLD_BINARY,
+        HELLOWORLD_BINARY,
+    ])
+    .await
+    .expect("Workload containers should start and be readied");
+    assert_eq!(workload_containers.len(), 3);
+    harness.stop().await;
+    for (id, _) in setup_containers.into_iter().chain(workload_containers.into_iter()) {
+        ensure_isolate_stopped(id).await.expect("Container should stop");
+    }
+}
+
+#[tokio::test]
 async fn test_v2_empty_workload_manifests_returns_error() {
     let mut harness = TestHarness::new_v2(
         "enforcer/manifest_parser/test/testdata/v2_setup.json",
@@ -230,10 +308,50 @@ async fn test_v2_empty_workload_manifests_returns_error() {
         .await
         .expect("Setup isolate should be ready");
 
-    let result =
-        harness.container_manager.load_workload_isolates(WorkloadManifests::default()).await;
+    let result = harness
+        .container_manager_requester
+        .load_workload_isolates(LoadWorkloadIsolatesRequest { isolate_packages: HashMap::new() })
+        .await;
     assert!(result.is_err());
-    assert_eq!(result.unwrap_err().to_string(), "workload isolates cannot be empty");
+    assert_eq!(result.unwrap_err().to_string(), "isolate packages cannot be empty");
+
+    let manifest_only_result = harness
+        .container_manager_requester
+        .load_workload_manifests(LoadWorkloadManifestsRequest {
+            workload_manifests: WorkloadManifests::default(),
+        })
+        .await;
+    assert!(manifest_only_result.is_err());
+    assert_eq!(manifest_only_result.unwrap_err().to_string(), "workload isolates cannot be empty");
+
+    harness.stop().await;
+    ensure_isolate_stopped(fake_container_id).await.expect("Container should stop");
+}
+
+#[tokio::test]
+async fn test_container_manager_v2_get_setup_isolate_client() {
+    let mut harness = TestHarness::new_v2(
+        "enforcer/manifest_parser/test/testdata/v2_setup.json",
+        &IsolateRuntimeConfigs::default(),
+        "test_operator".to_string(),
+    )
+    .await
+    .expect("ContainerManager should start with v2 setup manifest");
+
+    let setup_containers =
+        check_container_started(vec![SETUP_BINARY]).await.expect("Setup container should start");
+    assert_eq!(setup_containers.len(), 1);
+    let (fake_container_id, isolate_ez_bridge_enforcer_side_uds_path) = setup_containers[0].clone();
+    let _client = notify_isolate_ready(isolate_ez_bridge_enforcer_side_uds_path)
+        .await
+        .expect("Setup isolate should be ready");
+
+    let client = harness
+        .container_manager_requester
+        .get_setup_isolate_client()
+        .await
+        .expect("get_setup_isolate_client should succeed");
+    assert!(client.is_some());
 
     harness.stop().await;
     ensure_isolate_stopped(fake_container_id).await.expect("Container should stop");

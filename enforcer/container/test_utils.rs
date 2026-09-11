@@ -15,7 +15,7 @@
 use anyhow::{Context, Result};
 use container::{
     Container, ContainerMemoryStats, ContainerOptions, ContainerRoot, ContainerRunStatus,
-    MountOptions,
+    MountOptions, StateResetEngine,
 };
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
@@ -48,6 +48,7 @@ pub struct FakeContainerData {
     pub env: Vec<String>,
     // mounts happened during boot time.
     pub boot_mounts: Vec<MountOptions>,
+    pub checkpointed: bool,
 }
 
 #[derive(Debug)]
@@ -71,7 +72,10 @@ impl FakeContainer {
 
 #[tonic::async_trait]
 impl Container for FakeContainer {
-    fn new(root: ContainerRoot) -> Result<Self> {
+    fn new(
+        root: ContainerRoot,
+        _state_reset_engine: Option<Arc<dyn StateResetEngine>>,
+    ) -> Result<Self> {
         let root_dir = match root {
             ContainerRoot::TarImagePath(path) => PathBuf::from(path),
             ContainerRoot::ReadOnlyRoot(dir) => dir.path().to_owned(),
@@ -87,6 +91,7 @@ impl Container for FakeContainer {
             command_line_arguments: Vec::<String>::new(),
             env: Vec::<String>::new(),
             boot_mounts: Vec::new(),
+            checkpointed: false,
         };
 
         let fake_container_id = rand::random();
@@ -155,6 +160,24 @@ impl Container for FakeContainer {
             shared_bytes: 512 * 1024,
             data_bytes: 1024 * 1024,
         }))
+    }
+
+    async fn checkpoint(&mut self) -> anyhow::Result<()> {
+        let mut container_data = FAKE_CONTAINER_TRACKER
+            .get_mut(&self.fake_container_id)
+            .context("Container should be present")?;
+        container_data.checkpointed = true;
+        Ok(())
+    }
+
+    async fn reset(&mut self) -> anyhow::Result<()> {
+        let container_data = FAKE_CONTAINER_TRACKER
+            .get(&self.fake_container_id)
+            .context("Container should be present")?;
+        if !container_data.checkpointed {
+            anyhow::bail!("Container has not been checkpointed");
+        }
+        Ok(())
     }
 }
 

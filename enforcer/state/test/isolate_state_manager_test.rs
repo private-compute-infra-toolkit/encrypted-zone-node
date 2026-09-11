@@ -79,9 +79,12 @@ impl TestHarness {
                     .update_state(self.isolate_id, IsolateState::Retiring)
                     .await
                     .unwrap();
-                self.state_manager.increment_inflight_counter(self.isolate_id).await;
-                self.state_manager.decrement_inflight_counter(self.isolate_id).await;
-                listener.await.unwrap();
+                let guard = self.state_manager.acquire_inflight_guard(self.isolate_id).await;
+                drop(guard);
+                tokio::time::timeout(tokio::time::Duration::from_secs(2), listener)
+                    .await
+                    .unwrap()
+                    .unwrap();
             } else {
                 self.state_manager
                     .update_state(self.isolate_id, IsolateState::Retiring)
@@ -161,14 +164,14 @@ async fn test_inflight_decrement_does_not_idle_if_not_retiring(
     let mut harness = TestHarness::new().await;
     harness.advance_to_state(IsolateState::Ready).await;
 
-    harness.state_manager.increment_inflight_counter(harness.isolate_id).await;
-    harness.state_manager.decrement_inflight_counter(harness.isolate_id).await;
+    let guard = harness.state_manager.acquire_inflight_guard(harness.isolate_id).await;
+    assert_eq!(harness.state_manager.get_inflight_count(harness.isolate_id), 1);
+    drop(guard);
 
-    let result =
-        harness.state_manager.update_state(harness.isolate_id, IsolateState::Retiring).await;
-    assert!(
-        result.is_ok(),
-        "State should not have changed to Idle, so Retiring transition should be valid"
+    assert_eq!(harness.state_manager.get_inflight_count(harness.isolate_id), 0);
+    assert_eq!(
+        harness.state_manager.get_isolate_state(harness.isolate_id),
+        Some(IsolateState::Ready)
     );
     Ok(())
 }
@@ -178,11 +181,15 @@ async fn test_final_inflight_decrement_triggers_idle_state(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut harness = TestHarness::new().await;
     harness.advance_to_state(IsolateState::Retiring).await;
-    harness.state_manager.increment_inflight_counter(harness.isolate_id).await;
 
     let listener_task = harness.spawn_reset_listener();
 
-    harness.state_manager.decrement_inflight_counter(harness.isolate_id).await;
+    let guard = harness.state_manager.acquire_inflight_guard(harness.isolate_id).await;
+    assert_eq!(harness.state_manager.get_inflight_count(harness.isolate_id), 1);
+    drop(guard);
+
+    assert_eq!(harness.state_manager.get_inflight_count(harness.isolate_id), 0);
+    tokio::time::timeout(tokio::time::Duration::from_secs(2), listener_task).await??;
 
     let result = harness.state_manager.update_state(harness.isolate_id, IsolateState::Idle).await;
     assert!(result.is_err(), "Transition from auto-Idle -> Idle should fail");
@@ -191,7 +198,6 @@ async fn test_final_inflight_decrement_triggers_idle_state(
         Some(IsolateStateManagerError::DuplicateStateUpdate)
     ));
 
-    listener_task.await?;
     Ok(())
 }
 
@@ -292,11 +298,13 @@ async fn test_valid_transition_retiring_to_idle() -> Result<(), Box<dyn std::err
 
     let listener_task = harness.spawn_reset_listener();
 
-    harness.state_manager.increment_inflight_counter(harness.isolate_id).await;
-    // This should trigger the Isolate reset
-    harness.state_manager.decrement_inflight_counter(harness.isolate_id).await;
+    let guard = harness.state_manager.acquire_inflight_guard(harness.isolate_id).await;
+    assert_eq!(harness.state_manager.get_inflight_count(harness.isolate_id), 1);
+    // Dropping the guard triggers decrement which resets the Isolate
+    drop(guard);
 
-    listener_task.await?;
+    assert_eq!(harness.state_manager.get_inflight_count(harness.isolate_id), 0);
+    tokio::time::timeout(tokio::time::Duration::from_secs(2), listener_task).await??;
 
     let remove_req = RemoveIsolateRequest { isolate_id: harness.isolate_id };
     assert!(
@@ -354,22 +362,26 @@ async fn test_intermediate_inflight_decrement_does_not_trigger_idle(
     let mut harness = TestHarness::new().await;
     harness.advance_to_state(IsolateState::Retiring).await;
 
-    harness.state_manager.increment_inflight_counter(harness.isolate_id).await;
-    harness.state_manager.increment_inflight_counter(harness.isolate_id).await;
+    let guard1 = harness.state_manager.acquire_inflight_guard(harness.isolate_id).await;
+    let guard2 = harness.state_manager.acquire_inflight_guard(harness.isolate_id).await;
+    assert_eq!(harness.state_manager.get_inflight_count(harness.isolate_id), 2);
 
-    harness.state_manager.decrement_inflight_counter(harness.isolate_id).await;
+    drop(guard1);
+    assert_eq!(harness.state_manager.get_inflight_count(harness.isolate_id), 1);
 
     let listener_task = harness.spawn_reset_listener();
 
     let result = harness.state_manager.update_state(harness.isolate_id, IsolateState::Idle).await;
 
-    listener_task.await?;
+    tokio::time::timeout(tokio::time::Duration::from_secs(2), listener_task).await??;
 
     assert!(
         result.is_ok(),
         "Manual transition to Idle should succeed because auto-transition has not happened yet"
     );
 
+    drop(guard2);
+    assert_eq!(harness.state_manager.get_inflight_count(harness.isolate_id), 0);
     Ok(())
 }
 
@@ -385,23 +397,25 @@ async fn test_concurrent_increments_are_handled_safely() -> Result<(), Box<dyn s
     let num_concurrent_tasks = 10;
     for _ in 0..num_concurrent_tasks {
         let sm_clone = state_manager.clone();
-        let task = tokio::spawn(async move {
-            sm_clone.increment_inflight_counter(isolate_id).await;
-        });
+        let task = tokio::spawn(async move { sm_clone.acquire_inflight_guard(isolate_id).await });
         tasks.push(task);
     }
 
+    let mut guards = Vec::new();
     for task in tasks {
-        task.await?;
+        guards.push(task.await?);
     }
+
+    assert_eq!(harness.state_manager.get_inflight_count(isolate_id), num_concurrent_tasks);
 
     let listener_task = harness.spawn_reset_listener();
 
     harness.state_manager.update_state(isolate_id, IsolateState::Retiring).await?;
 
-    for _ in 0..num_concurrent_tasks {
-        harness.state_manager.decrement_inflight_counter(isolate_id).await;
-    }
+    drop(guards);
+
+    assert_eq!(harness.state_manager.get_inflight_count(isolate_id), 0);
+    tokio::time::timeout(tokio::time::Duration::from_secs(2), listener_task).await??;
 
     let result = harness.state_manager.update_state(isolate_id, IsolateState::Idle).await;
     assert!(result.is_err(), "Transition to Idle should fail as it's already Idle");
@@ -410,7 +424,6 @@ async fn test_concurrent_increments_are_handled_safely() -> Result<(), Box<dyn s
         Some(IsolateStateManagerError::DuplicateStateUpdate)
     ));
 
-    listener_task.await?;
     Ok(())
 }
 
@@ -579,6 +592,85 @@ async fn test_is_isolate_ready_after_removal() -> Result<(), Box<dyn std::error:
     Ok(())
 }
 
+#[tokio::test]
+async fn test_isolates_registered() -> Result<(), Box<dyn std::error::Error>> {
+    let harness = TestHarness::new().await;
+
+    assert!(!harness.state_manager.are_isolates_registered());
+
+    harness.state_manager.set_isolates_registered();
+    assert!(harness.state_manager.are_isolates_registered());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_retiring_state_transition() -> Result<(), Box<dyn std::error::Error>> {
+    let mut harness = TestHarness::new().await;
+    harness.advance_to_state(IsolateState::Ready).await;
+
+    // Transitioning to Retiring keeps isolate in Retiring state until in-flight requests complete
+    harness.state_manager.update_state(harness.isolate_id, IsolateState::Retiring).await?;
+
+    assert_eq!(
+        harness.state_manager.get_isolate_state(harness.isolate_id),
+        Some(IsolateState::Retiring)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_inflight_guard_decrements_on_drop() -> Result<(), Box<dyn std::error::Error>> {
+    let mut harness = TestHarness::new().await;
+    harness.advance_to_state(IsolateState::Ready).await;
+
+    let mut rx = harness.container_manager_request_rx.take().unwrap();
+    let reset_listener = tokio::spawn(async move {
+        if let Some(ContainerManagerRequest::ResetIsolateRequest { resp, .. }) = rx.recv().await {
+            let _ = resp.send(Ok(ResetIsolateResponse {}));
+        }
+    });
+
+    // Acquire guard, then transition to Retiring
+    let guard = harness.state_manager.acquire_inflight_guard(harness.isolate_id).await;
+    assert_eq!(harness.state_manager.get_inflight_count(harness.isolate_id), 1);
+    harness.state_manager.update_state(harness.isolate_id, IsolateState::Retiring).await.unwrap();
+
+    // Isolate should remain in Retiring while guard is held
+    assert_eq!(
+        harness.state_manager.get_isolate_state(harness.isolate_id),
+        Some(IsolateState::Retiring)
+    );
+
+    // Dropping guard triggers decrement which transitions Retiring -> Idle
+    drop(guard);
+
+    assert_eq!(harness.state_manager.get_inflight_count(harness.isolate_id), 0);
+    tokio::time::timeout(tokio::time::Duration::from_secs(2), reset_listener).await??;
+
+    assert_eq!(
+        harness.state_manager.get_isolate_state(harness.isolate_id),
+        Some(IsolateState::Idle)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_inflight_guard_drop_outside_tokio_runtime_does_not_panic() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let (harness, guard) = rt.block_on(async {
+        let harness = TestHarness::new().await;
+        let guard = harness.state_manager.acquire_inflight_guard(harness.isolate_id).await;
+        (harness, guard)
+    });
+    drop(rt);
+
+    assert_eq!(harness.state_manager.get_inflight_count(harness.isolate_id), 1);
+    // Dropping guard without tokio runtime context should not panic and still decrement counter
+    drop(guard);
+    assert_eq!(harness.state_manager.get_inflight_count(harness.isolate_id), 0);
+}
 // --- Helper Functions ---
 
 fn create_add_isolate_request(isolate_id: IsolateId) -> AddIsolateRequest {

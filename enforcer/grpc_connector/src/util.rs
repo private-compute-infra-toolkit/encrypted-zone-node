@@ -30,6 +30,9 @@ pub const DEFAULT_CONNECT_RETRY_COUNT: usize = 30;
 pub const DEFAULT_POOL_SIZE: usize = 8;
 pub const DEFAULT_MAX_HEADER_LIST_SIZE: u32 = 32 * 1024 * 1024;
 
+pub const INITIAL_STREAM_WINDOW_SIZE: u32 = 64 * 1024 * 1024; // 64 MiB
+pub const INITIAL_CONNECTION_WINDOW_SIZE: u32 = 128 * 1024 * 1024; // 128 MiB
+
 pub const ENV_PROXY_CONNECT_RETRY_DELAY_MS: &str = "PROXY_CONNECT_RETRY_DELAY_MS";
 pub const ENV_PROXY_CONNECT_RETRY_COUNT: &str = "PROXY_CONNECT_RETRY_COUNT";
 pub const ENV_PROXY_CONNECT_RETRY_SCALING: &str = "PROXY_CONNECT_RETRY_SCALING";
@@ -206,12 +209,23 @@ async fn connect_tls(
     Ok(channel)
 }
 
-/// Creates an endpoint for a Unix Domain Socket with a specified header list size.
-fn create_uds_endpoint(header_list_size: u32) -> Result<Endpoint> {
+/// Creates an endpoint for a Unix Domain Socket with a specified header list size, and when is_proxied_tunnel is true, it'll disable http2 adaptive window, and sets 64MiB/128MiB window size.
+fn create_uds_endpoint(header_list_size: u32, is_proxied_tunnel: bool) -> Result<Endpoint> {
     // UDS connections in tonic require a URI, but the host part is ignored.
     // We use http://localhost as a base URI and use the captured socket_path for connecting.
-    let endpoint = Endpoint::from_static("http://localhost");
-    Ok(endpoint.http2_max_header_list_size(header_list_size))
+    let mut builder = Endpoint::from_static("http://localhost");
+    if is_proxied_tunnel {
+        // When tunneling mTLS over UDS through EZ Proxy and Stubby, the effective RTT is
+        // determined by the datacenter network and proxy hops. Hyper's adaptive BDP algorithm
+        // misbehaves over this hybrid UDS-RPC tunnel. We disable adaptive windowing and set
+        // a larger static initial window to prevent sender-side flow control starvation.
+        // TODO: Allow overriding window sizes via environment variables if needed.
+        builder = builder
+            .http2_adaptive_window(false)
+            .initial_stream_window_size(INITIAL_STREAM_WINDOW_SIZE)
+            .initial_connection_window_size(INITIAL_CONNECTION_WINDOW_SIZE);
+    }
+    Ok(builder.http2_max_header_list_size(header_list_size))
 }
 
 /// Handles connecting to a service via a Unix Domain Socket.
@@ -228,7 +242,7 @@ async fn connect_uds(
         async move {
             // UDS connections in tonic require a URI, but the host part is ignored.
             // We use http://localhost as a base URI and use the captured socket_path for connecting.
-            create_uds_endpoint(DEFAULT_MAX_HEADER_LIST_SIZE)?
+            create_uds_endpoint(DEFAULT_MAX_HEADER_LIST_SIZE, /*is_proxied_tunnel=*/ false)?
                 .connect_with_connector(service_fn(move |_: Uri| {
                     let socket_path = socket_path.clone();
                     async move {
@@ -264,7 +278,7 @@ async fn connect_uds_tls(
         async move {
             // The endpoint URI is unused because we use a custom connector.
             // However, it still expects a valid HTTP URI.
-            create_uds_endpoint(DEFAULT_MAX_HEADER_LIST_SIZE)?
+            create_uds_endpoint(DEFAULT_MAX_HEADER_LIST_SIZE, /*is_proxied_tunnel=*/ true)?
                 .connect_with_connector(service_fn(move |_uri: Uri| {
                     let socket_path = socket_path.clone();
                     let ssl_connector = ssl_connector.clone();

@@ -15,6 +15,7 @@
 use anyhow::Context;
 use container::{
     Container, ContainerMemoryStats, ContainerOptions, ContainerRoot, ContainerRunStatus,
+    StateResetEngine, StateResetSession,
 };
 use nix::errno::Errno;
 use nix::mount::{self, MntFlags, MsFlags};
@@ -34,8 +35,10 @@ use std::{ffi::CString, fs};
 use tempfile::TempDir;
 
 pub mod seccomp;
+
 const OLD_ROOT: &str = "old_root";
 const ROOTFS: &str = "rootfs";
+const FSR_STATE_DIR: &str = "_ez_fsr_state";
 
 const UNPRIVILEGED_UID: u32 = 1000;
 const UNPRIVILEGED_GID: u32 = 1000;
@@ -58,7 +61,10 @@ pub struct ContainerCustom {
     pid: Option<Pid>,
     // Holds the reference to the TempDir backing root.
     // Ensure the root directory is not deleted while the container is running.
-    _root_dir: Arc<TempDir>,
+    root_dir: Arc<TempDir>,
+    state_reset_engine: Option<Arc<dyn StateResetEngine>>,
+    // Represents the container's state reset session.
+    state_reset_session: Option<Box<dyn StateResetSession>>,
 }
 
 /// Implements a custom container runtime which implements the `Container` trait.
@@ -121,6 +127,21 @@ impl ContainerCustom {
                     ));
                 }
             }
+        }
+        if self.state_reset_engine.is_some() {
+            let checkpoint_dir = self.root_dir.path().join(FSR_STATE_DIR);
+            let state_mount_dest = PathBuf::from("/").join(FSR_STATE_DIR);
+            self.mount_safe(
+                &checkpoint_dir,
+                &state_mount_dest,
+                None::<&str>,
+                MsFlags::MS_BIND | MsFlags::MS_REC,
+                false,
+            )?;
+            let dest_str = state_mount_dest
+                .to_str()
+                .ok_or(anyhow::anyhow!("Failed to convert dest path to string"))?;
+            self.remount_readonly(dest_str)?;
         }
         // Unmount the old root.
         mount::umount2(
@@ -303,11 +324,11 @@ impl ContainerCustom {
         Ok(())
     }
 
-    fn remount_root_readonly(&self) -> anyhow::Result<()> {
-        // Remount the root filesystem as readonly. Preserve existing flags
+    fn remount_readonly(&self, path: &str) -> anyhow::Result<()> {
+        // Remount the filesystem as readonly. Preserve existing flags
         // (nosuid, nodev, noexec) to avoid EPERM.
-        let stats =
-            statvfs::statvfs("/").map_err(|e| anyhow::anyhow!("Failed to statvfs /: {}", e))?;
+        let stats = statvfs::statvfs(path)
+            .map_err(|e| anyhow::anyhow!("Failed to statvfs {}: {}", path, e))?;
         let current_flags = stats.flags();
         let mut remount_flags = MsFlags::MS_REMOUNT | MsFlags::MS_BIND | MsFlags::MS_RDONLY;
         let flags_map = [
@@ -320,9 +341,13 @@ impl ContainerCustom {
                 remount_flags |= ms_flag;
             }
         }
-        mount::mount(None::<&str>, "/", None::<&str>, remount_flags, None::<&str>)
-            .map_err(|e| anyhow::anyhow!("Failed to remount root filesystem as readonly: {}", e))?;
+        mount::mount(None::<&str>, path, None::<&str>, remount_flags, None::<&str>)
+            .map_err(|e| anyhow::anyhow!("Failed to remount {} as readonly: {}", path, e))?;
         Ok(())
+    }
+
+    fn remount_root_readonly(&self) -> anyhow::Result<()> {
+        self.remount_readonly("/")
     }
 
     fn mount_safe(
@@ -417,7 +442,10 @@ impl ContainerCustom {
 
 #[tonic::async_trait]
 impl Container for ContainerCustom {
-    fn new(root: ContainerRoot) -> anyhow::Result<Self> {
+    fn new(
+        root: ContainerRoot,
+        state_reset_engine: Option<Arc<dyn StateResetEngine>>,
+    ) -> anyhow::Result<Self> {
         // Set the current process as a subreaper once.
         // This will allow all descendent processes to be reparented to this
         // process if their parent process dies. This is necessary because
@@ -443,9 +471,11 @@ impl Container for ContainerCustom {
         Ok(Self {
             status: Status::New,
             root: dir.path().join(ROOTFS),
-            _root_dir: dir,
+            root_dir: dir,
             name: String::new(),
             pid: None,
+            state_reset_engine,
+            state_reset_session: None,
         })
     }
 
@@ -453,6 +483,10 @@ impl Container for ContainerCustom {
         self.name = opts.name.clone();
         match self.status {
             Status::New => {
+                if self.state_reset_engine.is_some() {
+                    let checkpoint_dir = self.root_dir.path().join(FSR_STATE_DIR);
+                    fs::create_dir_all(&checkpoint_dir)?;
+                }
                 let (mut pid_reader, pid_writer) = pipe()?;
                 let (mut status_reader, status_writer) = pipe()?;
                 return match unsafe { unistd::fork() } {
@@ -621,5 +655,44 @@ impl Container for ContainerCustom {
             shared_bytes,
             data_bytes,
         }))
+    }
+
+    async fn checkpoint(&mut self) -> anyhow::Result<()> {
+        match self.status {
+            Status::Started => {
+                if self.state_reset_session.is_some() {
+                    anyhow::bail!("Container has already been checkpointed");
+                }
+                let engine = self.state_reset_engine.clone().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Fast State Reset is not configured or supported in this environment"
+                    )
+                })?;
+                let pid = self.pid.ok_or_else(|| anyhow::anyhow!("PID missing"))?;
+                let checkpoint_dir = self.root_dir.path().join(FSR_STATE_DIR);
+                fs::create_dir_all(&checkpoint_dir)?;
+
+                let mut session =
+                    engine.create_session(pid.as_raw(), checkpoint_dir, Some(self.root.clone()))?;
+                session.checkpoint()?;
+                self.state_reset_session = Some(session);
+                Ok(())
+            }
+            _ => Err(anyhow::anyhow!("Can only checkpoint a started container")),
+        }
+    }
+
+    async fn reset(&mut self) -> anyhow::Result<()> {
+        match self.status {
+            Status::Started => {
+                let session = self
+                    .state_reset_session
+                    .as_mut()
+                    .ok_or_else(|| anyhow::anyhow!("Container has not been checkpointed"))?;
+                session.reset()?;
+                Ok(())
+            }
+            _ => Err(anyhow::anyhow!("Can only reset a started container")),
+        }
     }
 }

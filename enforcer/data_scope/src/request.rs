@@ -14,7 +14,6 @@
 
 use crate::error::DataScopeError;
 use data_scope_proto::enforcer::v1::DataScopeType;
-use enforcer_proto::enforcer::v1::IsolateState;
 use isolate_info::{BinaryServicesIndex, IsolateId, IsolateServiceIndex};
 
 /// A response type for DataScopeManager operations
@@ -59,8 +58,8 @@ pub struct GetIsolateRequest {
 pub struct GetIsolateResponse {
     /// The ID of the selected Isolate.
     pub isolate_id: IsolateId,
-    /// An optional new state for the Isolate, e.g., if it's being retired.
-    pub new_state: Option<IsolateState>,
+    /// Indicates whether the Isolate should be retired after this request.
+    pub is_retiring: bool,
 }
 
 /// A request to validate that an Isolate can be used for a given data scope.
@@ -140,4 +139,11 @@ pub struct ValidateManifestOutputScopeRequest {
     pub binary_services_index: BinaryServicesIndex,
     /// The output data scope being emitted.
     pub emitted_scope: DataScopeType,
+}
+
+/// A request to unretire an Isolate after Fast State Reset (FSR), restoring it to the available pool.
+#[derive(Debug)]
+pub struct UnretireIsolateRequest {
+    /// The unique identifier of the Isolate to unretire.
+    pub isolate_id: IsolateId,
 }

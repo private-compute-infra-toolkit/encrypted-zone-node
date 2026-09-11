@@ -17,12 +17,11 @@ use data_scope::manifest_validator::ManifestValidator;
 use data_scope::request::{
     AddBackendDependenciesRequest, AddIsolateRequest, AddManifestScopeRequest,
     FreezeIsolateScopeRequest, GetIsolateRequest, GetIsolateScopeRequest, RemoveIsolateRequest,
-    ValidateBackendDependencyRequest, ValidateIsolateRequest, ValidateManifestInputScopeRequest,
-    ValidateManifestOutputScopeRequest,
+    UnretireIsolateRequest, ValidateBackendDependencyRequest, ValidateIsolateRequest,
+    ValidateManifestInputScopeRequest, ValidateManifestOutputScopeRequest,
 };
 use data_scope::requester::DataScopeRequester;
 use data_scope_proto::enforcer::v1::DataScopeType;
-use enforcer_proto::enforcer::v1::IsolateState;
 use isolate_info::{BinaryServicesIndex, IsolateId, IsolateServiceIndex};
 use once_cell::sync::Lazy;
 
@@ -385,7 +384,7 @@ async fn test_isolate_retires_when_sensitive_session_threshold_is_reached(
             data_scope_requester.get_isolate(get_sensitive_isolate_request()).await?;
         assert_eq!(get_isolate_result.isolate_id, isolate_id);
         assert!(
-            get_isolate_result.new_state.is_none(),
+            !get_isolate_result.is_retiring,
             "Isolate should not be retiring on sensitive use #{}",
             i
         );
@@ -395,9 +394,8 @@ async fn test_isolate_retires_when_sensitive_session_threshold_is_reached(
     let get_isolate_result_final =
         data_scope_requester.get_isolate(get_sensitive_isolate_request()).await?;
     assert_eq!(get_isolate_result_final.isolate_id, isolate_id);
-    assert_eq!(
-        get_isolate_result_final.new_state,
-        Some(IsolateState::Retiring),
+    assert!(
+        get_isolate_result_final.is_retiring,
         "Isolate should be retiring on its final allowed sensitive use"
     );
 
@@ -457,7 +455,7 @@ async fn test_non_sensitive_requests_do_not_retire_isolate(
         let result = data_scope_requester.get_isolate(create_get_isolate_request(false)).await?;
         assert_eq!(result.isolate_id, isolate_id);
         assert!(
-            result.new_state.is_none(),
+            !result.is_retiring,
             "Isolate should not have a new state from non-sensitive requests"
         );
     }
@@ -995,7 +993,7 @@ async fn test_retiring_isolate_validation_semantics() -> Result<(), Box<dyn std:
     get_req.data_scope_type = DataScopeType::UserPrivate;
     let get_res = data_scope_requester.get_isolate(get_req).await?;
     assert_eq!(get_res.isolate_id, isolate_id);
-    assert_eq!(get_res.new_state, Some(IsolateState::Retiring));
+    assert!(get_res.is_retiring);
 
     // Validating at <= current_data_scope (UserPrivate, DomainOwned, Public) should succeed
     let validate_user = create_validate_isolate_request(isolate_id, DataScopeType::UserPrivate);
@@ -1051,12 +1049,157 @@ async fn test_retiring_isolate_validation_semantics() -> Result<(), Box<dyn std:
     get_req_limited.binary_services_index = isolate_id_limited.get_binary_services_index();
     get_req_limited.data_scope_type = DataScopeType::UserPrivate;
     let get_res_limited = data_scope_requester.get_isolate(get_req_limited).await?;
-    assert_eq!(get_res_limited.new_state, Some(IsolateState::Retiring));
+    assert!(get_res_limited.is_retiring);
 
     let validate_exceeding =
         create_validate_isolate_request(isolate_id_limited, DataScopeType::MultiUserPrivate);
     let result_exceeding = data_scope_requester.validate_isolate_scope(validate_exceeding).await;
     assert!(matches!(result_exceeding, Err(DataScopeError::DisallowedByManifest)));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_unretire_isolate_success() -> Result<(), Box<dyn std::error::Error>> {
+    let data_scope_requester = DataScopeRequester::new(1);
+
+    let mut add_isolate_request = create_add_isolate_request(false);
+    add_isolate_request.current_data_scope_type = DataScopeType::Public;
+    add_isolate_request.allowed_data_scope_type = DataScopeType::UserPrivate;
+    let isolate_id = add_isolate_request.isolate_id;
+    data_scope_requester.add_isolate(add_isolate_request).await?;
+    data_scope_requester.activate_isolate(isolate_id).await?;
+
+    // 1. Process sensitive session to retire isolate
+    let mut get_req = create_get_isolate_request(false);
+    get_req.data_scope_type = DataScopeType::UserPrivate;
+    let get_res = data_scope_requester.get_isolate(get_req).await?;
+    assert_eq!(get_res.isolate_id, isolate_id);
+    assert!(get_res.is_retiring);
+
+    // 2. While retiring, isolate is not available for new requests
+    let mut req_public = create_get_isolate_request(false);
+    req_public.data_scope_type = DataScopeType::Public;
+    assert!(matches!(
+        data_scope_requester.get_isolate(req_public).await,
+        Err(DataScopeError::NoMatchingIsolates)
+    ));
+
+    // 3. Unretire the isolate
+    data_scope_requester.unretire_isolate(UnretireIsolateRequest { isolate_id }).await?;
+
+    // 4. Verify scope and sensitive session counts are reset
+    let scope_res =
+        data_scope_requester.get_isolate_scope(GetIsolateScopeRequest { isolate_id }).await?;
+    assert_eq!(scope_res.current_scope, DataScopeType::Public);
+    assert_eq!(scope_res.sensitive_session_count, Some(0));
+
+    // 5. Verify isolate is not available for routing until activated
+    let mut req_public_2 = create_get_isolate_request(false);
+    req_public_2.data_scope_type = DataScopeType::Public;
+    assert!(matches!(
+        data_scope_requester.get_isolate(req_public_2).await,
+        Err(DataScopeError::NoMatchingIsolates)
+    ));
+
+    // 6. Activating the isolate makes it available again for routing
+    data_scope_requester.activate_isolate(isolate_id).await?;
+    let mut req_public_3 = create_get_isolate_request(false);
+    req_public_3.data_scope_type = DataScopeType::Public;
+    let get_res_2 = data_scope_requester.get_isolate(req_public_3).await?;
+    assert_eq!(get_res_2.isolate_id, isolate_id);
+    assert!(!get_res_2.is_retiring);
+
+    // 7. Next sensitive session retires it again
+    let mut req_user_2 = create_get_isolate_request(false);
+    req_user_2.data_scope_type = DataScopeType::UserPrivate;
+    let get_res_3 = data_scope_requester.get_isolate(req_user_2).await?;
+    assert_eq!(get_res_3.isolate_id, isolate_id);
+    assert!(get_res_3.is_retiring);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_unretire_isolate_restores_max_scope_after_freeze(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let data_scope_requester = DataScopeRequester::new(1);
+
+    let mut add_isolate_request = create_add_isolate_request(false);
+    add_isolate_request.current_data_scope_type = DataScopeType::Public;
+    add_isolate_request.allowed_data_scope_type = DataScopeType::UserPrivate;
+    let isolate_id = add_isolate_request.isolate_id;
+    data_scope_requester.add_isolate(add_isolate_request).await?;
+    data_scope_requester.activate_isolate(isolate_id).await?;
+
+    // 1. Process sensitive session to retire isolate
+    let mut req_user = create_get_isolate_request(false);
+    req_user.data_scope_type = DataScopeType::UserPrivate;
+    let get_res = data_scope_requester.get_isolate(req_user).await?;
+    assert_eq!(get_res.isolate_id, isolate_id);
+    assert!(get_res.is_retiring);
+
+    // 2. Freeze scope on the retiring isolate
+    data_scope_requester.freeze_isolate_scope(FreezeIsolateScopeRequest { isolate_id }).await?;
+
+    // 3. Unretire the isolate
+    data_scope_requester.unretire_isolate(UnretireIsolateRequest { isolate_id }).await?;
+
+    // 4. Verify scope is reset to Public and sensitive session count is reset
+    let scope_res =
+        data_scope_requester.get_isolate_scope(GetIsolateScopeRequest { isolate_id }).await?;
+    assert_eq!(scope_res.current_scope, DataScopeType::Public);
+    assert_eq!(scope_res.sensitive_session_count, Some(0));
+
+    // 5. Verify the isolate is not available for routing until activated
+    let mut req_check = create_get_isolate_request(false);
+    req_check.data_scope_type = DataScopeType::Public;
+    assert!(matches!(
+        data_scope_requester.get_isolate(req_check).await,
+        Err(DataScopeError::NoMatchingIsolates)
+    ));
+
+    // 6. Activating the isolate restores routing up to UserPrivate
+    data_scope_requester.activate_isolate(isolate_id).await?;
+
+    let mut req_public = create_get_isolate_request(false);
+    req_public.data_scope_type = DataScopeType::Public;
+    let get_res_pub = data_scope_requester.get_isolate(req_public).await?;
+    assert_eq!(get_res_pub.isolate_id, isolate_id);
+
+    let mut req_user_after = create_get_isolate_request(false);
+    req_user_after.data_scope_type = DataScopeType::UserPrivate;
+    let get_res_user = data_scope_requester.get_isolate(req_user_after).await?;
+    assert_eq!(get_res_user.isolate_id, isolate_id);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_unretire_isolate_unknown_isolate() {
+    let data_scope_requester = DataScopeRequester::new(1);
+    let unknown_id = IsolateId::new(BinaryServicesIndex::new(false));
+
+    let result = data_scope_requester
+        .unretire_isolate(UnretireIsolateRequest { isolate_id: unknown_id })
+        .await;
+    assert!(matches!(result, Err(DataScopeError::UnknownIsolateId)));
+}
+
+#[tokio::test]
+async fn test_unretire_isolate_active_errors() -> Result<(), Box<dyn std::error::Error>> {
+    let data_scope_requester = DataScopeRequester::new(1);
+
+    let mut add_isolate_request = create_add_isolate_request(false);
+    add_isolate_request.current_data_scope_type = DataScopeType::Public;
+    add_isolate_request.allowed_data_scope_type = DataScopeType::UserPrivate;
+    let isolate_id = add_isolate_request.isolate_id;
+    data_scope_requester.add_isolate(add_isolate_request).await?;
+    data_scope_requester.activate_isolate(isolate_id).await?;
+
+    // Unretiring an active isolate should error out
+    let result = data_scope_requester.unretire_isolate(UnretireIsolateRequest { isolate_id }).await;
+    assert!(matches!(result, Err(DataScopeError::InternalError(_))));
 
     Ok(())
 }

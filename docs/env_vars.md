@@ -47,3 +47,10 @@ These variables configure the behavior when connecting to external proxy or mTLS
     `publisher_id` for `InvokeEZ` calls.
 -   **Type:** String (protobuf text format)
 -   **Default:** Not set (only populated if backend dependencies are defined in the manifest).
+
+### `EZ_PACKAGE_OUTPUT_DIR`
+
+-   **Description:** Destination directory where incoming isolate package tarballs streamed via the
+    management service (`EzManagementService`) are saved before unpacking and workload booting.
+-   **Type:** String (directory path)
+-   **Default:** `/tmp`

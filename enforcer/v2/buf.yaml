@@ -21,6 +21,10 @@ lint:
     - PACKAGE_NO_IMPORT_CYCLE
     - COMMENTS
   ignore_only:
+    RPC_REQUEST_STANDARD_NAME:
+      - enforcer/v2/setup_isolate.proto
+    RPC_RESPONSE_STANDARD_NAME:
+      - enforcer/v2/setup_isolate.proto
     COMMENTS:
       - enforcer/v2/common.proto
       - enforcer/v2/data_scope_type.proto

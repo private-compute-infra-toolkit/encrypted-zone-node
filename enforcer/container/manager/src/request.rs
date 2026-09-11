@@ -13,7 +13,11 @@
 // limitations under the License.
 
 use container::ContainerRunStatus;
-use isolate_info::IsolateId;
+use isolate_info::{BinaryServicesIndex, IsolateId};
+use manifest_parser::v2::WorkloadManifests;
+use setup_isolate_client::SetupIsolateClient;
+use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::oneshot;
 
 /// A response callback type for the sender of a [ContainerManagerRequest]
@@ -47,6 +51,22 @@ pub enum ContainerManagerRequest {
         req: GetRunStatusRequest,
         resp: ContainerManagerResponseCallback<GetRunStatusResponse>,
     },
+    LoadWorkloadManifests {
+        req: LoadWorkloadManifestsRequest,
+        resp: ContainerManagerResponseCallback<LoadWorkloadManifestsResponse>,
+    },
+    LoadWorkloadIsolates {
+        req: LoadWorkloadIsolatesRequest,
+        resp: ContainerManagerResponseCallback<LoadWorkloadIsolatesResponse>,
+    },
+    GetSetupIsolateClient {
+        resp: ContainerManagerResponseCallback<GetSetupIsolateClientResponse>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct GetSetupIsolateClientResponse {
+    pub client: Option<Arc<SetupIsolateClient>>,
 }
 
 #[derive(Debug)]
@@ -119,4 +139,32 @@ pub struct GetRunStatusResponse {
     pub shared_bytes: Option<u64>,
     pub data_bytes: Option<u64>,
     pub restart_count: u32,
+}
+
+#[derive(Debug)]
+pub struct LoadWorkloadManifestsRequest {
+    /// Workload manifests (Ratified and Opaque) containing descriptors for all
+    /// workload isolates to be validated and registered with the ContainerManager.
+    pub workload_manifests: WorkloadManifests,
+}
+
+#[derive(Debug)]
+pub struct LoadWorkloadManifestsResponse {
+    /// The list of BinaryServicesIndex corresponding to the isolates registered
+    /// from the provided manifests.
+    pub registered_indices: Vec<BinaryServicesIndex>,
+}
+
+#[derive(Debug)]
+pub struct LoadWorkloadIsolatesRequest {
+    /// Mapping from each isolate's BinaryServicesIndex to the local filesystem
+    /// path of its downloaded package archive.
+    pub isolate_packages: HashMap<BinaryServicesIndex, String>,
+}
+
+#[derive(Debug)]
+pub struct LoadWorkloadIsolatesResponse {
+    /// The list of BinaryServicesIndex for the isolates that have been successfully
+    /// booted and started.
+    pub loaded_indices: Vec<BinaryServicesIndex>,
 }

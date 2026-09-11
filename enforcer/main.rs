@@ -279,18 +279,6 @@ fn main() -> anyhow::Result<()> {
             enforcer_inputs.shm_slot_size,
         );
         let fileshare_manager = FileshareManager::new(container_manager_requester.clone());
-        let health_manager = HealthManager::new(
-            isolate_state_manager.clone(),
-            container_manager_requester.clone(),
-            isolate_service_mapper.clone(),
-            data_scope_requester.clone(),
-        );
-        if enforcer_inputs.health_manager_interval_secs > 0 {
-            health_manager.run_in_background(tokio::time::Duration::from_secs(
-                enforcer_inputs.health_manager_interval_secs,
-            ));
-        }
-
         let isolate_junction = IsolateJunction::new(
             data_scope_requester.clone(),
             isolate_service_mapper.clone(),
@@ -300,6 +288,14 @@ fn main() -> anyhow::Result<()> {
             manifest_validator.clone(),
             enforcer_inputs.shm_payload_threshold,
         );
+
+        let health_manager = HealthManager::new(
+            isolate_state_manager.clone(),
+            container_manager_requester.clone(),
+            isolate_service_mapper.clone(),
+            data_scope_requester.clone(),
+        );
+
         let max_decoding_message_size = enforcer_inputs.max_decoding_message_size;
 
         // Start Public API server in background
@@ -507,6 +503,12 @@ fn main() -> anyhow::Result<()> {
             ContainerManager::<ContainerCustom>::start(container_manager_args)
                 .await
                 .context("container manager failed")?;
+
+        if enforcer_inputs.health_manager_interval_secs > 0 {
+            health_manager.run_in_background(tokio::time::Duration::from_secs(
+                enforcer_inputs.health_manager_interval_secs,
+            ));
+        }
 
         // Clean-up when Enforcer receives SIGINT
         tokio::spawn(async move {

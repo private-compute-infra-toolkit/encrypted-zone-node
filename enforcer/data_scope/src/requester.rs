@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::error::DataScopeError::InternalError;
 use crate::request::{
     AddIsolateRequest, DataScopeManagerResponse, FreezeIsolateScopeRequest, GetIsolateRequest,
     GetIsolateResponse, GetIsolateScopeRequest, GetIsolateScopeResponse, RemoveIsolateRequest,
-    RemoveIsolateResponse, ValidateIsolateRequest,
+    RemoveIsolateResponse, UnretireIsolateRequest, ValidateIsolateRequest,
 };
 use crate::{
     data_scope_manager::DataScopeManager, ratified_isolate_manager::RatifiedIsolateManager,
@@ -99,6 +100,18 @@ impl DataScopeRequester {
             self.ratified_isolate_manager.remove_isolate(remove_isolate_request).await
         } else {
             self.data_scope_manager.remove_isolate(remove_isolate_request).await
+        }
+    }
+
+    /// Unretires the Isolate in DataScopeManager after Fast State Reset (FSR).
+    pub async fn unretire_isolate(
+        &self,
+        unretire_isolate_request: UnretireIsolateRequest,
+    ) -> DataScopeManagerResponse<()> {
+        if unretire_isolate_request.isolate_id.is_ratified_isolate() {
+            Err(InternalError("Cannot unretire ratified isolate".to_string()))
+        } else {
+            self.data_scope_manager.unretire_isolate(unretire_isolate_request).await
         }
     }
 

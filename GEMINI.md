@@ -45,6 +45,16 @@ The `DEVELOPMENT.md` file also provides instructions for running benchmarks.
 -   The `BUILD.bazel` files define the build rules and dependencies for each component.
 -   The `MODULE.bazel` file defines the external dependencies for the project.
 
+### Testing Conventions
+
+-   **Verify Public Contracts**: Tests must verify the public interfaces and observable behaviors of
+    modules and components, not private functions or internal helpers.
+-   **No Leaking for Tests**: Do not make internal helpers or fields `pub` solely to facilitate
+    testing.
+-   **Resilience to Refactoring**: Avoid asserting on internal magic counts or duplicating lists of
+    internal constants in tests. Assert against public getters or contract outputs so internal
+    refactoring requires zero test churn.
+
 ## Additional Context
 
 -   **Enforcer Benchmarks:** See `enforcer/benches/GEMINI.md`

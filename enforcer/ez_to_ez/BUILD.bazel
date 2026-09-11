@@ -141,6 +141,7 @@ rust_test(
 
 rust_test(
     name = "outbound_metrics_test",
+    size = "small",
     srcs = [
         "test/outbound_metrics_test.rs",
         "test/outbound_test.rs",

@@ -48,7 +48,7 @@ use junction_trait::{Junction, JunctionChannels};
 use metrics::common::{MetricAttributes, ServiceMetrics};
 use metrics::junction::JunctionMetrics;
 use opentelemetry::KeyValue;
-use state_manager::IsolateStateManager;
+use state_manager::{InflightGuard, IsolateStateManager};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use tracing::Instrument;
@@ -62,7 +62,7 @@ const RETRY_SCALING: u64 = 1;
 #[derive(Debug)]
 struct DestinationIsolateInfo {
     id: IsolateId,
-    new_state: Option<IsolateState>,
+    is_retiring: bool,
 }
 
 // Context struct for streaming request/response processing
@@ -71,6 +71,13 @@ struct RequestContext {
     request_source_isolate_id: Option<IsolateId>,
     original_msg_id: u64,
     is_from_public_api: bool,
+    /// RAII guard tracking this active streaming RPC. When this `RequestContext`
+    /// is dropped (e.g. upon streaming completion, channel closure, or error),
+    /// the guard is dropped and asynchronously decrements the Isolate's in-flight
+    /// request counter in `IsolateStateManager`. If the Isolate is in `Retiring`
+    /// state and this was the final in-flight request, it triggers the transition
+    /// to `Idle` and subsequent container reset.
+    _inflight_guard: InflightGuard,
 }
 
 #[derive(Clone, Debug)]
@@ -116,13 +123,22 @@ impl Junction for IsolateJunction {
         tracing::debug!("after getting destination_isolate_ids_result");
         match destination_isolate_ids_result {
             Ok(destination_isolate_info) => {
-                // If the DataScopeManager determined this Isolate should be retired after this
-                // request, spawn a task to update its state accordingly.
-                self.spawn_isolate_state_update_task(
-                    destination_isolate_info.id,
-                    destination_isolate_info.new_state,
-                );
                 let destination_isolate_id = destination_isolate_info.id;
+                let _inflight_guard =
+                    self.state_manager.acquire_inflight_guard(destination_isolate_id).await;
+                if destination_isolate_info.is_retiring {
+                    if let Err(e) = self
+                        .state_manager
+                        .update_state(destination_isolate_id, IsolateState::Retiring)
+                        .await
+                    {
+                        log::warn!(
+                            "Failed to update isolate {} state to Retiring: {}",
+                            destination_isolate_id,
+                            e
+                        );
+                    }
+                }
                 let masked_id = rand::random::<u64>();
                 let original_msg_id =
                     match mask_streaming_msg_id(masked_id, &mut invoke_isolate_request) {
@@ -154,7 +170,6 @@ impl Junction for IsolateJunction {
                 )
                 .await;
 
-                self.state_manager.increment_inflight_counter(destination_isolate_info.id).await;
                 let isolate_rpc_start_time = Instant::now();
                 let mut request = Request::new(invoke_isolate_request);
                 if let Some(d) = deadline {
@@ -165,7 +180,6 @@ impl Junction for IsolateJunction {
                 self.metrics
                     .isolate_rpc_duration_sec
                     .record(isolate_rpc_start_time.elapsed().as_secs_f64(), &metric_attr.base());
-                self.state_manager.decrement_inflight_counter(destination_isolate_id).await;
                 let Ok(invoke_isolate_response) = invoke_isolate_result else {
                     self.metrics.record_error(&metric_attr.base(), "invoke_isolate_error");
                     // TODO add retry send and reset
@@ -334,9 +348,9 @@ impl IsolateJunction {
             }
 
             // Phase 1: Resolve destination
-            let destination_isolate_id =
+            let (destination_isolate_id, inflight_guard) =
                 match self_clone.resolve_destination_isolate(&initial_invoke_request).await {
-                    Ok(id) => id,
+                    Ok(res) => res,
                     Err(e) => {
                         let _ = junction_to_client_tx.send(Err(e)).await;
                         return;
@@ -361,6 +375,7 @@ impl IsolateJunction {
                 request_source_isolate_id: request_source_isolate_id_option,
                 original_msg_id: original_ipc_message_id,
                 is_from_public_api,
+                _inflight_guard: inflight_guard,
             };
 
             self_clone
@@ -384,17 +399,27 @@ impl IsolateJunction {
     async fn resolve_destination_isolate(
         &self,
         initial_invoke_request: &InvokeIsolateRequest,
-    ) -> Result<IsolateId, EzError> {
+    ) -> Result<(IsolateId, InflightGuard), EzError> {
         let destination_isolate_info = self
             .get_isolate_id_based_on_scope(initial_invoke_request)
             .await
             .map_err(|e| e.to_ez_error())?;
 
-        self.spawn_isolate_state_update_task(
-            destination_isolate_info.id,
-            destination_isolate_info.new_state,
-        );
-        Ok(destination_isolate_info.id)
+        let guard = self.state_manager.acquire_inflight_guard(destination_isolate_info.id).await;
+        if destination_isolate_info.is_retiring {
+            if let Err(e) = self
+                .state_manager
+                .update_state(destination_isolate_info.id, IsolateState::Retiring)
+                .await
+            {
+                log::warn!(
+                    "Failed to update isolate {} state to Retiring: {}",
+                    destination_isolate_info.id,
+                    e
+                );
+            }
+        }
+        Ok((destination_isolate_info.id, guard))
     }
 
     async fn prepare_initial_request(
@@ -411,8 +436,6 @@ impl IsolateJunction {
         {
             inject_trace_context(&mut control_plane_metadata.metadata_headers);
         }
-
-        self.state_manager.increment_inflight_counter(destination_isolate_id).await;
 
         Ok((stream_id, original_ipc_message_id))
     }
@@ -470,7 +493,6 @@ impl IsolateJunction {
                     "Error initiating stream with Isolate: {connect_error:#?}"
                 )),
             });
-            self.state_manager.decrement_inflight_counter(destination_isolate_id).await;
             let _ = junction_to_client_tx.send(Err(connect_ez_error)).await;
             return;
         };
@@ -535,26 +557,6 @@ impl IsolateJunction {
             manifest_validator,
             metrics,
             shm_payload_threshold,
-        }
-    }
-
-    fn spawn_isolate_state_update_task(
-        &self,
-        isolate_id: IsolateId,
-        new_state: Option<IsolateState>,
-    ) {
-        if let Some(state) = new_state {
-            let state_manager = self.state_manager.clone();
-            tokio::spawn(async move {
-                if let Err(e) = state_manager.update_state(isolate_id, state).await {
-                    log::warn!(
-                        "Failed to update isolate {} state to {:?}: {}",
-                        isolate_id,
-                        state,
-                        e
-                    );
-                }
-            });
         }
     }
 
@@ -754,8 +756,6 @@ impl IsolateJunction {
                 }
             }
         }
-        // Decrement the inflight counter once the streaming RPC completes.
-        self.state_manager.decrement_inflight_counter(request_context.isolate_id).await;
     }
 
     async fn process_invoke_isolate_response(
@@ -910,7 +910,7 @@ impl IsolateJunction {
         match get_isolate_response_result {
             Ok(get_isolate_response) => Ok(DestinationIsolateInfo {
                 id: get_isolate_response.isolate_id,
-                new_state: get_isolate_response.new_state,
+                is_retiring: get_isolate_response.is_retiring,
             }),
             Err(e) => Err(e),
         }

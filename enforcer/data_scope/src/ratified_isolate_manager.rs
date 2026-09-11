@@ -184,7 +184,7 @@ impl RatifiedIsolateManager {
                     return Err(DataScopeError::NoMatchingIsolates);
                 };
 
-                Ok(GetIsolateResponse { isolate_id: *isolate_id, new_state: None })
+                Ok(GetIsolateResponse { isolate_id: *isolate_id, is_retiring: false })
             }
             _ => {
                 // TODO Support other DataScopeTypes

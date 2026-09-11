@@ -32,7 +32,10 @@ pub async fn build_isolate_dependency_graph(
         let source_isolate_name = get_isolate_name(binary_services_index);
 
         for dep in backend_dependencies {
-            if RouteType::try_from(dep.route_type) != Ok(RouteType::Internal) {
+            if matches!(
+                RouteType::try_from(dep.route_type),
+                Ok(RouteType::External | RouteType::Remote)
+            ) {
                 continue;
             }
             let target = IsolateServiceInfo {

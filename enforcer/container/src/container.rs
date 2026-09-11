@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod state_reset;
+pub use state_reset::{StateResetEngine, StateResetSession};
+
 use derivative::Derivative;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -137,7 +140,10 @@ pub struct ContainerMemoryStats {
 #[tonic::async_trait]
 pub trait Container: Send + Sync {
     /// Creates a new instance of Container.
-    fn new(root: ContainerRoot) -> anyhow::Result<Self>
+    fn new(
+        root: ContainerRoot,
+        state_reset_engine: Option<Arc<dyn StateResetEngine>>,
+    ) -> anyhow::Result<Self>
     where
         Self: Sized;
 
@@ -162,4 +168,10 @@ pub trait Container: Send + Sync {
 
     /// Gets the memory stats of the container in bytes.
     fn get_memory_stats(&self) -> anyhow::Result<Option<ContainerMemoryStats>>;
+
+    /// Creates a checkpoint of the running container process state.
+    async fn checkpoint(&mut self) -> anyhow::Result<()>;
+
+    /// Resets the container process state back to the checkpoint.
+    async fn reset(&mut self) -> anyhow::Result<()>;
 }

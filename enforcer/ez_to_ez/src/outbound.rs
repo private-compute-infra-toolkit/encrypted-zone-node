@@ -37,7 +37,6 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
 
 const EZ_TO_EZ_CHANNEL_SIZE: usize = 256;
-const EZ_TO_EZ_EMPTY_PAYLOAD_ERROR: &str = "Empty payload data from remote enforcer";
 
 /// Configuration for the outbound EZ-to-EZ mTLS.
 #[derive(Clone)]
@@ -293,9 +292,6 @@ fn ez_call_response_to_invoke_ez_response(
             })
             .collect(),
     });
-    if response.payload_data.is_none() {
-        return Err(anyhow::anyhow!(EZ_TO_EZ_EMPTY_PAYLOAD_ERROR));
-    }
 
     Ok(InvokeEzResponse {
         control_plane_metadata: original_metadata,

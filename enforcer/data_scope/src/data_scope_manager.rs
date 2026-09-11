@@ -17,10 +17,9 @@ use crate::error::DataScopeError;
 use crate::request::{
     AddIsolateRequest, FreezeIsolateScopeRequest, GetIsolateRequest, GetIsolateResponse,
     GetIsolateScopeRequest, GetIsolateScopeResponse, RemoveIsolateRequest, RemoveIsolateResponse,
-    ValidateIsolateRequest,
+    UnretireIsolateRequest, ValidateIsolateRequest,
 };
 use data_scope_proto::enforcer::v1::DataScopeType;
-use enforcer_proto::enforcer::v1::IsolateState;
 use indexmap::set::IndexSet;
 use isolate_info::{BinaryServicesIndex, IsolateId};
 use metrics::histogram;
@@ -43,6 +42,8 @@ pub struct DataScopeManager {
 
 #[derive(Debug)]
 struct DataScopeManagerState {
+    // Map from BinaryServicesIndex to max DataScopeType preserved across freeze and reset cycles
+    binary_service_max_scope_map: HashMap<BinaryServicesIndex, DataScopeType>,
     // Map of Possible DataScope to Isolates that are ready/active for inbound traffic routing
     available_scope_isolate_index:
         HashMap<BinaryServicesIndex, HashMap<DataScopeType, IndexSet<IsolateId>>>,
@@ -65,6 +66,7 @@ impl DataScopeManager {
     pub fn new(sensitive_session_threshold: u64) -> Self {
         DataScopeManager {
             state: Mutex::new(DataScopeManagerState {
+                binary_service_max_scope_map: HashMap::new(),
                 available_scope_isolate_index: HashMap::new(),
                 isolate_scope_index: HashMap::new(),
                 isolate_max_scope_index: HashMap::new(),
@@ -109,6 +111,12 @@ impl DataScopeManager {
             )));
         }
 
+        let binary_services_index = isolate_id.get_binary_services_index();
+        state
+            .binary_service_max_scope_map
+            .entry(binary_services_index)
+            .or_insert(allowed_data_scope_type);
+
         let _ = state.isolate_max_scope_index.insert(isolate_id, allowed_data_scope_type);
         let _ = state.isolate_scope_index.insert(isolate_id, current_data_scope_type);
 
@@ -129,10 +137,7 @@ impl DataScopeManager {
             return internal_error(isolate_id);
         };
         if state.active_isolates.contains(&isolate_id) {
-            return Err(DataScopeError::InternalError(format!(
-                "Isolate already active: {:?}",
-                isolate_id
-            )));
+            return Ok(());
         }
 
         let binary_services_index = isolate_id.get_binary_services_index();
@@ -165,12 +170,53 @@ impl DataScopeManager {
         }
 
         state.retiring_isolates.insert(isolate_id);
+        state.active_isolates.remove(&isolate_id);
         let binary_services_index = isolate_id.get_binary_services_index();
         if let Some(scope_index) =
             state.available_scope_isolate_index.get_mut(&binary_services_index)
         {
             remove_from_all_scope_index(scope_index, isolate_id);
         }
+        Ok(())
+    }
+
+    /// Unretires an Isolate by resetting its scope to Public and clearing retiring status.
+    ///
+    /// The Isolate is not activated for inbound routing until `activate_isolate` is called.
+    pub async fn unretire_isolate(
+        &self,
+        unretire_isolate_request: UnretireIsolateRequest,
+    ) -> Result<(), DataScopeError> {
+        let UnretireIsolateRequest { isolate_id } = unretire_isolate_request;
+
+        let mut state = self.state.lock().await;
+        if !state.isolate_scope_index.contains_key(&isolate_id) {
+            return Err(DataScopeError::UnknownIsolateId);
+        }
+
+        if state.active_isolates.contains(&isolate_id) {
+            return Err(DataScopeError::InternalError(format!(
+                "Cannot unretire active isolate: {:?}",
+                isolate_id
+            )));
+        }
+
+        let binary_services_index = isolate_id.get_binary_services_index();
+        let max_scope =
+            *state.binary_service_max_scope_map.get(&binary_services_index).ok_or_else(|| {
+                DataScopeError::InternalError(format!(
+                    "Max scope not found for binary services index {:?}",
+                    binary_services_index
+                ))
+            })?;
+
+        state.retiring_isolates.remove(&isolate_id);
+        state.sensitive_session_counts.remove(&isolate_id);
+
+        let initial_scope = DataScopeType::Public;
+        state.isolate_scope_index.insert(isolate_id, initial_scope);
+        state.isolate_max_scope_index.insert(isolate_id, max_scope);
+
         Ok(())
     }
 
@@ -290,27 +336,25 @@ impl DataScopeManager {
             );
         }
 
-        if let Some(new_state) =
-            self.handle_sensitive_session(requested_data_scope, state, isolate_id)?
-        {
+        let is_retiring = self.handle_sensitive_session(requested_data_scope, state, isolate_id)?;
+        if is_retiring {
             log::info!(
                 "Isolate {isolate_id} reached sensitive session threshold. Marking as retiring."
             );
-            return Ok(GetIsolateResponse { isolate_id, new_state: Some(new_state) });
         }
 
         histogram!("ez_data_scope_manager_inner_get_isolate_latency").record(start_time.elapsed());
-        Ok(GetIsolateResponse { isolate_id, new_state: None })
+        Ok(GetIsolateResponse { isolate_id, is_retiring })
     }
 
     /// Checks if an Isolate has reached its sensitive session threshold and should be retired.
-    /// If so, it removes the Isolate from the available pool and returns `Some(IsolateState::Retiring)`.
+    /// If so, it removes the Isolate from the available pool and returns `Ok(true)`.
     fn handle_sensitive_session(
         &self,
         requested_data_scope: DataScopeType,
         state: &mut DataScopeManagerState,
         isolate_id: IsolateId,
-    ) -> Result<Option<IsolateState>, DataScopeError> {
+    ) -> Result<bool, DataScopeError> {
         // A threshold of 0 is a special value that disables retirement.
         if self.sensitive_session_threshold > 0
             && requested_data_scope >= DataScopeType::UserPrivate
@@ -320,10 +364,10 @@ impl DataScopeManager {
 
             if *count_entry >= self.sensitive_session_threshold {
                 Self::retire_isolate_internal(state, isolate_id)?;
-                return Ok(Some(IsolateState::Retiring));
+                return Ok(true);
             }
         }
-        Ok(None)
+        Ok(false)
     }
 
     /// Validates and updates an Isolate's scope for a request.

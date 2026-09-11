@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use isolate_info::{
-    get_isolate_name, get_isolate_type, register_isolate_type, BinaryServicesIndex, IsolateType,
+    get_binary_services_index, get_isolate_name, get_isolate_type, register_isolate_type,
+    BinaryServicesIndex, IsolateType,
 };
 
 #[test]
@@ -25,7 +26,8 @@ fn test_get_isolate_name_registered() {
     };
     register_isolate_type(index, isolate_type.clone());
 
-    assert_eq!(get_isolate_type(&index), Some(isolate_type));
+    assert_eq!(get_isolate_type(&index), Some(isolate_type.clone()));
+    assert_eq!(get_binary_services_index(&isolate_type), Some(index));
     assert_eq!(get_isolate_name(&index), "test_isolate");
 }
 
@@ -33,4 +35,9 @@ fn test_get_isolate_name_registered() {
 fn test_get_isolate_name_unregistered() {
     let index = BinaryServicesIndex::new(false);
     assert_eq!(get_isolate_name(&index), format!("{:?}", index));
+    let unregistered_type = IsolateType {
+        publisher_id: "nonexistent_pub".to_string(),
+        isolate_name: "nonexistent_isolate".to_string(),
+    };
+    assert_eq!(get_binary_services_index(&unregistered_type), None);
 }

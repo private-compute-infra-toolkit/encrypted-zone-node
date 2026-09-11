@@ -12,11 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use ez_error_trait::ToEzError;
 use isolate_info::InstanceIdGenerator;
 use manifest_proto::enforcer::v1::{
     allowed_metric::MetricType, AllowedMetric, IsolateMetricsPolicy,
 };
-use metrics::isolate_metrics_receiver::{IsolateMetricsReceiver, IsolateMetricsReceiverConfig};
+use metrics::isolate_metrics_receiver::{
+    AttributeName, CustomAttribute, IsolateMetricsReceiver, IsolateMetricsReceiverConfig,
+    MetricsReceiverError,
+};
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{
     any_value::Value, AnyValue, ArrayValue, KeyValue, KeyValueList,
@@ -83,36 +87,14 @@ async fn test_enrich_metrics() {
     assert_eq!(request.resource_metrics.len(), 1);
     let rm = &request.resource_metrics[0];
 
-    // Verify resource attributes are enriched with isolate identity attributes
+    // Verify resource attributes are enriched with the receiver's configured attributes
     let resource_attrs = &rm.resource.as_ref().unwrap().attributes;
-    assert_eq!(resource_attrs.len(), 3);
-    assert!(resource_attrs.iter().any(|kv| kv.key == "ez_isolate_name"
-        && kv.value.as_ref().unwrap().value
-            == Some(Value::StringValue("test-isolate".to_string()))));
-    assert!(resource_attrs.iter().any(|kv| kv.key == "ez_publisher_id"
-        && kv.value.as_ref().unwrap().value
-            == Some(Value::StringValue("test-publisher".to_string()))));
-    assert!(resource_attrs.iter().any(|kv| kv.key == "ez_isolate_instance_id"
-        && kv.value.as_ref().unwrap().value == Some(Value::StringValue("1".to_string()))));
-    assert!(resource_attrs.iter().all(|kv| kv.key != "ez_component_name"
-        && kv.key != "ez_isolate_type"
-        && kv.key != "ez_enforcer_version"));
+    assert_resource_attributes_match(resource_attrs, &receiver.resource_attributes(), &[]);
 
-    // Verify scope attributes are enriched with runtime metadata
+    // Verify scope attributes match receiver's configured scope attributes (empty)
     let sm = &rm.scope_metrics[0];
     let scope = sm.scope.as_ref().unwrap();
-    assert_eq!(scope.attributes.len(), 3);
-    assert!(scope.attributes.iter().any(|kv| kv.key == "ez_component_name"
-        && kv.value.as_ref().unwrap().value == Some(Value::StringValue("isolate".to_string()))));
-    assert!(scope.attributes.iter().any(|kv| kv.key == "ez_isolate_type"
-        && kv.value.as_ref().unwrap().value == Some(Value::StringValue("opaque".to_string()))));
-    assert!(scope
-        .attributes
-        .iter()
-        .any(|kv| kv.key == "ez_enforcer_version" && kv.value.as_ref().unwrap().value.is_some()));
-    assert!(scope.attributes.iter().all(|kv| kv.key != "ez_isolate_name"
-        && kv.key != "ez_publisher_id"
-        && kv.key != "ez_isolate_instance_id"));
+    assert_eq!(scope.attributes, receiver.scope_attributes());
 
     // Verify datapoint attributes are unchanged
     let metric = &sm.metrics[0];
@@ -426,6 +408,7 @@ async fn test_filter_metrics_coverage_disable_filtering_and_purging() {
         otel_endpoint: None,
         max_decoding_message_size: 4 * 1024 * 1024,
         disable_filtering: true,
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -473,26 +456,14 @@ async fn test_filter_metrics_coverage_disable_filtering_and_purging() {
 
     let rm_purged = &request_purged.resource_metrics[0];
     let resource_attrs = &rm_purged.resource.as_ref().unwrap().attributes;
-    // Should have 4 attributes: custom_resource_attr + 3 enriched isolate resource attributes
-    assert_eq!(resource_attrs.len(), 4);
-
-    // Verify custom_resource_attr was retained
-    let custom_attr = resource_attrs.iter().find(|kv| kv.key == "custom_resource_attr").unwrap();
-    assert_eq!(
-        custom_attr.value.as_ref().unwrap().value,
-        Some(Value::StringValue("keep-me".to_string()))
-    );
-
-    // Verify identity attributes are now in the resource attributes instead of scope attributes
-    let identity_attr = resource_attrs.iter().find(|kv| kv.key == "ez_isolate_name").unwrap();
-    assert_eq!(
-        identity_attr.value.as_ref().unwrap().value,
-        Some(Value::StringValue("test-isolate".to_string()))
+    assert_resource_attributes_match(
+        resource_attrs,
+        &receiver_enabled.resource_attributes(),
+        &[("custom_resource_attr", "keep-me")],
     );
     let sm = &rm_purged.scope_metrics[0];
     let scope = sm.scope.as_ref().unwrap();
-    assert_eq!(scope.attributes.len(), 3);
-    assert!(scope.attributes.iter().all(|kv| kv.key != "ez_isolate_name"));
+    assert_eq!(scope.attributes, receiver_enabled.scope_attributes());
 }
 
 #[tokio::test]
@@ -541,25 +512,15 @@ async fn test_enrich_metrics_anti_spoofing_instance_id() {
     let rm = &request.resource_metrics[0];
     let resource_attrs = &rm.resource.as_ref().unwrap().attributes;
     // Malicious instance id must be purged and replaced with verified instance id in resource
-    assert_eq!(resource_attrs.len(), 4);
-    let custom_tag = resource_attrs.iter().find(|kv| kv.key == "custom_resource_tag").unwrap();
-    assert_eq!(
-        custom_tag.value.as_ref().unwrap().value,
-        Some(Value::StringValue("valid_tag".to_string()))
-    );
-
-    // Verified instance id must be injected into resource with value "1"
-    let instance_id_attr =
-        resource_attrs.iter().find(|kv| kv.key == "ez_isolate_instance_id").unwrap();
-    assert_eq!(
-        instance_id_attr.value.as_ref().unwrap().value,
-        Some(Value::StringValue("1".to_string()))
+    assert_resource_attributes_match(
+        resource_attrs,
+        &receiver.resource_attributes(),
+        &[("custom_resource_tag", "valid_tag")],
     );
 
     let sm = &rm.scope_metrics[0];
     let scope = sm.scope.as_ref().unwrap();
-    assert_eq!(scope.attributes.len(), 3);
-    assert!(scope.attributes.iter().all(|kv| kv.key != "ez_isolate_instance_id"));
+    assert_eq!(scope.attributes, receiver.scope_attributes());
 }
 
 #[tokio::test]
@@ -586,6 +547,7 @@ async fn test_filter_metrics_coverage_uds_channel_pool_initialization() {
         otel_endpoint: Some(otel_endpoint),
         max_decoding_message_size: 4 * 1024 * 1024,
         disable_filtering: false,
+        ..Default::default()
     })
     .await;
 
@@ -696,6 +658,7 @@ async fn create_test_receiver_with_instance_id(
         otel_endpoint: None,
         max_decoding_message_size: 4 * 1024 * 1024,
         disable_filtering: false,
+        ..Default::default()
     })
     .await
     .unwrap()
@@ -729,6 +692,54 @@ async fn test_enrich_metrics_dynamic_instance_id_restart() {
     assert_eq!(id_attr_1.value.as_ref().unwrap().value, Some(Value::StringValue(instance_id_1)));
     assert_eq!(id_attr_2.value.as_ref().unwrap().value, Some(Value::StringValue(instance_id_2)));
     assert_ne!(id_attr_1.value, id_attr_2.value);
+}
+
+#[tokio::test]
+async fn test_isolate_scope_attributes_empty() {
+    let receiver = create_test_receiver(IsolateMetricsPolicy::default()).await;
+    assert!(receiver.scope_attributes().is_empty());
+    let mut req = create_test_request(vec![create_test_metric("test_metric", vec![])]);
+    receiver.enrich_metrics(&mut req);
+    let scope = &req.resource_metrics[0].scope_metrics[0].scope;
+    if let Some(scope) = scope {
+        assert!(scope.attributes.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn test_enrich_metrics_preserves_custom_scope_attributes() {
+    let receiver = create_test_receiver(IsolateMetricsPolicy::default()).await;
+    let mut request = ExportMetricsServiceRequest {
+        resource_metrics: vec![ResourceMetrics {
+            resource: Some(Default::default()),
+            scope_metrics: vec![ScopeMetrics {
+                scope: Some(opentelemetry_proto::tonic::common::v1::InstrumentationScope {
+                    name: "test-lib".to_string(),
+                    version: "1.0.0".to_string(),
+                    attributes: vec![KeyValue {
+                        key: "custom_scope_tag".to_string(),
+                        value: Some(AnyValue {
+                            value: Some(Value::StringValue("custom_scope_val".to_string())),
+                        }),
+                    }],
+                    dropped_attributes_count: 0,
+                }),
+                metrics: vec![create_test_metric("test_metric", vec![])],
+                schema_url: "".to_string(),
+            }],
+            schema_url: "".to_string(),
+        }],
+    };
+
+    receiver.enrich_metrics(&mut request);
+
+    let scope = request.resource_metrics[0].scope_metrics[0].scope.as_ref().unwrap();
+    assert_eq!(scope.attributes.len(), 1);
+    assert_eq!(scope.attributes[0].key, "custom_scope_tag");
+    assert_eq!(
+        scope.attributes[0].value.as_ref().unwrap().value,
+        Some(Value::StringValue("custom_scope_val".to_string()))
+    );
 }
 
 fn create_test_request(metrics: Vec<Metric>) -> ExportMetricsServiceRequest {
@@ -774,4 +785,409 @@ fn create_test_sum_metric(name: &str, attrs_vec: Vec<(&str, &str)>) -> Metric {
         })),
         ..Default::default()
     }
+}
+
+fn assert_resource_attributes_match(
+    actual: &[KeyValue],
+    receiver_configured: &[KeyValue],
+    additional_expected: &[(&str, &str)],
+) {
+    assert_eq!(
+        actual.len(),
+        receiver_configured.len() + additional_expected.len(),
+        "Attribute count mismatch. Actual: {actual:?}"
+    );
+
+    for expected_kv in receiver_configured {
+        let found = actual.iter().find(|kv| kv.key == expected_kv.key);
+        assert!(
+            found.is_some(),
+            "Expected configured resource attribute '{}' not found in actual: {:?}",
+            expected_kv.key,
+            actual
+        );
+        assert_eq!(
+            found.unwrap().value,
+            expected_kv.value,
+            "Value mismatch for attribute '{}'",
+            expected_kv.key
+        );
+    }
+
+    for &(key, val) in additional_expected {
+        let found = actual.iter().find(|kv| kv.key == key);
+        assert!(
+            found.is_some(),
+            "Expected additional attribute '{}' not found in actual: {:?}",
+            key,
+            actual
+        );
+        assert_eq!(
+            found.unwrap().value.as_ref().and_then(|v| v.value.as_ref()),
+            Some(&Value::StringValue(val.to_string())),
+            "Value mismatch for additional attribute '{}'",
+            key
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_enrich_metrics_with_custom_resource_and_scope_attributes() {
+    let mut config = IsolateMetricsReceiverConfig {
+        policy: IsolateMetricsPolicy::default(),
+        isolate_name: "test-isolate".to_string(),
+        publisher_id: "test-publisher".to_string(),
+        is_ratified: false,
+        isolate_instance_id: "inst-123".to_string(),
+        ..Default::default()
+    };
+    config
+        .try_add_custom_attribute(
+            CustomAttribute::Resource("custom_res_k1".into()),
+            Value::StringValue("custom_res_v1".to_string()),
+        )
+        .unwrap();
+    config
+        .try_add_custom_attribute(
+            CustomAttribute::Scope("custom_scope_k1".into()),
+            Value::StringValue("custom_scope_v1".to_string()),
+        )
+        .unwrap();
+
+    let receiver = IsolateMetricsReceiver::new(config).await.unwrap();
+
+    // Verify configured receiver attributes match
+    let all_attrs = receiver.attributes();
+    assert_eq!(all_attrs.len(), 8); // 6 standard + 2 custom
+    assert!(all_attrs.contains_key(&CustomAttribute::Resource("custom_res_k1".into())));
+    assert!(all_attrs.contains_key(&CustomAttribute::Scope("custom_scope_k1".into())));
+
+    let receiver_res_attrs = receiver.resource_attributes();
+    assert!(receiver_res_attrs.iter().any(|kv| kv.key == "custom_res_k1"
+        && kv.value.as_ref().and_then(|v| v.value.as_ref())
+            == Some(&Value::StringValue("custom_res_v1".to_string()))));
+
+    let receiver_scope_attrs = receiver.scope_attributes();
+    assert_eq!(receiver_scope_attrs.len(), 1);
+    assert_eq!(receiver_scope_attrs[0].key, "custom_scope_k1");
+    assert_eq!(
+        receiver_scope_attrs[0].value.as_ref().and_then(|v| v.value.as_ref()),
+        Some(&Value::StringValue("custom_scope_v1".to_string()))
+    );
+
+    let mut request = ExportMetricsServiceRequest {
+        resource_metrics: vec![ResourceMetrics {
+            resource: Some(Default::default()),
+            scope_metrics: vec![ScopeMetrics {
+                scope: Some(Default::default()),
+                metrics: vec![create_test_metric("test_metric", vec![])],
+                schema_url: "".to_string(),
+            }],
+            schema_url: "".to_string(),
+        }],
+    };
+
+    receiver.enrich_metrics(&mut request);
+
+    let rm = &request.resource_metrics[0];
+    let resource_attrs = &rm.resource.as_ref().unwrap().attributes;
+    assert_resource_attributes_match(resource_attrs, &receiver_res_attrs, &[]);
+
+    let sm = &rm.scope_metrics[0];
+    let scope_attrs = &sm.scope.as_ref().unwrap().attributes;
+    assert_eq!(scope_attrs, &receiver_scope_attrs);
+}
+
+#[test]
+fn test_config_rejects_duplicate_resource_attributes() {
+    let mut config = IsolateMetricsReceiverConfig {
+        policy: IsolateMetricsPolicy::default(),
+        isolate_name: "test-isolate".to_string(),
+        publisher_id: "test-publisher".to_string(),
+        is_ratified: false,
+        isolate_instance_id: "inst-123".to_string(),
+        ..Default::default()
+    };
+    config
+        .try_add_custom_attribute(
+            CustomAttribute::Resource("duplicate_res_key".into()),
+            Value::StringValue("v1".to_string()),
+        )
+        .unwrap();
+    let duplicate_res = config.try_add_custom_attribute(
+        CustomAttribute::Resource("duplicate_res_key".into()),
+        Value::StringValue("v2".to_string()),
+    );
+    assert!(duplicate_res.is_err());
+    let err_msg = duplicate_res.unwrap_err().to_string();
+    assert!(err_msg.contains("Duplicate resource attribute key: 'duplicate_res_key'"));
+}
+
+#[tokio::test]
+async fn test_init_rejects_shadowing_standard_resource_attributes() {
+    let mut shadow_config = IsolateMetricsReceiverConfig {
+        policy: IsolateMetricsPolicy::default(),
+        isolate_name: "test-isolate".to_string(),
+        publisher_id: "test-publisher".to_string(),
+        is_ratified: false,
+        isolate_instance_id: "inst-123".to_string(),
+        ..Default::default()
+    };
+    shadow_config
+        .try_add_custom_attribute(
+            CustomAttribute::Resource("ez_isolate_name".into()),
+            Value::StringValue("shadowed".to_string()),
+        )
+        .unwrap();
+    let receiver_res = IsolateMetricsReceiver::new(shadow_config).await;
+    assert!(receiver_res.is_err());
+    let err = receiver_res.err().unwrap();
+    let err_msg = err.to_string();
+    assert!(err_msg.contains("Duplicate resource attribute key: 'ez_isolate_name'"));
+    let ez_err =
+        err.downcast_ref::<MetricsReceiverError>().expect("MetricsReceiverError").to_ez_error();
+    match ez_err {
+        ez_error::EzError::EnforcerError(e) => {
+            assert_eq!(e.error_code, tonic::Code::InvalidArgument);
+        }
+        _ => panic!("Expected EnforcerError"),
+    }
+}
+
+#[tokio::test]
+async fn test_init_rejects_duplicate_scope_attributes() {
+    let mut config = IsolateMetricsReceiverConfig {
+        policy: IsolateMetricsPolicy::default(),
+        isolate_name: "test-isolate".to_string(),
+        publisher_id: "test-publisher".to_string(),
+        is_ratified: false,
+        isolate_instance_id: "inst-123".to_string(),
+        ..Default::default()
+    };
+    config
+        .try_add_custom_attribute(
+            CustomAttribute::Scope("duplicate_scope_key".into()),
+            Value::StringValue("v1".to_string()),
+        )
+        .unwrap();
+    let duplicate_res = config.try_add_custom_attribute(
+        CustomAttribute::Scope("duplicate_scope_key".into()),
+        Value::StringValue("v2".to_string()),
+    );
+    assert!(duplicate_res.is_err());
+    let err_msg = duplicate_res.unwrap_err().to_string();
+    assert!(err_msg.contains("Duplicate scope attribute key: 'duplicate_scope_key'"));
+}
+
+#[tokio::test]
+async fn test_init_rejects_scope_attribute_shadowing_standard_resource_attributes() {
+    let mut config_shadow_standard = IsolateMetricsReceiverConfig {
+        policy: IsolateMetricsPolicy::default(),
+        isolate_name: "test-isolate".to_string(),
+        publisher_id: "test-publisher".to_string(),
+        is_ratified: false,
+        isolate_instance_id: "inst-123".to_string(),
+        ..Default::default()
+    };
+    // "ez_isolate_name" is an automatically added standard resource attribute;
+    // configuring a scope attribute with the same name triggers a collision error.
+    config_shadow_standard
+        .try_add_custom_attribute(
+            CustomAttribute::Scope("ez_isolate_name".into()),
+            Value::StringValue("shadow_scope".to_string()),
+        )
+        .unwrap();
+    let receiver_res = IsolateMetricsReceiver::new(config_shadow_standard).await;
+    assert!(receiver_res.is_err());
+    let err = receiver_res.err().unwrap();
+    let err_msg = err.to_string();
+    assert!(err_msg.contains(
+        "Attribute key 'ez_isolate_name' is defined in both resource and scope attributes"
+    ));
+    let ez_err =
+        err.downcast_ref::<MetricsReceiverError>().expect("MetricsReceiverError").to_ez_error();
+    match ez_err {
+        ez_error::EzError::EnforcerError(e) => {
+            assert_eq!(e.error_code, tonic::Code::InvalidArgument);
+        }
+        _ => panic!("Expected EnforcerError"),
+    }
+}
+
+#[tokio::test]
+async fn test_init_rejects_overlapping_custom_resource_and_scope_attributes() {
+    let mut config_overlap_custom = IsolateMetricsReceiverConfig {
+        policy: IsolateMetricsPolicy::default(),
+        isolate_name: "test-isolate".to_string(),
+        publisher_id: "test-publisher".to_string(),
+        is_ratified: false,
+        isolate_instance_id: "inst-123".to_string(),
+        ..Default::default()
+    };
+    config_overlap_custom
+        .try_add_custom_attribute(
+            CustomAttribute::Resource("overlap_key".into()),
+            Value::StringValue("res_val".to_string()),
+        )
+        .unwrap();
+    config_overlap_custom
+        .try_add_custom_attribute(
+            CustomAttribute::Scope("overlap_key".into()),
+            Value::StringValue("scope_val".to_string()),
+        )
+        .unwrap();
+
+    let receiver_overlap = IsolateMetricsReceiver::new(config_overlap_custom).await;
+    assert!(receiver_overlap.is_err());
+    let err_msg = receiver_overlap.err().unwrap().to_string();
+    assert!(err_msg
+        .contains("Attribute key 'overlap_key' is defined in both resource and scope attributes"));
+}
+
+#[test]
+fn test_attribute_name_and_custom_attribute_api() {
+    let name1 = AttributeName::new("custom.attr1");
+    assert_eq!(name1.as_str(), "custom.attr1");
+    assert_eq!(&*name1, "custom.attr1");
+    assert_eq!(format!("{name1}"), "custom.attr1");
+
+    let name2 = AttributeName::from(String::from("custom.attr2"));
+    assert_eq!(name2.as_str(), "custom.attr2");
+
+    let res_attr = CustomAttribute::Resource(name1);
+    assert_eq!(res_attr.name(), &AttributeName::from("custom.attr1"));
+
+    let scope_attr = CustomAttribute::Scope(name2);
+    assert_eq!(scope_attr.name(), &AttributeName::from("custom.attr2"));
+}
+
+#[tokio::test]
+async fn test_filter_metrics_unspecified_and_summary() {
+    let policy = IsolateMetricsPolicy {
+        allowed_metrics: vec![
+            AllowedMetric {
+                name: "multi_policy_metric".to_string(),
+                r#type: MetricType::Gauge as i32,
+                allowed_attributes: vec!["g_attr".to_string()],
+            },
+            AllowedMetric {
+                name: "multi_policy_metric".to_string(),
+                r#type: MetricType::Sum as i32,
+                allowed_attributes: vec!["s_attr".to_string()],
+            },
+            AllowedMetric {
+                name: "unspecified_metric".to_string(),
+                r#type: MetricType::Unspecified as i32,
+                allowed_attributes: vec!["u_attr".to_string()],
+            },
+            AllowedMetric {
+                name: "summary_metric".to_string(),
+                r#type: MetricType::Summary as i32,
+                allowed_attributes: vec!["sum_attr".to_string()],
+            },
+        ],
+    };
+    let receiver = IsolateMetricsReceiver::new(IsolateMetricsReceiverConfig {
+        policy,
+        isolate_name: "test".to_string(),
+        publisher_id: "pub".to_string(),
+        is_ratified: false,
+        isolate_instance_id: "inst".to_string(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    let mut request = ExportMetricsServiceRequest {
+        resource_metrics: vec![ResourceMetrics {
+            resource: Some(Default::default()),
+            scope_metrics: vec![ScopeMetrics {
+                scope: Some(Default::default()),
+                metrics: vec![
+                    Metric {
+                        name: "multi_policy_metric".to_string(),
+                        description: "".to_string(),
+                        unit: "".to_string(),
+                        data: Some(Data::Sum(Sum {
+                            data_points: vec![NumberDataPoint {
+                                attributes: vec![
+                                    KeyValue {
+                                        key: "s_attr".to_string(),
+                                        value: Some(AnyValue {
+                                            value: Some(Value::StringValue("val".to_string())),
+                                        }),
+                                    },
+                                    KeyValue {
+                                        key: "bad_attr".to_string(),
+                                        value: Some(AnyValue {
+                                            value: Some(Value::StringValue("drop".to_string())),
+                                        }),
+                                    },
+                                ],
+                                ..Default::default()
+                            }],
+                            ..Default::default()
+                        })),
+                        metadata: vec![],
+                    },
+                    Metric {
+                        name: "unspecified_metric".to_string(),
+                        description: "".to_string(),
+                        unit: "".to_string(),
+                        data: Some(Data::Gauge(Gauge {
+                            data_points: vec![NumberDataPoint {
+                                attributes: vec![
+                                    KeyValue {
+                                        key: "u_attr".to_string(),
+                                        value: Some(AnyValue {
+                                            value: Some(Value::StringValue("val".to_string())),
+                                        }),
+                                    },
+                                    KeyValue {
+                                        key: "bad_attr".to_string(),
+                                        value: Some(AnyValue {
+                                            value: Some(Value::StringValue("drop".to_string())),
+                                        }),
+                                    },
+                                ],
+                                ..Default::default()
+                            }],
+                        })),
+                        metadata: vec![],
+                    },
+                    Metric {
+                        name: "summary_metric".to_string(),
+                        description: "".to_string(),
+                        unit: "".to_string(),
+                        data: Some(Data::Summary(Summary {
+                            data_points: vec![SummaryDataPoint {
+                                attributes: vec![
+                                    KeyValue {
+                                        key: "sum_attr".to_string(),
+                                        value: Some(AnyValue {
+                                            value: Some(Value::StringValue("val".to_string())),
+                                        }),
+                                    },
+                                    KeyValue {
+                                        key: "bad_attr".to_string(),
+                                        value: Some(AnyValue {
+                                            value: Some(Value::StringValue("drop".to_string())),
+                                        }),
+                                    },
+                                ],
+                                ..Default::default()
+                            }],
+                        })),
+                        metadata: vec![],
+                    },
+                ],
+                schema_url: "".to_string(),
+            }],
+            schema_url: "".to_string(),
+        }],
+    };
+
+    receiver.filter_metrics(&mut request);
+    let metrics = &request.resource_metrics[0].scope_metrics[0].metrics;
+    assert_eq!(metrics.len(), 3);
 }

@@ -264,7 +264,7 @@ async fn test_build_isolate_dependency_graph_internal_dependency() {
 }
 
 #[tokio::test]
-async fn test_build_isolate_dependency_graph_non_internal_dependencies_skipped() {
+async fn test_build_isolate_dependency_graph_external_and_remote_dependencies_skipped() {
     let mapper = IsolateServiceMapper::default();
     let svc1 = create_service_info("domain.com", "pub1", "iso1", "svc1");
     let svc2 = create_service_info("domain.com", "pub2", "iso2", "svc2");
@@ -276,16 +276,38 @@ async fn test_build_isolate_dependency_graph_non_internal_dependencies_skipped()
 
     let ext_dep = create_backend_dep("domain.com", "pub2", "iso2", "svc2", RouteType::External);
     let remote_dep = create_backend_dep("domain.com", "pub2", "iso2", "svc2", RouteType::Remote);
-    let unspec_dep =
-        create_backend_dep("domain.com", "pub2", "iso2", "svc2", RouteType::Unspecified);
 
     let mut isolate_deps_map = HashMap::new();
-    isolate_deps_map.insert(idx1, vec![ext_dep, remote_dep, unspec_dep]);
+    isolate_deps_map.insert(idx1, vec![ext_dep, remote_dep]);
     isolate_deps_map.insert(idx2, vec![]);
 
     let graph = build_isolate_dependency_graph(&isolate_deps_map, &mapper).await.unwrap();
     assert_eq!(graph.len(), 2);
     assert!(graph.get(&idx1).unwrap().is_empty());
+    assert!(graph.get(&idx2).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_build_isolate_dependency_graph_unspecified_route_type_included() {
+    let mapper = IsolateServiceMapper::default();
+    let svc1 = create_service_info("domain.com", "pub1", "iso1", "svc1");
+    let svc2 = create_service_info("domain.com", "pub2", "iso2", "svc2");
+
+    let idx1 =
+        mapper.new_binary_index(vec![svc1], false, "pub1".into(), "iso1".into()).await.unwrap();
+    let idx2 =
+        mapper.new_binary_index(vec![svc2], false, "pub2".into(), "iso2".into()).await.unwrap();
+
+    let unspec_dep =
+        create_backend_dep("domain.com", "pub2", "iso2", "svc2", RouteType::Unspecified);
+
+    let mut isolate_deps_map = HashMap::new();
+    isolate_deps_map.insert(idx1, vec![unspec_dep]);
+    isolate_deps_map.insert(idx2, vec![]);
+
+    let graph = build_isolate_dependency_graph(&isolate_deps_map, &mapper).await.unwrap();
+    assert_eq!(graph.len(), 2);
+    assert_eq!(graph.get(&idx1).unwrap(), &HashSet::from([idx2]));
     assert!(graph.get(&idx2).unwrap().is_empty());
 }
 

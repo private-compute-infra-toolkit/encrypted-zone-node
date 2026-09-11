@@ -21,7 +21,7 @@ use enforcer_proto::enforcer::v1::{
     EzIsolateHealth, EzIsolateHealthReport, IsolateServiceInfo, IsolateState,
 };
 use health_ops::get_ops_for_state;
-use isolate_info::{InstanceIdGenerator, IsolateId};
+use isolate_info::{BinaryServicesIndex, InstanceIdGenerator, IsolateId};
 use isolate_service_mapper::IsolateServiceMapper;
 use opentelemetry::KeyValue;
 use state_manager::IsolateStateManager;
@@ -83,6 +83,30 @@ impl HealthManager {
         let health_results = self.run_health_operations(isolate_states).await;
         self.update_health_metrics(&health_results);
 
+        let registered_binary_indices =
+            self.isolate_service_mapper.get_registered_binary_indices().await;
+
+        let are_isolates_ready = if !self.isolate_state_manager.are_isolates_registered()
+            || registered_binary_indices.is_empty()
+        {
+            false
+        } else {
+            let mut ready_types: HashSet<BinaryServicesIndex> = HashSet::new();
+            for (isolate_id, isolate_health) in &health_results {
+                let is_ready = isolate_health.state == Some(IsolateState::Ready as i32);
+                let is_running = isolate_health
+                    .container_run_status
+                    .as_ref()
+                    .is_some_and(|s| s.status == RunStatus::Running as i32);
+
+                if is_ready && is_running {
+                    ready_types.insert(isolate_id.get_binary_services_index());
+                }
+            }
+
+            registered_binary_indices.iter().all(|idx| ready_types.contains(idx))
+        };
+
         let isolates_report: Vec<EzIsolateHealth> =
             health_results.into_iter().map(|(_, h)| h).collect();
         // Acquire write lock and update the latest report.
@@ -90,6 +114,7 @@ impl HealthManager {
             isolates: isolates_report,
             start_timestamp: start_time,
             end_timestamp: to_timestamp(std::time::SystemTime::now()),
+            are_isolates_ready,
         };
         if report.isolates.is_empty() {
             log::info!("[Health Manager] No Isolates");
@@ -270,7 +295,7 @@ fn build_health_isolate_attributes(
         isolate_instance_id,
     )
     .into_iter()
-    .map(|(k, v)| KeyValue::new(k, v))
+    .map(|(attr, val)| KeyValue::new(attr.name().to_string(), val))
     .collect()
 }
 

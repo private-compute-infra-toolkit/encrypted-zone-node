@@ -20,8 +20,10 @@ use opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_server::
 use opentelemetry_proto::tonic::collector::metrics::v1::{
     ExportMetricsServiceRequest, ExportMetricsServiceResponse,
 };
+use opentelemetry_proto::tonic::common::v1::any_value::Value;
 use opentelemetry_proto::tonic::common::v1::KeyValue;
 use opentelemetry_proto::tonic::metrics::v1::{metric::Data, Metric};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use tonic::transport::Channel;
 use tonic::{Request, Response, Status};
@@ -50,6 +52,62 @@ impl MetricPolicy {
     }
 }
 
+/// An identifier representing a metric attribute name.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct AttributeName(Cow<'static, str>);
+
+impl AttributeName {
+    pub fn new(name: impl Into<Cow<'static, str>>) -> Self {
+        Self(name.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for AttributeName {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for AttributeName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl From<&'static str> for AttributeName {
+    fn from(s: &'static str) -> Self {
+        Self(Cow::Borrowed(s))
+    }
+}
+
+impl From<String> for AttributeName {
+    fn from(s: String) -> Self {
+        Self(Cow::Owned(s))
+    }
+}
+
+/// Represents a custom metric attribute tag categorized by its level (Resource or Scope).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CustomAttribute {
+    Resource(AttributeName),
+    Scope(AttributeName),
+}
+
+impl CustomAttribute {
+    pub fn name(&self) -> &AttributeName {
+        match self {
+            Self::Resource(name) | Self::Scope(name) => name,
+        }
+    }
+}
+
 /// Configuration for initializing an [`IsolateMetricsReceiver`].
 #[derive(Debug, Default, Clone)]
 pub struct IsolateMetricsReceiverConfig {
@@ -61,6 +119,36 @@ pub struct IsolateMetricsReceiverConfig {
     pub otel_endpoint: Option<String>,
     pub max_decoding_message_size: usize,
     pub disable_filtering: bool,
+    pub custom_attributes: HashMap<CustomAttribute, Value>,
+}
+
+impl IsolateMetricsReceiverConfig {
+    /// Attempts to add a custom attribute to this configuration, returning an error
+    /// if an attribute with the same level and name has already been configured.
+    pub fn try_add_custom_attribute(
+        &mut self,
+        attribute: CustomAttribute,
+        value: impl Into<Value>,
+    ) -> Result<(), MetricsReceiverError> {
+        let name = attribute.name().to_string();
+        match attribute {
+            CustomAttribute::Resource(_) => {
+                if self.custom_attributes.insert(attribute, value.into()).is_some() {
+                    return Err(MetricsReceiverError::ConfigurationError(format!(
+                        "Duplicate resource attribute key: '{name}'"
+                    )));
+                }
+            }
+            CustomAttribute::Scope(_) => {
+                if self.custom_attributes.insert(attribute, value.into()).is_some() {
+                    return Err(MetricsReceiverError::ConfigurationError(format!(
+                        "Duplicate scope attribute key: '{name}'"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Receiver for Isolate metrics. It filters metrics based on policy and injects identity.
@@ -71,8 +159,9 @@ pub struct IsolateMetricsReceiver {
     /// List of allowed metric prefixes to their expected policies
     /// Strings store here will have their trailing * stripped
     prefix_metrics: Vec<(String, MetricPolicy)>,
-    resource_attributes: Vec<KeyValue>,
-    scope_attributes: Vec<KeyValue>,
+    /// Unified map of all identity and metadata attributes (Resource and Scope)
+    /// attached by this receiver.
+    attributes: HashMap<CustomAttribute, KeyValue>,
     client: Option<MetricsServiceClient<Channel>>,
     disable_filtering: bool,
 }
@@ -99,7 +188,7 @@ impl IsolateMetricsReceiver {
             }
         }
 
-        let client = if let Some(endpoint) = config.otel_endpoint {
+        let client = if let Some(ref endpoint) = config.otel_endpoint {
             let pool = GrpcChannelPool::new(
                 endpoint.clone(),
                 1,
@@ -119,21 +208,80 @@ impl IsolateMetricsReceiver {
             None
         };
 
-        let resource_attributes = build_isolate_resource_attributes(
-            &config.isolate_name,
-            &config.publisher_id,
-            &config.isolate_instance_id,
-        );
-        let scope_attributes = build_isolate_scope_attributes(config.is_ratified);
+        let attributes = Self::build_and_validate_attributes(&config)?;
 
         Ok(Self {
             exact_metrics,
             prefix_metrics,
-            resource_attributes,
-            scope_attributes,
+            attributes,
             client,
             disable_filtering: config.disable_filtering,
         })
+    }
+
+    /// Builds and validates the unified attributes collection from configuration.
+    fn build_and_validate_attributes(
+        config: &IsolateMetricsReceiverConfig,
+    ) -> Result<HashMap<CustomAttribute, KeyValue>> {
+        let mut attributes = HashMap::new();
+        let standard_attrs = get_isolate_attribute_data(
+            &config.isolate_name,
+            &config.publisher_id,
+            config.is_ratified,
+            &config.isolate_instance_id,
+        );
+        let standard_resource_keys: HashSet<AttributeName> =
+            standard_attrs.keys().map(|attr| attr.name().clone()).collect();
+
+        for (attr, v) in standard_attrs {
+            let kv = make_string_attribute(attr.name().as_str(), v);
+            attributes.insert(attr, kv);
+        }
+
+        let mut custom_resource_keys = HashSet::new();
+        let mut custom_scope_keys = HashSet::new();
+
+        for (attr, val) in &config.custom_attributes {
+            let key = attr.name();
+            match attr {
+                CustomAttribute::Resource(_) => {
+                    if standard_resource_keys.contains(key) {
+                        return Err(MetricsReceiverError::ConfigurationError(format!(
+                            "Duplicate resource attribute key: '{key}'"
+                        ))
+                        .into());
+                    }
+                    custom_resource_keys.insert(key);
+                }
+                CustomAttribute::Scope(_) => {
+                    if standard_resource_keys.contains(key) {
+                        return Err(MetricsReceiverError::ConfigurationError(format!(
+                            "Attribute key '{key}' is defined in both resource and scope attributes"
+                        ))
+                        .into());
+                    }
+                    custom_scope_keys.insert(key);
+                }
+            }
+            let kv = KeyValue {
+                key: key.to_string(),
+                value: Some(opentelemetry_proto::tonic::common::v1::AnyValue {
+                    value: Some(val.clone()),
+                }),
+            };
+            attributes.insert(attr.clone(), kv);
+        }
+
+        for scope_key in &custom_scope_keys {
+            if custom_resource_keys.contains(scope_key) {
+                return Err(MetricsReceiverError::ConfigurationError(format!(
+                    "Attribute key '{scope_key}' is defined in both resource and scope attributes"
+                ))
+                .into());
+            }
+        }
+
+        Ok(attributes)
     }
 
     /// Gets the MetricsServiceClient.
@@ -182,33 +330,63 @@ impl IsolateMetricsReceiver {
     }
 
     /// Enriches metrics by adding isolate resource attributes (ez_isolate_name,
-    /// ez_publisher_id, ez_isolate_instance_id) to resource.attributes and runtime
-    /// metadata (ez_component_name, ez_isolate_type, ez_enforcer_version) to
+    /// ez_publisher_id, ez_isolate_instance_id, ez_component_name, ez_isolate_type,
+    /// ez_enforcer_version) to resource.attributes and scope attributes to
     /// scope.attributes, while purging any client-spoofed identity attributes.
     pub fn enrich_metrics(&self, request: &mut ExportMetricsServiceRequest) {
-        let is_identity_attr = |key: &str| {
-            matches!(
-                key,
-                "ez_isolate_name"
-                    | "ez_publisher_id"
-                    | "ez_isolate_type"
-                    | "ez_enforcer_version"
-                    | "ez_component_name"
-                    | "ez_isolate_instance_id"
-            )
-        };
+        let identity_keys: HashSet<&str> =
+            self.attributes.keys().map(|attr| attr.name().as_str()).collect();
+        let is_identity_attr = |key: &str| identity_keys.contains(key);
+
+        let resource_attrs = self.resource_attributes();
+        let scope_attrs = self.scope_attributes();
 
         for resource_metrics in &mut request.resource_metrics {
             let resource = resource_metrics.resource.get_or_insert_with(Default::default);
             resource.attributes.retain(|attr| !is_identity_attr(&attr.key));
-            resource.attributes.extend_from_slice(&self.resource_attributes);
+            if !resource_attrs.is_empty() {
+                resource.attributes.extend_from_slice(&resource_attrs);
+            }
 
             for scope_metrics in &mut resource_metrics.scope_metrics {
                 let scope = scope_metrics.scope.get_or_insert_with(Default::default);
                 scope.attributes.retain(|attr| !is_identity_attr(&attr.key));
-                scope.attributes.extend_from_slice(&self.scope_attributes);
+                if !scope_attrs.is_empty() {
+                    scope.attributes.extend_from_slice(&scope_attrs);
+                }
             }
         }
+    }
+
+    /// Returns all attributes (Resource and Scope) configured for this receiver.
+    pub fn attributes(&self) -> &HashMap<CustomAttribute, KeyValue> {
+        &self.attributes
+    }
+
+    /// Returns the enriched resource attributes configured for this receiver.
+    pub fn resource_attributes(&self) -> Vec<KeyValue> {
+        self.attributes
+            .iter()
+            .filter_map(|(attr, kv)| match attr {
+                CustomAttribute::Resource(_) => Some(kv.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Returns the scope attributes configured for this receiver.
+    ///
+    /// This is empty by default because all isolate metadata is attached at the
+    /// resource level. Support for scope attributes is preserved for future
+    /// instrumentation scope metadata.
+    pub fn scope_attributes(&self) -> Vec<KeyValue> {
+        self.attributes
+            .iter()
+            .filter_map(|(attr, kv)| match attr {
+                CustomAttribute::Scope(_) => Some(kv.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Filters attributes in the metric data points based on the policy.
@@ -282,93 +460,36 @@ fn make_string_attribute(key: impl Into<String>, value: impl Into<String>) -> Ke
     }
 }
 
-/// Returns the raw key-value string metadata attributes for an isolate.
-///
-/// This avoids duplicating the metadata names and the version-fetching logic
-/// across components (like the health manager) that record metrics.
+/// Returns the standard isolate resource attributes (`ez_isolate_name`, `ez_publisher_id`,
+/// `ez_isolate_instance_id`, `ez_component_name`, `ez_isolate_type`, `ez_enforcer_version`)
+/// representing the isolate entity in Monarch root labels.
 pub fn get_isolate_attribute_data(
     isolate_name: &str,
     publisher_id: &str,
     is_ratified: bool,
     isolate_instance_id: &str,
-) -> Vec<(&'static str, std::borrow::Cow<'static, str>)> {
+) -> HashMap<CustomAttribute, std::borrow::Cow<'static, str>> {
     let isolate_type_str = if is_ratified { "ratified" } else { "opaque" };
-    vec![
-        ("ez_component_name", "isolate".into()),
-        ("ez_isolate_name", isolate_name.to_string().into()),
-        ("ez_publisher_id", publisher_id.to_string().into()),
-        ("ez_isolate_type", isolate_type_str.into()),
-        ("ez_enforcer_version", crate::get_enforcer_version().into()),
-        ("ez_isolate_instance_id", isolate_instance_id.to_string().into()),
-    ]
-}
-
-/// Builds the default OpenTelemetry attributes for an isolate component.
-///
-/// These attributes include the component name, isolate name, publisher ID,
-/// isolate type (ratified vs. opaque), and the enforcer version.
-pub fn build_isolate_attributes(
-    isolate_name: &str,
-    publisher_id: &str,
-    is_ratified: bool,
-    isolate_instance_id: &str,
-) -> Vec<KeyValue> {
-    get_isolate_attribute_data(isolate_name, publisher_id, is_ratified, isolate_instance_id)
-        .into_iter()
-        .map(|(k, v)| make_string_attribute(k, v))
-        .collect()
-}
-
-/// Returns the isolate-level resource attributes (`ez_isolate_name`, `ez_publisher_id`,
-/// `ez_isolate_instance_id`) representing the isolate entity in Monarch root labels.
-pub fn get_isolate_resource_attribute_data(
-    isolate_name: &str,
-    publisher_id: &str,
-    isolate_instance_id: &str,
-) -> Vec<(&'static str, std::borrow::Cow<'static, str>)> {
-    vec![
-        ("ez_isolate_name", isolate_name.to_string().into()),
-        ("ez_publisher_id", publisher_id.to_string().into()),
-        ("ez_isolate_instance_id", isolate_instance_id.to_string().into()),
-    ]
-}
-
-/// Builds OpenTelemetry resource attributes for an isolate entity.
-pub fn build_isolate_resource_attributes(
-    isolate_name: &str,
-    publisher_id: &str,
-    isolate_instance_id: &str,
-) -> Vec<KeyValue> {
-    get_isolate_resource_attribute_data(isolate_name, publisher_id, isolate_instance_id)
-        .into_iter()
-        .map(|(k, v)| make_string_attribute(k, v))
-        .collect()
-}
-
-/// Returns the runtime instrumentation scope attributes (`ez_component_name`,
-/// `ez_isolate_type`, `ez_enforcer_version`).
-pub fn get_isolate_scope_attribute_data(
-    is_ratified: bool,
-) -> Vec<(&'static str, std::borrow::Cow<'static, str>)> {
-    let isolate_type_str = if is_ratified { "ratified" } else { "opaque" };
-    vec![
-        ("ez_component_name", "isolate".into()),
-        ("ez_isolate_type", isolate_type_str.into()),
-        ("ez_enforcer_version", crate::get_enforcer_version().into()),
-    ]
-}
-
-/// Builds OpenTelemetry scope attributes for runtime instrumentation metadata.
-pub fn build_isolate_scope_attributes(is_ratified: bool) -> Vec<KeyValue> {
-    get_isolate_scope_attribute_data(is_ratified)
-        .into_iter()
-        .map(|(k, v)| make_string_attribute(k, v))
-        .collect()
+    HashMap::from([
+        (CustomAttribute::Resource("ez_isolate_name".into()), isolate_name.to_string().into()),
+        (CustomAttribute::Resource("ez_publisher_id".into()), publisher_id.to_string().into()),
+        (
+            CustomAttribute::Resource("ez_isolate_instance_id".into()),
+            isolate_instance_id.to_string().into(),
+        ),
+        (CustomAttribute::Resource("ez_component_name".into()), "isolate".into()),
+        (CustomAttribute::Resource("ez_isolate_type".into()), isolate_type_str.into()),
+        (
+            CustomAttribute::Resource("ez_enforcer_version".into()),
+            crate::get_enforcer_version().into(),
+        ),
+    ])
 }
 
 #[derive(Debug)]
 pub enum MetricsReceiverError {
     ClientConnectionError(anyhow::Error),
+    ConfigurationError(String),
 }
 
 impl std::fmt::Display for MetricsReceiverError {
@@ -376,6 +497,9 @@ impl std::fmt::Display for MetricsReceiverError {
         match self {
             MetricsReceiverError::ClientConnectionError(e) => {
                 write!(f, "Failed to connect to safe metrics endpoint: {:?}", e)
+            }
+            MetricsReceiverError::ConfigurationError(e) => {
+                write!(f, "Configuration error: {}", e)
             }
         }
     }
@@ -385,7 +509,10 @@ impl std::error::Error for MetricsReceiverError {}
 
 impl ToEzError for MetricsReceiverError {
     fn to_ez_error(&self) -> ez_error::EzError {
-        let code = tonic::Code::Internal;
+        let code = match self {
+            MetricsReceiverError::ClientConnectionError(_) => tonic::Code::Internal,
+            MetricsReceiverError::ConfigurationError(_) => tonic::Code::InvalidArgument,
+        };
         let source = error_detail_proto::enforcer::v1::ez_error_detail::ErrorSource::Enforcer;
 
         let enforcer_error = ez_error::EnforcerError {

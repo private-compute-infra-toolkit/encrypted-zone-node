@@ -26,7 +26,7 @@ use enforcer_proto::enforcer::v1::IsolateState;
 use isolate_info::{BinaryServicesIndex, IsolateId};
 use std::collections::HashSet;
 use std::result::Result::Ok;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -46,6 +46,7 @@ pub struct IsolateStateManager {
     channel_ready_map: Arc<DashMap<IsolateId, bool>>,
     ready_notifier: Arc<broadcast::Sender<BinaryServicesIndex>>,
     ready_binary_services_map: Arc<DashMap<BinaryServicesIndex, HashSet<IsolateId>>>,
+    isolates_registered: Arc<AtomicBool>,
     // TODO: Add another map here to store the Isolates that are in MULTI-USER scope.
 }
 
@@ -55,6 +56,38 @@ pub enum IsolateStateManagerError {
     DuplicateStateUpdate,
     #[error("The state transition is not valid")]
     InvalidStateTransition,
+}
+
+/// RAII guard that holds an in-flight request count for an Isolate.
+/// Decrements the in-flight counter when it is dropped.
+#[derive(Debug)]
+pub struct InflightGuard {
+    isolate_id: IsolateId,
+    state_manager: IsolateStateManager,
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        if self.state_manager.decrement_inflight_counter(self.isolate_id) {
+            let state_manager = self.state_manager.clone();
+            let isolate_id = self.isolate_id;
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    let _ = state_manager
+                        .update_state(isolate_id, IsolateState::Idle)
+                        .await
+                        .map_err(|err| {
+                            log::error!("Failed to update state to idle {:?}", err);
+                        });
+                });
+            } else {
+                log::error!(
+                    "InflightGuard dropped without an active Tokio runtime for retiring isolate {:?}",
+                    isolate_id
+                );
+            }
+        }
+    }
 }
 
 impl IsolateStateManager {
@@ -78,6 +111,7 @@ impl IsolateStateManager {
             channel_ready_map: Arc::new(DashMap::new()),
             ready_notifier: Arc::new(ready_notifier),
             ready_binary_services_map: Arc::new(DashMap::new()),
+            isolates_registered: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -112,15 +146,18 @@ impl IsolateStateManager {
             .await;
     }
 
+    /// Acquires an RAII in-flight request guard for an Isolate, incrementing its
+    /// in-flight counter immediately. When the guard is dropped, it asynchronously
+    /// decrements the in-flight counter.
+    pub async fn acquire_inflight_guard(&self, isolate_id: IsolateId) -> InflightGuard {
+        self.increment_inflight_counter(isolate_id).await;
+        InflightGuard { isolate_id, state_manager: self.clone() }
+    }
+
     /// Increments the in-flight request counter for a given Isolate.
     ///
-    /// This is called on the request path before forwarding a request to an Isolate,
-    /// ensuring that the system can track active work.
-    ///
-    /// # Arguments
-    ///
-    /// * `isolate_id` - The ID of the Isolate handling the request.
-    pub async fn increment_inflight_counter(&self, isolate_id: IsolateId) {
+    /// Called internally when acquiring an `InflightGuard`.
+    async fn increment_inflight_counter(&self, isolate_id: IsolateId) {
         if let Some(counter) = self.in_flight_request_counts.get(&isolate_id) {
             counter.fetch_add(1, Ordering::SeqCst);
         }
@@ -128,18 +165,18 @@ impl IsolateStateManager {
 
     /// Decrements the in-flight request counter for a given Isolate.
     ///
-    /// This is called on the response path after an Isolate has finished processing a request.
+    /// Called internally when an `InflightGuard` is dropped.
     ///
     /// If an Isolate is in the `IsolateState::Retiring` state and its in-flight request count
-    /// drops to zero, this method will transition its state to `IsolateState::Idle`.
-    ///
-    /// # Arguments
-    ///
-    /// * `isolate_id` - The ID of the Isolate that handled the request.
-    pub async fn decrement_inflight_counter(&self, isolate_id: IsolateId) {
+    /// drops to zero, this method returns `true` indicating that the caller should transition
+    /// its state to `IsolateState::Idle`.
+    fn decrement_inflight_counter(&self, isolate_id: IsolateId) -> bool {
         let mut should_set_idle = false;
         if let Some(counter) = self.in_flight_request_counts.get(&isolate_id) {
-            if counter.fetch_sub(1, Ordering::SeqCst) == 1 {
+            let prev = counter.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |val| {
+                Some(val.saturating_sub(1))
+            });
+            if prev == Ok(1) {
                 if let Some(state_entry) = self.isolate_state_map.get(&isolate_id) {
                     if *state_entry.value() == IsolateState::Retiring {
                         should_set_idle = true;
@@ -147,14 +184,7 @@ impl IsolateStateManager {
                 }
             }
         }
-        if should_set_idle {
-            // Note: Error is ignored because if update_state fails, it's a non-critical logic error.
-            // The Isolate is already effectively idle.
-            let _ = self.update_state(isolate_id, IsolateState::Idle).await.map_err(|err| {
-                log::error!("Failed to update state to idle {:?}", err);
-            });
-            self.in_flight_request_counts.remove(&isolate_id);
-        }
+        should_set_idle
     }
 
     /// Removes an Isolate from all internal tracking and requests its removal from the
@@ -321,6 +351,18 @@ impl IsolateStateManager {
         self.isolate_state_map.get(&isolate_id).map(|state| *state.value())
     }
 
+    /// Returns the current in-flight request count for a specific Isolate.
+    ///
+    /// # Arguments
+    ///
+    /// * `isolate_id` - The ID of the Isolate to query.
+    pub fn get_inflight_count(&self, isolate_id: IsolateId) -> usize {
+        self.in_flight_request_counts
+            .get(&isolate_id)
+            .map(|counter| counter.load(Ordering::SeqCst))
+            .unwrap_or(0)
+    }
+
     /// Returns true if at least one instance for the given BinaryServicesIndex is Ready.
     pub fn is_isolate_ready(&self, target: BinaryServicesIndex) -> bool {
         self.ready_binary_services_map.get(&target).is_some_and(|set| !set.is_empty())
@@ -346,6 +388,16 @@ impl IsolateStateManager {
                 }
             }
         }
+    }
+
+    /// Returns whether all initial isolates have been registered.
+    pub fn are_isolates_registered(&self) -> bool {
+        self.isolates_registered.load(Ordering::Relaxed)
+    }
+
+    /// Marks that all initial Isolates have been registered.
+    pub fn set_isolates_registered(&self) {
+        self.isolates_registered.store(true, Ordering::Relaxed);
     }
 }
 

@@ -89,11 +89,14 @@ rust_test(
     deps = [
         ":metrics",
         ":metrics_test_utils",
+        "//enforcer/error:ez_error",
+        "//enforcer/error:ez_error_trait",
         "//enforcer/isolate:isolate_info",
         "//enforcer/v1:manifest_rust",
         "@crates//:opentelemetry",
         "@crates//:opentelemetry-proto",
         "@crates//:tokio",
+        "@crates//:tonic",
     ],
 )
 
@@ -117,6 +120,7 @@ rust_binary(
 
 metrics_simulator_test(
     name = "simulator_integration_test",
+    size = "small",
     expected = "test_data/baseline/expected_output.json",
     input = "test_data/baseline/metrics_input.json",
     manifest = "test_data/baseline/manifest.json",
@@ -124,6 +128,7 @@ metrics_simulator_test(
 
 metrics_simulator_test(
     name = "simulator_missing_policy_test",
+    size = "small",
     expected = "test_data/missing_policy/expected_output.json",
     input = "test_data/missing_policy/metrics_input.json",
     manifest = "test_data/missing_policy/manifest.json",
@@ -131,6 +136,7 @@ metrics_simulator_test(
 
 metrics_simulator_test(
     name = "simulator_histogram_test",
+    size = "small",
     expected = "test_data/histogram/expected_output.json",
     input = "test_data/histogram/metrics_input.json",
     manifest = "test_data/histogram/manifest.json",
