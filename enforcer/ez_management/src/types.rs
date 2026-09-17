@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use ez_management_proto::enforcer::v2::LoadIsolatesError;
+
 #[derive(thiserror::Error, Debug)]
 pub enum EzManagementError {
     #[error("Failed to connect to EzManagementService: {0}")]
@@ -24,6 +26,8 @@ pub enum EzManagementError {
     ManifestParsingFailed(String),
     #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),
-    #[error("Failed to load isolates: {0}")]
-    LoadIsolatesFailed(String),
+    #[error("Failed to load isolates ({0:?}): {1}")]
+    LoadIsolatesFailed(LoadIsolatesError, String),
+    #[error("Internal error: {0}")]
+    InternalError(String),
 }

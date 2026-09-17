@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## 0.25.0 (2026-09-17)
+
+
+### EZ Policy Enforcer
+
+* **enforcer:** Introduce package_utils for isolate package handling
+* **enforcer:** propagate request metadata to external proxy request
+* **enforcer:** Validate isolate package endorsements with setup_isolate
+
 ## 0.24.0 (2026-09-11)
 
 

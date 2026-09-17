@@ -54,3 +54,11 @@ These variables configure the behavior when connecting to external proxy or mTLS
     management service (`EzManagementService`) are saved before unpacking and workload booting.
 -   **Type:** String (directory path)
 -   **Default:** `/tmp`
+
+### `EZ_MAX_PACKAGE_SIZE_BYTES`
+
+-   **Description:** Maximum allowed size in bytes for an individual isolate package streamed from
+    the management service (`EzManagementService`). Chunks exceeding this cumulative limit are
+    rejected.
+-   **Type:** Integer (bytes)
+-   **Default:** `536870912` (512 MB)

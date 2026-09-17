@@ -34,7 +34,6 @@ use payload_proto::data_scope_proto::enforcer::v1::DataScopeType;
 use payload_proto::enforcer::v1::ez_hybrid_payload::DeliveryMethod;
 use payload_proto::enforcer::v1::EzPayloadData;
 use prost::Message;
-use std::collections::HashMap;
 use std::env;
 use std::time::Instant;
 use tokio::sync::mpsc::Receiver;
@@ -408,7 +407,7 @@ pub fn translate_to_proxy_request(
         resource: Some(resource),
         external_request_payload: payload_bytes,
         request_extensions: metadata.extensions,
-        request_metadata: HashMap::new(),
+        request_metadata: metadata.request_metadata,
     })
 }
 

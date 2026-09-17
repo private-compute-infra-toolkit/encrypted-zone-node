@@ -138,5 +138,7 @@ enum LoadIsolatesError {
   LOAD_ISOLATES_ERROR_UNPACKING_FAILURE = 3;
   // Failed to resolve or process backend dependencies.
   LOAD_ISOLATES_ERROR_DEPENDENCY_PROCESSING_FAILURE = 4;
+  // Endorsement validation failed. More details in attached ValidateIsolateEndorsementResponse.
+  LOAD_ISOLATES_ERROR_VALIDATION_FAILURE = 5;
   // TODO: b/545375949 - Add error cases for Manifest endorsements.
 }
