@@ -103,6 +103,9 @@ impl EzToEzApi for FakeEzToEzProxy {
     }
 }
 
+const DEFAULT_MAX_DECODING_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
+const LARGE_MAX_DECODING_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
+
 pub async fn start_fake_proxy_server(
     response_delay: Option<Duration>,
 ) -> (u16, oneshot::Sender<()>) {
@@ -115,7 +118,10 @@ pub async fn start_fake_proxy_server(
 
     tokio::spawn(async move {
         Server::builder()
-            .add_service(EzToEzApiServer::new(fake_proxy))
+            .add_service(
+                EzToEzApiServer::new(fake_proxy)
+                    .max_decoding_message_size(LARGE_MAX_DECODING_MESSAGE_SIZE),
+            )
             .serve_with_incoming_shutdown(
                 tokio_stream::wrappers::TcpListenerStream::new(listener),
                 async {
@@ -149,8 +155,15 @@ pub fn create_test_request(input_payload: Option<&str>) -> InvokeEzRequest {
 async fn test_outbound_unary_flow() {
     let (port, shutdown_tx) = start_fake_proxy_server(None).await;
     let server_address = format!("http://localhost:{}", port);
-    let handler =
-        OutboundEzToEzHandler::new(server_address, TestMetrics::default(), None).await.unwrap();
+    let handler = OutboundEzToEzHandler::new(
+        server_address,
+        TestMetrics::default(),
+        /* tls_config= */ None,
+        /* expect_tls_config= */ false,
+        DEFAULT_MAX_DECODING_MESSAGE_SIZE,
+    )
+    .await
+    .unwrap();
 
     let expected_payload = "hello unary";
     let request = create_test_request(Some(expected_payload));
@@ -170,8 +183,15 @@ async fn test_outbound_unary_flow() {
 async fn test_outbound_unary_empty_payload() {
     let (port, shutdown_tx) = start_fake_proxy_server(None).await;
     let server_address = format!("http://localhost:{}", port);
-    let handler =
-        OutboundEzToEzHandler::new(server_address, TestMetrics::default(), None).await.unwrap();
+    let handler = OutboundEzToEzHandler::new(
+        server_address,
+        TestMetrics::default(),
+        /* tls_config= */ None,
+        /* expect_tls_config= */ false,
+        DEFAULT_MAX_DECODING_MESSAGE_SIZE,
+    )
+    .await
+    .unwrap();
 
     let request = create_test_request(None);
 
@@ -189,8 +209,15 @@ async fn test_outbound_unary_call_timeout_propagation() {
     let server_delay = Duration::from_millis(200);
     let (port, shutdown_tx) = start_fake_proxy_server(Some(server_delay)).await;
     let server_address = format!("http://localhost:{}", port);
-    let handler =
-        OutboundEzToEzHandler::new(server_address, TestMetrics::default(), None).await.unwrap();
+    let handler = OutboundEzToEzHandler::new(
+        server_address,
+        TestMetrics::default(),
+        /* tls_config= */ None,
+        /* expect_tls_config= */ false,
+        DEFAULT_MAX_DECODING_MESSAGE_SIZE,
+    )
+    .await
+    .unwrap();
 
     let request = create_test_request(Some("timeout test"));
     let client_timeout = Duration::from_millis(100);
@@ -220,8 +247,15 @@ async fn test_outbound_unary_call_timeout_propagation() {
 async fn test_outbound_streaming_flow() {
     let (port, shutdown_tx) = start_fake_proxy_server(None).await;
     let server_address = format!("http://localhost:{}", port);
-    let handler =
-        OutboundEzToEzHandler::new(server_address, TestMetrics::default(), None).await.unwrap();
+    let handler = OutboundEzToEzHandler::new(
+        server_address,
+        TestMetrics::default(),
+        /* tls_config= */ None,
+        /* expect_tls_config= */ false,
+        DEFAULT_MAX_DECODING_MESSAGE_SIZE,
+    )
+    .await
+    .unwrap();
 
     let first_payload = "hello";
     let second_payload = "world";
@@ -262,8 +296,15 @@ async fn test_outbound_streaming_flow() {
 async fn test_outbound_extensions_propagated() {
     let (port, shutdown_tx) = start_fake_proxy_server(None).await;
     let server_address = format!("http://localhost:{}", port);
-    let handler =
-        OutboundEzToEzHandler::new(server_address, TestMetrics::default(), None).await.unwrap();
+    let handler = OutboundEzToEzHandler::new(
+        server_address,
+        TestMetrics::default(),
+        /* tls_config= */ None,
+        /* expect_tls_config= */ false,
+        DEFAULT_MAX_DECODING_MESSAGE_SIZE,
+    )
+    .await
+    .unwrap();
 
     let mut request = create_test_request(Some("ext test"));
     request.control_plane_metadata.as_mut().unwrap().extensions = vec![9, 9, 9];
@@ -279,8 +320,15 @@ async fn test_outbound_extensions_propagated() {
 async fn test_outbound_streaming_empty_payload() {
     let (port, shutdown_tx) = start_fake_proxy_server(None).await;
     let server_address = format!("http://localhost:{}", port);
-    let handler =
-        OutboundEzToEzHandler::new(server_address, TestMetrics::default(), None).await.unwrap();
+    let handler = OutboundEzToEzHandler::new(
+        server_address,
+        TestMetrics::default(),
+        /* tls_config= */ None,
+        /* expect_tls_config= */ false,
+        DEFAULT_MAX_DECODING_MESSAGE_SIZE,
+    )
+    .await
+    .unwrap();
 
     let (local_to_outbound, from_local_rx) = mpsc::channel(10);
     let mut outbound_to_local =
@@ -323,6 +371,107 @@ async fn test_outbound_streaming_empty_payload() {
         "Expected ez_response_payload to be None for empty payload response without extensions"
     );
     assert!(third_response.response_extensions.is_empty());
+
+    drop(local_to_outbound);
+    assert!(outbound_to_local.recv().await.is_none());
+
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn test_outbound_pending_tls_fails_precondition_unary() {
+    let (port, shutdown_tx) = start_fake_proxy_server(None).await;
+    let server_address = format!("http://localhost:{}", port);
+    let handler = OutboundEzToEzHandler::new(
+        server_address,
+        TestMetrics::default(),
+        /* tls_config= */ None,
+        /* expect_tls_config= */ true,
+        DEFAULT_MAX_DECODING_MESSAGE_SIZE,
+    )
+    .await
+    .unwrap();
+
+    let request = create_test_request(Some("payload"));
+    let err = handler.remote_invoke(request, None).await.unwrap_err();
+
+    let status = err.downcast_ref::<Status>().expect("Error should downcast to tonic::Status");
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn test_outbound_pending_tls_fails_precondition_streaming() {
+    let (port, shutdown_tx) = start_fake_proxy_server(None).await;
+    let server_address = format!("http://localhost:{}", port);
+    let handler = OutboundEzToEzHandler::new(
+        server_address,
+        TestMetrics::default(),
+        /* tls_config= */ None,
+        /* expect_tls_config= */ true,
+        DEFAULT_MAX_DECODING_MESSAGE_SIZE,
+    )
+    .await
+    .unwrap();
+
+    let (_local_to_outbound, from_local_rx) = mpsc::channel(10);
+    let err = handler.remote_streaming_connect(None, from_local_rx, None).await.unwrap_err();
+
+    let status = err.downcast_ref::<Status>().expect("Error should downcast to tonic::Status");
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn test_outbound_large_payload_unary_and_streaming() {
+    let (port, shutdown_tx) = start_fake_proxy_server(None).await;
+    let server_address = format!("http://localhost:{}", port);
+    let handler = OutboundEzToEzHandler::new(
+        server_address,
+        TestMetrics::default(),
+        /* tls_config= */ None,
+        /* expect_tls_config= */ false,
+        LARGE_MAX_DECODING_MESSAGE_SIZE,
+    )
+    .await
+    .unwrap();
+
+    // 8 MiB payload (> Tonic's default 4 MiB limit)
+    let large_payload = "a".repeat(8 * 1024 * 1024);
+
+    // 1. Verify unary call succeeds with 8 MiB payload
+    let unary_request = create_test_request(Some(large_payload.as_str()));
+    let unary_response =
+        handler.remote_invoke(unary_request, None).await.expect("8 MiB unary call should succeed");
+    let unary_output = match unary_response.ez_response_payload.unwrap().delivery_method.unwrap() {
+        DeliveryMethod::InlineData(inline) => inline.datagrams[0].clone(),
+        _ => panic!("Expected InlineData"),
+    };
+    assert_eq!(unary_output.len(), large_payload.len());
+    assert_eq!(unary_output, large_payload.as_bytes());
+
+    // 2. Verify streaming call succeeds with 8 MiB payload
+    let (local_to_outbound, from_local_rx) = mpsc::channel(10);
+    let mut outbound_to_local =
+        handler.remote_streaming_connect(None, from_local_rx, None).await.unwrap();
+
+    let stream_request = create_test_request(Some(large_payload.as_str()));
+    local_to_outbound.send(stream_request).await.unwrap();
+
+    let stream_response = outbound_to_local
+        .recv()
+        .await
+        .expect("Stream should yield response")
+        .expect("8 MiB streaming response should succeed");
+    let stream_output = match stream_response.ez_response_payload.unwrap().delivery_method.unwrap()
+    {
+        DeliveryMethod::InlineData(inline) => inline.datagrams[0].clone(),
+        _ => panic!("Expected InlineData"),
+    };
+    assert_eq!(stream_output.len(), large_payload.len());
+    assert_eq!(stream_output, large_payload.as_bytes());
 
     drop(local_to_outbound);
     assert!(outbound_to_local.recv().await.is_none());

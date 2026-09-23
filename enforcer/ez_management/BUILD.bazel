@@ -29,6 +29,7 @@ rust_library(
         "//enforcer/manifest_parser",
         "//enforcer/setup_isolate_client",
         "//enforcer/v1:isolate_endorsement_rust",
+        "//enforcer/v2:common_rust_proto",
         "//enforcer/v2:ez_management_rust",
         "//enforcer/v2:opaque_isolate_manifest_rust_proto",
         "//enforcer/v2:ratified_isolate_manifest_rust_proto",
@@ -100,6 +101,8 @@ rust_test(
     args = ["--test-threads=1"],
     deps = [
         ":ez_management",
+        "//enforcer/isolate:isolate_info",
+        "//enforcer/v2:common_rust_proto",
         "//enforcer/v2:ez_management_rust",
     ],
 )

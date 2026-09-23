@@ -16,6 +16,7 @@ pub mod instance_id;
 pub use instance_id::{InstanceId, InstanceIdGenerator};
 
 use anyhow::{ensure, Ok, Result};
+use common_proto::enforcer::v2::IsolateType;
 use derivative::Derivative;
 use once_cell::sync::Lazy;
 use std::{fmt, hash::Hash};
@@ -37,13 +38,6 @@ static REMOTE_BINARY_SERVICES_INDEX: Lazy<BinaryServicesIndex> = Lazy::new(|| {
     );
     index
 });
-
-/// `IsolateType` represents the identity properties (publisher and name) of an Isolate.
-#[derive(Debug, Default, PartialEq, Eq, Hash, Clone)]
-pub struct IsolateType {
-    pub publisher_id: String,
-    pub isolate_name: String,
-}
 
 #[derive(Default)]
 struct IsolateServicesRegistry {

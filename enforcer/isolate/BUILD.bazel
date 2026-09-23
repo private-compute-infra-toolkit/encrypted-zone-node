@@ -23,6 +23,7 @@ rust_library(
     proc_macro_deps = ["@crates//:derivative"],
     visibility = ["//visibility:public"],
     deps = [
+        "//enforcer/v2:common_rust_proto",
         "@crates//:anyhow",
         "@crates//:once_cell",
         "@crates//:rand",
@@ -37,6 +38,7 @@ rust_library(
     deps = [
         ":isolate_info",
         "//enforcer/v1:manifest_rust",
+        "//enforcer/v2:common_rust_proto",
         "@crates//:anyhow",
         "@crates//:rand",
         "@crates//:tokio",
@@ -105,6 +107,7 @@ rust_library(
         "//enforcer/state:state_manager",
         "//enforcer/v1:enforcer_rust",
         "//enforcer/v1:manifest_rust",
+        "//enforcer/v2:common_rust_proto",
         "@crates//:dashmap",
         "@crates//:log",
         "@crates//:opentelemetry-proto",
@@ -287,6 +290,7 @@ rust_test(
         "//enforcer/v1:enforcer_rust",
         "//enforcer/v1:manifest_rust",
         "//enforcer/v1:payload_rust",
+        "//enforcer/v2:common_rust_proto",
         "@crates//:anyhow",
         "@crates//:env_logger",
         "@crates//:fake-opentelemetry-collector",
@@ -361,5 +365,6 @@ rust_test(
     visibility = ["//visibility:public"],
     deps = [
         ":isolate_info",
+        "//enforcer/v2:common_rust_proto",
     ],
 )

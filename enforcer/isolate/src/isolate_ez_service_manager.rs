@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_proto::enforcer::v2::IsolateType;
 use dashmap::DashMap;
 use data_scope::manifest_validator::ManifestValidator;
 use data_scope::requester::DataScopeRequester;
@@ -72,7 +73,7 @@ pub struct StartIsolateEzServerArgs {
     pub isolate_fifo_path: String,
     pub otel_metrics_address: String,
     pub metrics_policy: IsolateMetricsPolicy,
-    pub isolate_type: isolate_info::IsolateType,
+    pub isolate_type: IsolateType,
     pub isolate_instance_id: String,
 }
 

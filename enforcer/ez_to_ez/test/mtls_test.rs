@@ -17,11 +17,7 @@ use ez_mtls_proto::enforcer::v1::{
     GetCertificateRequest, GetCertificateResponse, ReportSniRequest, ReportSniResponse,
 };
 use manifest_parser::v1::parse_manifest;
-use manifest_parser::v2::SetupManifest;
-use mtls::mtls::{
-    extract_sni_params, load_initial_snis, sni, BootManifest, EzMtlsManager, IsolateIdentity,
-    SpiffeUri,
-};
+use mtls::mtls::{extract_sni_params, sni, EzMtlsManager, IsolateIdentity, SpiffeUri};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -45,34 +41,6 @@ fn test_sni() {
         /*trust_domain=*/ "avs.goog.tca",
     );
     assert_eq!(sni, "ez-instance-id--00b5ac486086aa9eae630c1d511eee7c-a.avs.goog.tca");
-}
-
-#[test]
-fn test_load_initial_snis_v1() {
-    let manifest = parse_manifest("enforcer/manifest_parser/test/testdata/test_manifest.json")
-        .expect("Failed to parse v1 manifest");
-    let boot_manifest = BootManifest::V1(manifest);
-    let snis = load_initial_snis(&boot_manifest);
-    assert_eq!(snis.len(), 2);
-    assert_eq!(
-        snis[0],
-        IsolateIdentity::new("ezpkg://playground.example.com", "playground_example")
-    );
-    assert_eq!(
-        snis[1],
-        IsolateIdentity::new("ezpkg://playground.example.com", "playground_example")
-    );
-}
-
-#[test]
-fn test_load_initial_snis_v2() {
-    let setup =
-        SetupManifest::load_from_path("enforcer/manifest_parser/test/testdata/v2_setup.json")
-            .expect("Failed to load setup manifest");
-    let boot_manifest = BootManifest::V2(setup);
-    let snis = load_initial_snis(&boot_manifest);
-    assert_eq!(snis.len(), 1);
-    assert_eq!(snis[0], IsolateIdentity::new("ezpkg://setup.example.com", "EZ_Trusted"));
 }
 
 #[test]
@@ -150,12 +118,10 @@ async fn test_connect_ez_mtls() {
     let key_path = "enforcer/ez_to_ez/test/testdata/leaf.key".to_string();
     let csr_path = "enforcer/ez_to_ez/test/testdata/leaf.csr".to_string();
 
-    let isolate_identities = vec![IsolateIdentity::new("test-isolate", "test-publisher")];
     let config = mtls::mtls::EzMtlsManagerConfig {
         mtls_key_path: key_path,
         csr_path,
         proxy_address: server_addr,
-        isolate_identities,
     };
     let manager_result = EzMtlsManager::build(config).await;
     assert!(
@@ -163,72 +129,7 @@ async fn test_connect_ez_mtls() {
         "Failed to connect to mock mTLS service: {:?}",
         manager_result.err()
     );
-    let manager = manager_result.unwrap();
-
-    let fetch_result = manager.fetch_certificate().await;
-    assert!(fetch_result.is_ok(), "Failed to fetch certificate");
-
-    let report_result =
-        manager.report_snis(&[IsolateIdentity::new("test-isolate", "test-publisher")]).await;
-    assert!(report_result.is_ok(), "Failed to report SNIs");
-
-    let _ = tx.send(());
-}
-
-/// Verifies that dynamic SNI reporting updates the proxy with the provided identities.
-#[tokio::test]
-async fn test_report_snis() {
-    let (tx, rx) = oneshot::channel();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server_addr = format!("http://{}", addr);
-
-    let service = MockMtlsService::new();
-    let reported_snis = service.reported_snis.clone();
-    tokio::spawn(async move {
-        tonic::transport::Server::builder()
-            .add_service(EzMtlsServiceServer::new(service))
-            .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
-                rx.await.ok();
-            })
-            .await
-            .unwrap();
-    });
-
-    let key_path = "enforcer/ez_to_ez/test/testdata/leaf.key".to_string();
-    let csr_path = "enforcer/ez_to_ez/test/testdata/leaf.csr".to_string();
-
-    let initial_identity = IsolateIdentity::new("setup-isolate", "setup-publisher");
-    let config = mtls::mtls::EzMtlsManagerConfig {
-        mtls_key_path: key_path,
-        csr_path,
-        proxy_address: server_addr,
-        isolate_identities: vec![initial_identity.clone()],
-    };
-    let manager = EzMtlsManager::build(config).await.expect("Failed to build manager");
-
-    {
-        let snis = reported_snis.lock().await;
-        assert_eq!(snis.len(), 1);
-        assert_eq!(snis[0].len(), 1);
-    }
-
-    let workload_identity1 = IsolateIdentity::new("workload-1", "publisher-1");
-    let workload_identity2 = IsolateIdentity::new("workload-2", "publisher-2");
-    manager
-        .report_snis(&[
-            initial_identity.clone(),
-            workload_identity1.clone(),
-            workload_identity2.clone(),
-        ])
-        .await
-        .expect("Failed to report SNIs");
-
-    {
-        let snis = reported_snis.lock().await;
-        assert_eq!(snis.len(), 2);
-        assert_eq!(snis[1].len(), 3);
-    }
+    let _manager = manager_result.unwrap();
 
     let _ = tx.send(());
 }
@@ -294,12 +195,10 @@ async fn test_tls_acceptor_connector() {
     });
     let key_path = "enforcer/ez_to_ez/test/testdata/leaf.key".to_string();
     let csr_path = "enforcer/ez_to_ez/test/testdata/leaf.csr".to_string();
-    let isolate_identities = vec![IsolateIdentity::new("encrypted-zone", "release@google.com")];
     let config = mtls::mtls::EzMtlsManagerConfig {
         mtls_key_path: key_path.clone(),
         csr_path: csr_path.clone(),
         proxy_address: server_addr.clone(),
-        isolate_identities,
     };
     let server_manager =
         EzMtlsManager::build(config.clone()).await.expect("Failed to initialize server manager");
@@ -364,13 +263,10 @@ async fn test_boring_tls_stream_duplex() {
             .unwrap();
     });
 
-    let isolate_identities = vec![IsolateIdentity::new("encrypted-zone", "release@google.com")];
-
     let config = mtls::mtls::EzMtlsManagerConfig {
         mtls_key_path: key_path.clone(),
         csr_path: csr_path.clone(),
         proxy_address: server_addr.clone(),
-        isolate_identities: isolate_identities.clone(),
     };
     // Create a mTLS manager to fetch the certificates from the mock server and load certificates from testdata.
     let server_manager =
@@ -438,6 +334,10 @@ struct TestContext {
     server_task: tokio::task::JoinHandle<()>,
     /// Manager for the client's mTLS identities.
     client_manager: EzMtlsManager,
+    /// Server socket address.
+    server_address: String,
+    /// Outbound TLS configuration.
+    outbound_tls_config: OutboundTlsConfig,
     /// The outbound handler instance used to make calls.
     outbound_handler: OutboundEzToEzHandler<TestMetrics>,
 }
@@ -464,13 +364,10 @@ async fn create_test_context() -> TestContext {
             .unwrap();
     });
 
-    let isolate_identities = vec![IsolateIdentity::new("encrypted-zone", "release@google.com")];
-
     let config = mtls::mtls::EzMtlsManagerConfig {
         mtls_key_path: key_path.clone(),
         csr_path: csr_path.clone(),
         proxy_address: server_addr.clone(),
-        isolate_identities,
     };
 
     let server_manager = EzMtlsManager::build(config.clone()).await.unwrap();
@@ -513,12 +410,22 @@ async fn create_test_context() -> TestContext {
     let outbound_handler = OutboundEzToEzHandler::new(
         server_address.clone(),
         TestMetrics::default(),
-        Some(outbound_tls_config),
+        Some(outbound_tls_config.clone()),
+        /* expect_tls_config= */ false,
+        4 * 1024 * 1024,
     )
     .await
     .unwrap();
 
-    TestContext { _dir: dir, mock_service_tx: tx, server_task, client_manager, outbound_handler }
+    TestContext {
+        _dir: dir,
+        mock_service_tx: tx,
+        server_task,
+        client_manager,
+        server_address,
+        outbound_tls_config,
+        outbound_handler,
+    }
 }
 
 /// Tests the full e2e flow between OutboundEzToEzHandler and InboundEzToEzHandler over mTLS.
@@ -535,6 +442,17 @@ async fn create_test_context() -> TestContext {
 async fn test_e2e_mtls() {
     let ctx = create_test_context().await;
 
+    // Verify OutboundTlsConfig Debug format.
+    assert!(format!("{:?}", ctx.outbound_tls_config).contains("OutboundTlsConfig"));
+
+    // Missing metadata when TLS is active returns an error.
+    let req_no_meta = enforcer_proto::enforcer::v1::InvokeEzRequest {
+        control_plane_metadata: None,
+        ..Default::default()
+    };
+    let no_meta_err = ctx.outbound_handler.remote_invoke(req_no_meta, None).await.unwrap_err();
+    assert!(no_meta_err.to_string().contains("Missing ControlPlaneMetadata for TLS routing"));
+
     let meta = ControlPlaneMetadata {
         destination_operator_domain: ctx.client_manager.spiffe_identity().operator_domain.clone(),
         ..Default::default()
@@ -550,7 +468,7 @@ async fn test_e2e_mtls() {
         ..Default::default()
     };
 
-    let response = ctx.outbound_handler.remote_invoke(request, None).await;
+    let response = ctx.outbound_handler.remote_invoke(request.clone(), None).await;
 
     assert!(response.is_ok(), "Remote invoke failed: {:?}", response.err());
     let response = response.unwrap();
@@ -559,6 +477,20 @@ async fn test_e2e_mtls() {
         _ => panic!("Expected InlineData"),
     };
     assert_eq!(output_payload, b"hello world");
+
+    // Second invoke reuses cached channel in tls_channel_pool.
+    let response2 = ctx.outbound_handler.remote_invoke(request, None).await;
+    assert!(response2.is_ok());
+
+    // Payload with None delivery method.
+    let req_none_delivery = enforcer_proto::enforcer::v1::InvokeEzRequest {
+        control_plane_metadata: Some(meta.clone()),
+        isolate_request_payload: Some(EzHybridPayload { delivery_method: None }),
+        ..Default::default()
+    };
+    let response_none = ctx.outbound_handler.remote_invoke(req_none_delivery, None).await;
+    assert!(response_none.is_ok());
+
     let _ = ctx.mock_service_tx.send(()); // Stop mock service
     ctx.server_task.abort(); // Stop server task
 }
@@ -672,4 +604,62 @@ async fn test_e2e_mtls_junction_error() {
 
     let _ = ctx.mock_service_tx.send(()); // Stop mock service
     ctx.server_task.abort(); // Stop server task
+}
+
+/// Tests that an outbound handler initialized in pending mode (expect_tls_config=true, tls_config=None)
+/// fails precondition, and once set_tls_config is called, calls succeed over mTLS.
+#[tokio::test]
+async fn test_outbound_pending_then_set_tls_config_works() {
+    let ctx = create_test_context().await;
+
+    let handler = OutboundEzToEzHandler::new(
+        ctx.server_address.clone(),
+        TestMetrics::default(),
+        /* tls_config= */ None,
+        /* expect_tls_config= */ true,
+        4 * 1024 * 1024,
+    )
+    .await
+    .unwrap();
+
+    let meta = ControlPlaneMetadata {
+        destination_operator_domain: ctx.client_manager.spiffe_identity().operator_domain.clone(),
+        ..Default::default()
+    };
+    let request = enforcer_proto::enforcer::v1::InvokeEzRequest {
+        control_plane_metadata: Some(meta.clone()),
+        isolate_request_payload: Some(EzHybridPayload {
+            delivery_method: Some(DeliveryMethod::InlineData(EzPayloadData {
+                datagrams: vec![b"hello dynamic mtls".to_vec()],
+            })),
+        }),
+        ..Default::default()
+    };
+
+    // 1. Invoking before setting TLS config must fail with FailedPrecondition.
+    let err = handler.remote_invoke(request.clone(), None).await.unwrap_err();
+    let status = err.downcast_ref::<tonic::Status>().expect("Expected tonic::Status");
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+
+    // 2. Set the TLS config via the OutboundEzToEzClient trait.
+    let duplicate_config = ctx.outbound_tls_config.clone();
+    handler.set_tls_config(ctx.outbound_tls_config).expect("Failed to set TLS config");
+
+    // 3. Now the outbound handler works and successfully sends the request over mTLS.
+    let response = handler
+        .remote_invoke(request, None)
+        .await
+        .expect("Remote invoke should succeed after TLS config is set");
+    let output_payload = match response.ez_response_payload.unwrap().delivery_method.unwrap() {
+        DeliveryMethod::InlineData(inline) => inline.datagrams[0].clone(),
+        _ => panic!("Expected InlineData"),
+    };
+    assert_eq!(output_payload, b"hello dynamic mtls");
+
+    // 4. Calling set_tls_config a second time must return an error (no panic).
+    let err = handler.set_tls_config(duplicate_config).unwrap_err();
+    assert!(err.to_string().contains("set_tls_config must be called only once"));
+
+    let _ = ctx.mock_service_tx.send(());
+    ctx.server_task.abort();
 }

@@ -547,10 +547,20 @@ impl StreamHandler {
         }
 
         let route_result =
-            self.restrictions_enforcer.stream_validate_invoke_ez_req(&mut first_req).await;
+            self.restrictions_enforcer.stream_validate_invoke_ez_req(&mut first_req, None).await;
 
         let is_validation_error = route_result.is_err();
-        let route = route_result.unwrap_or(Route::Unknown);
+        let route = match route_result {
+            Ok(route) => route,
+            Err(status) => {
+                log::error!(
+                    "Initial stream request validation failed for isolate {}: {:?}",
+                    self.isolate_id,
+                    status
+                );
+                Route::Unknown
+            }
+        };
 
         // Complete activation with determined route
         let attributes = MetricAttributes::from(first_req.control_plane_metadata.as_ref())
@@ -640,8 +650,15 @@ impl StreamHandler {
                     });
                     return;
                 }
-                if restrictions_enforcer.stream_validate_invoke_ez_req(&mut req).await.is_err() {
-                    log::error!("Remote enforcer request channel closed before first message.");
+                if let Err(status) = restrictions_enforcer
+                    .stream_validate_invoke_ez_req(&mut req, Some(Route::Remote))
+                    .await
+                {
+                    log::error!(
+                        "Stream validation failed for remote request on isolate {}: {:?}",
+                        stream_handler.isolate_id,
+                        status
+                    );
                     return;
                 }
                 if to_outbound_tx.send(req).await.is_err() {
@@ -755,8 +772,15 @@ impl StreamHandler {
                     });
                     return;
                 }
-                if restrictions_enforcer.stream_validate_invoke_ez_req(&mut req).await.is_err() {
-                    log::error!("Error while enforcing scopes InvokeEzRequest");
+                if let Err(status) = restrictions_enforcer
+                    .stream_validate_invoke_ez_req(&mut req, Some(Route::External))
+                    .await
+                {
+                    log::error!(
+                        "Stream validation failed for external request on isolate {}: {:?}",
+                        stream_handler.isolate_id,
+                        status
+                    );
                     return;
                 }
                 if let Err(e) = to_connector_tx.send(req).await {
@@ -853,12 +877,15 @@ impl StreamHandler {
                     });
                     return;
                 }
-                if restrictions_enforcer
-                    .stream_validate_invoke_ez_req(&mut invoke_ez_req)
+                if let Err(status) = restrictions_enforcer
+                    .stream_validate_invoke_ez_req(&mut invoke_ez_req, Some(Route::Internal))
                     .await
-                    .is_err()
                 {
-                    log::error!("Error while enforcing scopes InvokeEzRequest");
+                    log::error!(
+                        "Stream validation failed for internal request on isolate {}: {:?}",
+                        stream_handler.isolate_id,
+                        status
+                    );
                     return;
                 }
                 if to_junction.send(convert_to_isolate_request(invoke_ez_req)).await.is_err() {
@@ -937,11 +964,11 @@ impl RestrictionsEnforcer {
             }
         };
 
-        // When the ez instance is provided, we're routing it to the specific instance and we
-        // don't need to do matching.
-        if !metadata.destination_ez_instance_id.is_empty() {
-            return Ok(Route::Remote);
-        }
+        // `destination_ez_instance_id` pins the request to one concrete peer (e.g. an
+        // `ip:port` or DNS address that are not known when the manifest is authored.
+        // It selects *where* the request is delivered, but it must never
+        // decide *whether* the request is allowed.
+        let pinned_to_ez_instance = !metadata.destination_ez_instance_id.is_empty();
 
         let destination_isolate_service = match self
             .isolate_service_mapper
@@ -986,27 +1013,55 @@ impl RestrictionsEnforcer {
         }
 
         let route = destination_isolate_service.get_request_route();
+
+        if pinned_to_ez_instance {
+            if route != Route::Remote {
+                let detailed_err_msg = format!(
+                    "destination_ez_instance_id is only permitted for Route::Remote dependencies; target {}.{} has route {:?}",
+                    metadata.destination_operator_domain,
+                    metadata.destination_service_name,
+                    route
+                );
+                return Err(Status::failed_precondition(detailed_err_msg));
+            }
+            return Ok(Route::Remote);
+        }
+
         Ok(route)
     }
 
-    async fn stream_validate_invoke_ez_req(&self, req: &mut InvokeEzRequest) -> Result<Route, ()> {
+    async fn stream_validate_invoke_ez_req(
+        &self,
+        req: &mut InvokeEzRequest,
+        expected_route: Option<Route>,
+    ) -> Result<Route, Status> {
         // TODO: b/509551958 - add support for shared mem payloads in streaming path
         let Some(ref response_tx) = self.response_tx else {
-            log::error!("Streaming enforcer invoked without response transmitter");
-            return Err(());
+            let status =
+                Status::internal("Streaming enforcer invoked without response transmitter");
+            log::error!("{}", status.message());
+            return Err(status);
         };
 
-        match self.validate_invoke_ez_req(req).await {
-            Ok(route) => Ok(route), // The route is returned on success.
+        let route = match self.validate_invoke_ez_req(req).await {
+            Ok(route) => route,
             Err(status) => {
-                log::error!(
-                    "Failed to enforce scopes and manifest validation on Invoke EZ Request {:?}",
-                    status,
+                let _ = response_tx.send(Err(status.clone())).await;
+                return Err(status);
+            }
+        };
+        if let Some(expected) = expected_route {
+            if route != expected {
+                let detailed_err_msg = format!(
+                    "Mid-stream route mismatch: established stream route is {:?}, but request resolved to {:?}",
+                    expected, route
                 );
-                let _ = response_tx.send(Err(status)).await;
-                Err(())
-            } // An empty error is returned, signaling that the error was sent.
+                let status = Status::failed_precondition(detailed_err_msg);
+                let _ = response_tx.send(Err(status.clone())).await;
+                return Err(status);
+            }
         }
+        Ok(route)
     }
 
     async fn validate_invoke_ez_resp(&self, resp: &InvokeEzResponse) -> Result<(), Status> {

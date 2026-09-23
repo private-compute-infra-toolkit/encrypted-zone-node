@@ -18,6 +18,13 @@ use enforcer_proto::enforcer::v1::{ControlPlaneMetadata, InvokeEzRequest, Invoke
 use std::time::Instant;
 use tokio::sync::mpsc::Receiver;
 
+/// Configuration for the outbound EZ-to-EZ mTLS.
+#[derive(Clone)]
+pub struct OutboundTlsConfig {
+    pub factory: mtls::mtls::TlsConnectorFactory,
+    pub trust_domain: String,
+}
+
 /// The OutboundEzToEzClient trait defines the interface for sending requests to a remote EZ enforcer from an Isolate.
 #[tonic::async_trait]
 pub trait OutboundEzToEzClient: Send + Sync + DynClone {
@@ -37,11 +44,20 @@ pub trait OutboundEzToEzClient: Send + Sync + DynClone {
         from_local_rx: Receiver<InvokeEzRequest>,
         timeout: Option<std::time::Duration>,
     ) -> Result<Receiver<Result<InvokeEzResponse>>>;
+
+    /// Installs the mTLS configuration after construction.
+    fn set_tls_config(&self, tls_config: OutboundTlsConfig) -> Result<()>;
 }
 
 dyn_clone::clone_trait_object!(OutboundEzToEzClient);
 impl core::fmt::Debug for Box<dyn OutboundEzToEzClient> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Box<dyn OutboundEzToEzClient>")
+    }
+}
+
+impl core::fmt::Debug for OutboundTlsConfig {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("OutboundTlsConfig").field("trust_domain", &self.trust_domain).finish()
     }
 }

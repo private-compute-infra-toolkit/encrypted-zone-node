@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use anyhow::{Context, Ok, Result};
+use common_proto::enforcer::v2::IsolateType;
 use isolate_info::{BinaryServicesIndex, IsolateServiceIndex, IsolateServiceInfo};
 use manifest_proto::enforcer::v1::ez_backend_dependency::RouteType;
 use std::collections::{hash_map::Entry, HashMap};
@@ -63,7 +64,7 @@ impl IsolateServiceMapper {
                 anyhow::bail!("Service {} already present in the map", isolate_service_info);
             }
         }
-        let isolate_type = isolate_info::IsolateType { publisher_id, isolate_name };
+        let isolate_type = IsolateType { publisher_id, isolate_name };
         isolate_info::register_isolate_type(new_binary_services_index, isolate_type);
 
         binary_services_index_info.insert(new_binary_services_index, isolate_service_infos);

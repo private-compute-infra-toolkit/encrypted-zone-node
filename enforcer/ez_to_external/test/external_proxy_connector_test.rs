@@ -603,6 +603,20 @@ fn test_translate_to_proxy_request_success() {
     assert_eq!(resource.method_name, "TestMethod");
 }
 
+/// Verifies that request_metadata on ControlPlaneMetadata is propagated to EzExternalProxyRequest.
+#[test]
+fn test_translate_to_proxy_request_propagates_request_metadata() {
+    let mut request = create_generic_test_request(vec![vec![1, 2, 3]]);
+    let metadata = HashMap::from([
+        ("ascii-key".to_string(), b"value".to_vec()),
+        ("binary-key-bin".to_string(), vec![0x00, 0xff]),
+    ]);
+    request.control_plane_metadata.as_mut().unwrap().request_metadata = metadata.clone();
+
+    let proxy_req = translate_to_proxy_request(request).unwrap();
+    assert_eq!(proxy_req.request_metadata, metadata);
+}
+
 /// Attempts to translate proxy request but fails due to missing metadata.
 #[test]
 fn test_translate_to_proxy_request_fails_on_missing_metadata() {

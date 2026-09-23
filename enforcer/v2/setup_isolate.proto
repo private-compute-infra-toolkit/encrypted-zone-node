@@ -81,6 +81,8 @@ message ExpectedClaims {
   string publisher_id = 1;
   // Expected isolate name in the endorsement.
   string isolate_name = 2;
+  // Expected package filename in the endorsement.
+  string package_filename = 3;
 }
 
 // Request to validate isolate package endorsements.
@@ -111,7 +113,7 @@ message ValidateIsolateEndorsementResponse {
     ISOLATE_ENDORSEMENT_VALIDATION_ERROR_PARSING_FAILURE = 1;
     // Publisher ID in the endorsement does not match the expected publisher ID.
     ISOLATE_ENDORSEMENT_VALIDATION_ERROR_PUBLISHER_ID_MISMATCH = 2;
-    // Workload ID in the endorsement does not match the expected isolate name.
+    // Artifact path in the endorsement does not match the expected isolate name and package filename.
     ISOLATE_ENDORSEMENT_VALIDATION_ERROR_ISOLATE_NAME_MISMATCH = 3;
     // Cryptographic endorsement verification failed.
     ISOLATE_ENDORSEMENT_VALIDATION_ERROR_VERIFICATION_FAILED = 4;

@@ -14,13 +14,14 @@
 
 mod test_utils;
 
+use common_proto::enforcer::v2::IsolateType;
 use ez_management::{package_utils, EzManagementClient, EzManagementError, LoadIsolatesError};
 use ez_management_proto::enforcer::v2::ez_management_service_server::EzManagementServiceServer;
 use ez_management_proto::enforcer::v2::{
     load_isolates_request, load_isolates_response, LoadIsolatesResponse,
     RatifiedIsolateManifestPayload,
 };
-use opaque_isolate_manifest_proto::enforcer::v2::{OpaqueIsolateDescriptor, OpaqueIsolateManifest};
+use opaque_isolate_manifest_proto::enforcer::v2::OpaqueIsolateManifest;
 use ratified_isolate_manifest_proto::enforcer::v2::{
     RatifiedIsolateDescriptor, RatifiedIsolateManifest,
 };
@@ -33,12 +34,20 @@ use tonic::transport::Server;
 
 #[tokio::test]
 async fn test_load_isolates_success_flow() {
+    // The package_filename in the manifest deliberately differs from the isolate_name to
+    // verify that packages are keyed by IsolateType and only named after package_filename.
     let responses = vec![
         create_ratified_response(create_ratified_manifest("ratified_wl", "ratified.tar")),
         create_opaque_response(create_opaque_manifest("opaque_wl", "opaque.tar")),
-        create_chunk_response("ratified.tar", 0, &VALID_TAR[..512], false, &[]),
-        create_chunk_response("", 1, &VALID_TAR[512..], true, &[]),
-        create_single_chunk_response("opaque.tar", VALID_TAR),
+        create_chunk_response(
+            Some(ratified_isolate_type("ratified_wl")),
+            0,
+            &VALID_TAR[..512],
+            false,
+            &[],
+        ),
+        create_chunk_response(None, 1, &VALID_TAR[512..], true, &[]),
+        create_single_chunk_response(opaque_isolate_type("opaque_wl"), VALID_TAR),
         create_all_packages_loaded_response(),
     ];
 
@@ -63,7 +72,7 @@ async fn test_load_isolates_success_flow() {
     ));
     match &reqs[1].request {
         Some(load_isolates_request::Request::LoadIsolatesResult(res)) => {
-            assert_eq!(res.package_name, "ratified.tar");
+            assert_eq!(res.isolate_type, Some(ratified_isolate_type("ratified_wl")));
             assert!(res.success);
             assert!(res.validate_isolate_endorsement_result.is_some());
         }
@@ -71,7 +80,7 @@ async fn test_load_isolates_success_flow() {
     }
     match &reqs[2].request {
         Some(load_isolates_request::Request::LoadIsolatesResult(res)) => {
-            assert_eq!(res.package_name, "opaque.tar");
+            assert_eq!(res.isolate_type, Some(opaque_isolate_type("opaque_wl")));
             assert!(res.success);
             assert!(res.validate_isolate_endorsement_result.is_none());
         }
@@ -80,34 +89,56 @@ async fn test_load_isolates_success_flow() {
 }
 
 #[tokio::test]
+async fn test_same_isolate_name_from_different_publishers() {
+    // The isolate_name alone is ambiguous: both manifests declare "shared_name". Packages are
+    // keyed by the (isolate_name, publisher_id) pair, so both Isolates load independently.
+    let responses = vec![
+        create_ratified_response(create_ratified_manifest("shared_name", "ratified.tar")),
+        create_opaque_response(create_opaque_manifest("shared_name", "opaque.tar")),
+        create_single_chunk_response(ratified_isolate_type("shared_name"), VALID_TAR),
+        create_single_chunk_response(opaque_isolate_type("shared_name"), VALID_TAR),
+        create_all_packages_loaded_response(),
+    ];
+
+    let mut ctx = setup_test_context(responses).await;
+    assert_eq!(ctx.client.load_packages().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
 async fn test_manifest_ordering_and_partial_packages() {
     // Manifest ordering: Opaque manifest received first, then Ratified manifest.
     let responses = vec![
         create_opaque_response(create_opaque_manifest("opaque_wl", "opaque.tar")),
         create_ratified_response(create_ratified_manifest("ratified_wl", "ratified.tar")),
-        create_single_chunk_response("ratified.tar", VALID_TAR),
-        create_single_chunk_response("opaque.tar", VALID_TAR),
+        create_single_chunk_response(ratified_isolate_type("ratified_wl"), VALID_TAR),
+        create_single_chunk_response(opaque_isolate_type("opaque_wl"), VALID_TAR),
         create_all_packages_loaded_response(),
     ];
     let mut ctx = setup_test_context(responses).await;
     assert_eq!(ctx.client.load_packages().await.unwrap().len(), 2);
 
-    // Partial packages: Manifest specifies 2 workloads, but only 1 package is streamed.
+    // Incomplete packages: Manifest specifies 2 workloads, but only 1 package is streamed.
     let responses = vec![
         create_ratified_response(create_ratified_manifest("ratified_1", "pkg_1.tar")),
         create_opaque_response(create_opaque_manifest("opaque_2", "pkg_2.tar")),
-        create_single_chunk_response("pkg_1.tar", VALID_TAR),
+        create_single_chunk_response(ratified_isolate_type("ratified_1"), VALID_TAR),
         create_all_packages_loaded_response(),
     ];
     let mut ctx = setup_test_context(responses).await;
-    assert_eq!(ctx.client.load_packages().await.unwrap().len(), 1);
+    match ctx.client.load_packages().await {
+        Err(EzManagementError::IncompletePackagesLoaded { expected, received }) => {
+            assert_eq!(expected, 2);
+            assert_eq!(received, 1);
+        }
+        other => panic!("Expected IncompletePackagesLoaded, got {:?}", other),
+    }
 
     // Empty response is ignored during package streaming.
     let responses = vec![
         create_ratified_response(create_ratified_manifest("ratified_1", "pkg_1.tar")),
         create_opaque_response(OpaqueIsolateManifest::default()),
         LoadIsolatesResponse { response: None },
-        create_single_chunk_response("pkg_1.tar", VALID_TAR),
+        create_single_chunk_response(ratified_isolate_type("ratified_1"), VALID_TAR),
         create_all_packages_loaded_response(),
     ];
     let mut ctx = setup_test_context(responses).await;
@@ -157,7 +188,7 @@ async fn test_manifest_validation_errors() {
                     "ratified_pkg.tar",
                 )),
                 create_opaque_response(create_opaque_manifest("opaque_1", "opaque_pkg.tar")),
-                create_single_chunk_response("ratified_pkg.tar", VALID_TAR),
+                create_single_chunk_response(ratified_isolate_type("ratified_1"), VALID_TAR),
                 create_ratified_response(RatifiedIsolateManifest::default()),
             ],
             "unexpected manifest",
@@ -171,33 +202,43 @@ async fn test_manifest_validation_errors() {
 
 #[tokio::test]
 async fn test_chunk_streaming_sequencing_and_framing_errors() {
-    let mut ctx =
-        setup_test_context(vec![create_single_chunk_response("premature.tar", VALID_TAR)]).await;
+    let mut ctx = setup_test_context(vec![create_single_chunk_response(
+        ratified_isolate_type("premature_wl"),
+        VALID_TAR,
+    )])
+    .await;
     assert_unexpected_msg(ctx.client.load_packages().await, "before both manifests were received");
 
+    let test_wl = || ratified_isolate_type("test_wl");
     let chunk_cases = [
-        (vec![create_single_chunk_response("", VALID_TAR)], "without package_name"),
+        (vec![create_chunk_response(None, 0, VALID_TAR, true, &[])], "without isolate_type"),
         (
-            vec![create_chunk_response("test_pkg.tar", 1, &VALID_TAR[..512], true, &[])],
+            vec![create_chunk_response(Some(test_wl()), 1, &VALID_TAR[..512], true, &[])],
             "expected 0, got 1",
         ),
         (
             vec![
-                create_chunk_response("test_pkg.tar", 0, &VALID_TAR[..512], false, &[]),
-                create_chunk_response("", 2, &VALID_TAR[512..], true, &[]),
+                create_chunk_response(Some(test_wl()), 0, &VALID_TAR[..512], false, &[]),
+                create_chunk_response(None, 2, &VALID_TAR[512..], true, &[]),
             ],
             "expected 1, got 2",
         ),
         (
             vec![
-                create_chunk_response("test_pkg.tar", 0, &VALID_TAR[..512], false, &[]),
-                create_chunk_response("other_pkg.tar", 1, &VALID_TAR[512..], true, &[]),
+                create_chunk_response(Some(test_wl()), 0, &VALID_TAR[..512], false, &[]),
+                create_chunk_response(
+                    Some(ratified_isolate_type("other_wl")),
+                    1,
+                    &VALID_TAR[512..],
+                    true,
+                    &[],
+                ),
             ],
-            "while still streaming package 'test_pkg.tar'",
+            &format!("while still streaming Isolate '{:?}'", ratified_isolate_type("test_wl")),
         ),
         (
             vec![
-                create_chunk_response("test_pkg.tar", 0, &VALID_TAR[..512], false, &[]),
+                create_chunk_response(Some(test_wl()), 0, &VALID_TAR[..512], false, &[]),
                 create_all_packages_loaded_response(),
             ],
             "still being streamed",
@@ -220,7 +261,7 @@ async fn test_stream_closed_errors() {
             vec![
                 create_ratified_response(create_ratified_manifest("ratified_1", "pkg_1.tar")),
                 create_opaque_response(create_opaque_manifest("opaque_2", "pkg_2.tar")),
-                create_single_chunk_response("pkg_1.tar", VALID_TAR),
+                create_single_chunk_response(ratified_isolate_type("ratified_1"), VALID_TAR),
             ],
             "before receiving AllPackagesLoaded",
         ),
@@ -233,16 +274,18 @@ async fn test_stream_closed_errors() {
 
 #[tokio::test]
 async fn test_package_path_validation_and_disk_errors() {
+    // (package_filename declared in the manifest, isolate streamed by the server, expected error)
     let path_cases = [
-        ("..", "..", "path traversal"),
-        ("/", "/", "cannot resolve file name"),
-        ("known_pkg.tar", "unknown_pkg.tar", "not present in the manifest"),
+        ("..", "wl", "path traversal"),
+        (".", "wl", "path traversal"),
+        ("/", "wl", "cannot resolve file name"),
+        ("known_pkg.tar", "unknown_wl", "not present in the manifest"),
     ];
-    for (manifest_pkg, chunk_pkg, expected_err) in path_cases {
+    for (package_filename, streamed_isolate_name, expected_err) in path_cases {
         let mut ctx = setup_test_context(vec![
-            create_ratified_response(create_ratified_manifest("wl", manifest_pkg)),
+            create_ratified_response(create_ratified_manifest("wl", package_filename)),
             create_opaque_response(OpaqueIsolateManifest::default()),
-            create_single_chunk_response(chunk_pkg, VALID_TAR),
+            create_single_chunk_response(ratified_isolate_type(streamed_isolate_name), VALID_TAR),
         ])
         .await;
         assert_load_failed(
@@ -250,25 +293,86 @@ async fn test_package_path_validation_and_disk_errors() {
             LoadIsolatesError::ManifestParsingFailure,
             expected_err,
         );
-        if chunk_pkg == "unknown_pkg.tar" {
-            let res = ctx.get_last_load_result().await;
-            assert_eq!(res.package_name, "unknown_pkg.tar");
-            assert!(!res.success);
-        }
+        let res = ctx.get_last_load_result().await;
+        assert_eq!(res.isolate_type, Some(ratified_isolate_type(streamed_isolate_name)));
+        assert!(!res.success);
     }
 
-    // Write failure when target path is already a directory (EISDIR).
+    let invalid_identity_cases = [
+        (
+            IsolateType { publisher_id: ".".to_string(), isolate_name: "wl".to_string() },
+            "Invalid publisher_id '.'",
+        ),
+        (
+            IsolateType { publisher_id: "..".to_string(), isolate_name: "wl".to_string() },
+            "Invalid publisher_id '..'",
+        ),
+        (
+            IsolateType { publisher_id: "pub/sub".to_string(), isolate_name: "wl".to_string() },
+            "Invalid publisher_id 'pub/sub'",
+        ),
+        (
+            IsolateType {
+                publisher_id: RATIFIED_PUBLISHER_ID.to_string(),
+                isolate_name: ".".to_string(),
+            },
+            "Invalid isolate_name '.'",
+        ),
+        (
+            IsolateType {
+                publisher_id: RATIFIED_PUBLISHER_ID.to_string(),
+                isolate_name: "..".to_string(),
+            },
+            "Invalid isolate_name '..'",
+        ),
+        (
+            IsolateType {
+                publisher_id: RATIFIED_PUBLISHER_ID.to_string(),
+                isolate_name: "nested/wl".to_string(),
+            },
+            "Invalid isolate_name 'nested/wl'",
+        ),
+    ];
+    for (invalid_type, expected_err) in invalid_identity_cases {
+        let mut ratified = create_ratified_manifest("placeholder", "valid.tar");
+        ratified.ratified_isolate_descriptors[0].isolate_type = Some(invalid_type.clone());
+        let requester = create_mock_container_manager_requester(Ok(()), Ok(()));
+        let mut ctx = setup_test_context_with_requester(
+            vec![
+                create_ratified_response(ratified),
+                create_opaque_response(OpaqueIsolateManifest::default()),
+                create_single_chunk_response(invalid_type.clone(), VALID_TAR),
+            ],
+            requester,
+        )
+        .await;
+        assert_load_failed(
+            ctx.client.load_packages().await,
+            LoadIsolatesError::ManifestParsingFailure,
+            expected_err,
+        );
+        let res = ctx.get_last_load_result().await;
+        assert_eq!(res.isolate_type, Some(invalid_type));
+        assert!(!res.success);
+    }
+
+    // Write failure when target path is already a directory (EISDIR). The occupied path is named
+    // after the manifest's package_filename inside the IsolateType's directory.
     let mut ctx = setup_test_context(vec![
-        create_ratified_response(create_ratified_manifest("fail_write", "fail_write.tar")),
+        create_ratified_response(create_ratified_manifest("fail_write_wl", "fail_write.tar")),
         create_opaque_response(OpaqueIsolateManifest::default()),
-        create_single_chunk_response("fail_write.tar", VALID_TAR),
+        create_single_chunk_response(ratified_isolate_type("fail_write_wl"), VALID_TAR),
     ])
     .await;
     let ez_pkg_dir = get_ez_packages_dir(ctx.pkg_dir()).await;
-    tokio::fs::create_dir(ez_pkg_dir.join("fail_write.tar")).await.unwrap();
+    tokio::fs::create_dir_all(
+        ez_pkg_dir.join("EZ_Trusted").join("fail_write_wl").join("fail_write.tar"),
+    )
+    .await
+    .unwrap();
     assert_load_failed(ctx.client.load_packages().await, LoadIsolatesError::IoFailure, "");
     let res = ctx.get_last_load_result().await;
-    assert_eq!(res.package_name, "fail_write.tar");
+    assert_eq!(res.isolate_type, Some(ratified_isolate_type("fail_write_wl")));
     assert!(!res.success);
 }
 
@@ -296,7 +400,7 @@ async fn test_container_manager_errors() {
                 "unregistered.tar",
             )),
             create_opaque_response(OpaqueIsolateManifest::default()),
-            create_single_chunk_response("unregistered.tar", VALID_TAR),
+            create_single_chunk_response(ratified_isolate_type("unregistered_wl"), VALID_TAR),
         ],
         requester,
     )
@@ -307,7 +411,7 @@ async fn test_container_manager_errors() {
         "Failed to get binary services index",
     );
     let res = ctx.get_last_load_result().await;
-    assert_eq!(res.package_name, "unregistered.tar");
+    assert_eq!(res.isolate_type, Some(ratified_isolate_type("unregistered_wl")));
     assert!(!res.success);
 
     // Container manager fails during LoadWorkloadIsolates.
@@ -315,7 +419,7 @@ async fn test_container_manager_errors() {
         create_mock_container_manager_requester(Ok(()), Err("Booting isolates failed in CM"));
     let mut ctx = setup_test_context_with_requester(
         vec![
-            create_ratified_response(create_ratified_manifest("boot_fail_wl", "pkg.tar")),
+            create_ratified_response(RatifiedIsolateManifest::default()),
             create_opaque_response(OpaqueIsolateManifest::default()),
             create_all_packages_loaded_response(),
         ],
@@ -328,28 +432,21 @@ async fn test_container_manager_errors() {
         "Booting isolates failed in CM",
     );
 
-    // Manifest descriptor with None isolate_type is ignored and loading succeeds.
-    let requester = create_mock_container_manager_requester(Ok(()), Ok(()));
+    // Manifest descriptor with None isolate_type fails with ManifestParsingFailure.
     let mut ratified = create_ratified_manifest("valid_ratified", "ratified.tar");
     ratified
         .ratified_isolate_descriptors
         .push(RatifiedIsolateDescriptor { isolate_type: None, ..Default::default() });
-    let mut opaque = create_opaque_manifest("valid_opaque", "opaque.tar");
-    opaque
-        .opaque_isolate_descriptors
-        .push(OpaqueIsolateDescriptor { isolate_type: None, ..Default::default() });
-    let mut ctx = setup_test_context_with_requester(
-        vec![
-            create_ratified_response(ratified),
-            create_opaque_response(opaque),
-            create_all_packages_loaded_response(),
-        ],
-        requester,
-    )
+    let mut ctx = setup_test_context(vec![
+        create_ratified_response(ratified),
+        create_opaque_response(OpaqueIsolateManifest::default()),
+    ])
     .await;
-    let indices =
-        ctx.client.load_packages().await.expect("Should succeed with empty descriptors ignored");
-    assert!(indices.is_empty());
+    assert_load_failed(
+        ctx.client.load_packages().await,
+        LoadIsolatesError::ManifestParsingFailure,
+        "Manifest descriptor is missing valid IsolateType",
+    );
 }
 
 #[tokio::test]
@@ -362,7 +459,13 @@ async fn test_ratified_isolate_endorsement_validation() {
     let responses = vec![
         create_ratified_response(create_ratified_manifest("ratified_workload", "ratified.tar")),
         create_opaque_response(OpaqueIsolateManifest::default()),
-        create_chunk_response("ratified.tar", 0, VALID_TAR, true, &endorsement_bytes),
+        create_chunk_response(
+            Some(ratified_isolate_type("ratified_workload")),
+            0,
+            VALID_TAR,
+            true,
+            &endorsement_bytes,
+        ),
         create_all_packages_loaded_response(),
     ];
 
@@ -374,13 +477,14 @@ async fn test_ratified_isolate_endorsement_validation() {
     assert_eq!(invoked_requests.len(), 1);
     let req = &invoked_requests[0];
     let claims = req.expected_claims.as_ref().expect("claims should be present");
-    assert_eq!(claims.publisher_id, "EZ_Trusted");
+    assert_eq!(claims.publisher_id, RATIFIED_PUBLISHER_ID);
     assert_eq!(claims.isolate_name, "ratified_workload");
+    assert_eq!(claims.package_filename, "ratified.tar");
     assert_eq!(req.isolate_package_endorsement, endorsement_bytes);
     assert_eq!(req.package_digest_sha256, expected_hash);
 
     let res = ctx.get_last_load_result().await;
-    assert_eq!(res.package_name, "ratified.tar");
+    assert_eq!(res.isolate_type, Some(ratified_isolate_type("ratified_workload")));
     assert!(res.success);
     let val_resp =
         res.validate_isolate_endorsement_result.expect("validate result should be present");
@@ -393,8 +497,20 @@ async fn test_ratified_isolate_endorsement_validation() {
     let responses = vec![
         create_ratified_response(create_ratified_manifest("chunked_ratified", "chunked.tar")),
         create_opaque_response(OpaqueIsolateManifest::default()),
-        create_chunk_response("chunked.tar", 0, &VALID_TAR[..512], false, &multi_chunk_endorsement),
-        create_chunk_response("chunked.tar", 1, &VALID_TAR[512..], true, &[]),
+        create_chunk_response(
+            Some(ratified_isolate_type("chunked_ratified")),
+            0,
+            &VALID_TAR[..512],
+            false,
+            &multi_chunk_endorsement,
+        ),
+        create_chunk_response(
+            Some(ratified_isolate_type("chunked_ratified")),
+            1,
+            &VALID_TAR[512..],
+            true,
+            &[],
+        ),
         create_all_packages_loaded_response(),
     ];
 
@@ -415,7 +531,7 @@ async fn test_ratified_isolate_endorsement_validation_errors() {
         vec![
             create_ratified_response(create_ratified_manifest("ratified_workload", "ratified.tar")),
             create_opaque_response(OpaqueIsolateManifest::default()),
-            create_single_chunk_response("ratified.tar", VALID_TAR),
+            create_single_chunk_response(ratified_isolate_type("ratified_workload"), VALID_TAR),
             create_all_packages_loaded_response(),
         ]
     };
@@ -430,7 +546,7 @@ async fn test_ratified_isolate_endorsement_validation_errors() {
     );
 
     let res = ctx.get_last_load_result().await;
-    assert_eq!(res.package_name, "ratified.tar");
+    assert_eq!(res.isolate_type, Some(ratified_isolate_type("ratified_workload")));
     assert!(!res.success);
     assert_eq!(res.load_isolates_error, LoadIsolatesError::ValidationFailure as i32);
     let val_resp =
@@ -450,7 +566,7 @@ async fn test_ratified_isolate_endorsement_validation_errors() {
     );
 
     let res = ctx.get_last_load_result().await;
-    assert_eq!(res.package_name, "ratified.tar");
+    assert_eq!(res.isolate_type, Some(ratified_isolate_type("ratified_workload")));
     assert!(!res.success);
     assert_eq!(res.load_isolates_error, LoadIsolatesError::ValidationFailure as i32);
     let val_resp =
@@ -469,7 +585,7 @@ async fn test_ratified_isolate_endorsement_validation_errors() {
     );
 
     let res = ctx.get_last_load_result().await;
-    assert_eq!(res.package_name, "ratified.tar");
+    assert_eq!(res.isolate_type, Some(ratified_isolate_type("ratified_workload")));
     assert!(!res.success);
     assert_eq!(res.load_isolates_error, LoadIsolatesError::ValidationFailure as i32);
     assert!(res.validate_isolate_endorsement_result.is_none());
@@ -482,7 +598,7 @@ async fn test_opaque_isolates_and_setup_client_behavior() {
     let responses = vec![
         create_ratified_response(RatifiedIsolateManifest::default()),
         create_opaque_response(create_opaque_manifest("opaque_workload", "opaque.tar")),
-        create_single_chunk_response("opaque.tar", VALID_TAR),
+        create_single_chunk_response(opaque_isolate_type("opaque_workload"), VALID_TAR),
         create_all_packages_loaded_response(),
     ];
 
@@ -492,7 +608,7 @@ async fn test_opaque_isolates_and_setup_client_behavior() {
     assert!(mock_junction.get_invoked_requests().is_empty());
 
     let res = ctx.get_last_load_result().await;
-    assert_eq!(res.package_name, "opaque.tar");
+    assert_eq!(res.isolate_type, Some(opaque_isolate_type("opaque_workload")));
     assert!(res.success);
     assert!(res.validate_isolate_endorsement_result.is_none());
 
@@ -500,7 +616,7 @@ async fn test_opaque_isolates_and_setup_client_behavior() {
     let responses = vec![
         create_ratified_response(RatifiedIsolateManifest::default()),
         create_opaque_response(create_opaque_manifest("opaque_workload", "opaque.tar")),
-        create_single_chunk_response("opaque.tar", VALID_TAR),
+        create_single_chunk_response(opaque_isolate_type("opaque_workload"), VALID_TAR),
         create_all_packages_loaded_response(),
     ];
     let mut ctx = setup_test_context_without_setup_client(responses).await;
@@ -515,7 +631,7 @@ async fn test_opaque_isolates_and_setup_client_behavior() {
     let responses = vec![
         create_ratified_response(create_ratified_manifest("ratified_workload", "ratified.tar")),
         create_opaque_response(OpaqueIsolateManifest::default()),
-        create_single_chunk_response("ratified.tar", VALID_TAR),
+        create_single_chunk_response(ratified_isolate_type("ratified_workload"), VALID_TAR),
         create_all_packages_loaded_response(),
     ];
     let mut ctx = setup_test_context_without_setup_client(responses).await;
@@ -527,7 +643,7 @@ async fn test_opaque_isolates_and_setup_client_behavior() {
     }
 
     let res = ctx.get_last_load_result().await;
-    assert_eq!(res.package_name, "ratified.tar");
+    assert_eq!(res.isolate_type, Some(ratified_isolate_type("ratified_workload")));
     assert!(!res.success);
     assert_eq!(res.load_isolates_error, LoadIsolatesError::ValidationFailure as i32);
     assert!(res.validate_isolate_endorsement_result.is_none());
@@ -562,28 +678,30 @@ async fn test_write_package_to_disk_io_failure() {
 }
 
 #[tokio::test]
-async fn test_duplicate_package_filename_across_manifests() {
-    // Duplicate package_filename across ratified and opaque manifests.
+async fn test_duplicate_descriptors_across_manifests() {
+    // Shared package_filename across different IsolateTypes succeeds because packages
+    // are stored under per-IsolateType directories.
     let responses = vec![
         create_ratified_response(create_ratified_manifest("ratified_wl", "shared.tar")),
         create_opaque_response(create_opaque_manifest("opaque_wl", "shared.tar")),
+        create_single_chunk_response(ratified_isolate_type("ratified_wl"), VALID_TAR),
+        create_single_chunk_response(opaque_isolate_type("opaque_wl"), VALID_TAR),
+        create_all_packages_loaded_response(),
     ];
     let mut ctx = setup_test_context(responses).await;
-    assert_load_failed(
-        ctx.client.load_packages().await,
-        LoadIsolatesError::ManifestParsingFailure,
-        "Duplicate package_filename 'shared.tar' found across manifests",
-    );
+    let indices = ctx
+        .client
+        .load_packages()
+        .await
+        .expect("Shared package_filename across different IsolateTypes should succeed");
+    assert_eq!(indices.len(), 2);
 
-    // Duplicate package_filename within the same manifest.
-    let mut ratified = create_ratified_manifest("ratified_1", "duplicate.tar");
+    // Duplicate isolate_type within the same manifest.
+    let mut ratified = create_ratified_manifest("ratified_1", "pkg_1.tar");
     ratified.ratified_isolate_descriptors.push(RatifiedIsolateDescriptor {
-        isolate_type: Some(common_proto::enforcer::v2::IsolateType {
-            isolate_name: "ratified_2".to_string(),
-            publisher_id: "EZ_Trusted".to_string(),
-        }),
-        package_filename: "duplicate.tar".to_string(),
-        binary_filename: "main_ratified_2".to_string(),
+        isolate_type: Some(ratified_isolate_type("ratified_1")),
+        package_filename: "pkg_2.tar".to_string(),
+        binary_filename: "main_ratified_1".to_string(),
         ..Default::default()
     });
     let responses = vec![
@@ -594,6 +712,9 @@ async fn test_duplicate_package_filename_across_manifests() {
     assert_load_failed(
         ctx.client.load_packages().await,
         LoadIsolatesError::ManifestParsingFailure,
-        "Duplicate package_filename 'duplicate.tar' found across manifests",
+        &format!(
+            "Duplicate Isolate '{:?}' found across manifests",
+            ratified_isolate_type("ratified_1")
+        ),
     );
 }

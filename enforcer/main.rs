@@ -19,7 +19,9 @@ use container_manager::{ContainerManager, ContainerManagerArgs, ManifestSource};
 use container_manager_requester::ContainerManagerRequester;
 use data_scope::manifest_validator::ManifestValidator;
 use data_scope::requester::DataScopeRequester;
+#[cfg(feature = "debug")]
 use diagnostics::{EnforcerDiagnosticService, EnforcerPprofService, TokioDiagnosticService};
+#[cfg(feature = "debug")]
 use diagnostics_proto::enforcer::diagnostics::v1::diagnostic_service_server::DiagnosticServiceServer;
 use external_proxy_connector::{ExternalProxyChannel, ExternalProxyConnector};
 use ez_service_proto::enforcer::v1::ez_public_api_server::EzPublicApiServer;
@@ -31,9 +33,9 @@ use isolate_ez_service_manager::{IsolateEzServiceManager, IsolateEzServiceManage
 use isolate_service_mapper::IsolateServiceMapper;
 use junction::IsolateJunction;
 use logging::logger;
-use manifest_parser::v1::{parse_isolate_runtime_configs, parse_manifest};
-use manifest_parser::v2::SetupManifest;
+use manifest_parser::v1::parse_isolate_runtime_configs;
 use metrics::setup_otel_metrics;
+use node_bootstrap::{NodeBootstrap, NodeBootstrapConfig};
 use outbound_ez_to_ez_client::OutboundEzToEzClient;
 use outbound_ez_to_ez_handler::OutboundEzToEzHandler;
 use public_api::EzPublicApiService;
@@ -45,6 +47,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+#[cfg(feature = "debug")]
 use std::sync::Arc;
 use tokio::net::UnixListener;
 use tokio_stream::wrappers::UnixListenerStream;
@@ -163,6 +166,16 @@ struct EnforcerInputs {
 
     #[arg(
         long,
+        default_value_t = false,
+        help = "Obtain the EZ-to-EZ mTLS certificate from a remote service through the Setup Isolate instead of \
+                reading the pre-provisioned key and CSR from disk. The key pair and CSR are \
+                generated in Enforcer memory, and --mtls_key_path/--mtls_leaf_csr_path are \
+                ignored. Requires --enable_mtls, a non-empty --operator_role, and a Setup Isolate."
+    )]
+    enable_tls_cert_remote_fetch: bool,
+
+    #[arg(
+        long,
         default_value_t = 5,
         help = "Timeout in seconds for the inbound EZ-to-EZ TLS handshake."
     )]
@@ -220,6 +233,12 @@ struct EnforcerInputs {
     pub use_manifest_v2: bool,
     #[arg(long, help = "Path to setup isolate manifest JSON file (v2)")]
     pub setup_isolate_manifest_path: Option<String>,
+    #[arg(
+        long,
+        required = false,
+        help = "Address of the EzManagementService used to dynamically load Isolate manifests and packages. Supports both UDS ('unix:' prefixed) and network addresses. Required when use_manifest_v2 is true."
+    )]
+    pub ez_management_address: Option<String>,
 }
 
 enum Endpoint {
@@ -250,13 +269,23 @@ fn main() -> anyhow::Result<()> {
             e
         })?;
 
+        #[cfg(not(feature = "debug"))]
+        let console_subscriber_port: Option<u16> = None;
+        #[cfg(feature = "debug")]
+        let console_subscriber_port = enforcer_inputs.console_subscriber_port;
+
         let _otel_traces = traces::setup_telemetry(
             traces::ENFORCER_SERVICE_NAME,
             &enforcer_inputs.otel_traces_endpoint,
-            &enforcer_inputs.console_subscriber_port,
+            &console_subscriber_port,
             enforcer_inputs.sampler_probability,
         )
         .await?;
+
+        #[cfg(not(feature = "debug"))]
+        if enforcer_inputs.console_subscriber_port.is_some() {
+            tracing::warn!("--console_subscriber_port is ignored in production optimized builds. DiagnosticService and tokio-console remain strictly disabled.");
+        }
 
         let data_scope_requester =
             DataScopeRequester::new(enforcer_inputs.sensitive_session_threshold);
@@ -287,6 +316,7 @@ fn main() -> anyhow::Result<()> {
             isolate_state_manager.clone(),
             manifest_validator.clone(),
             enforcer_inputs.shm_payload_threshold,
+            enforcer_inputs.max_decoding_message_size,
         );
 
         let health_manager = HealthManager::new(
@@ -306,7 +336,8 @@ fn main() -> anyhow::Result<()> {
         )
         .await;
 
-        let diagnostics_service = if let Some(port) = enforcer_inputs.console_subscriber_port {
+        #[cfg(feature = "debug")]
+        let diagnostics_service = if let Some(port) = console_subscriber_port {
             let console_helper_endpoint = format!(
                 "http://[{}]:{}",
                 std::net::Ipv6Addr::LOCALHOST,
@@ -332,6 +363,7 @@ fn main() -> anyhow::Result<()> {
         let public_api_handle = tokio::spawn(async move {
             launch_ez_public_api_server(
                 ez_public_api,
+                #[cfg(feature = "debug")]
                 diagnostics_service,
                 &socket_addr_str,
                 max_decoding_message_size,
@@ -351,30 +383,10 @@ fn main() -> anyhow::Result<()> {
             let csr_path = enforcer_inputs.mtls_leaf_csr_path.as_ref().context(
                 "mTLS enabled but mtls_leaf_csr_path is missing.",
             )?;
-            let boot_manifest = if enforcer_inputs.use_manifest_v2 {
-                let setup_path = enforcer_inputs.setup_isolate_manifest_path.as_deref().context(
-                    "setup_isolate_manifest_path is required when use_manifest_v2 is true",
-                )?;
-                let setup_manifest = SetupManifest::load_from_path(setup_path)
-                    .context("couldn't parse SetupIsolateManifest for mTLS SNI")?;
-                mtls::mtls::BootManifest::V2(setup_manifest)
-            } else {
-                let manifest_path = enforcer_inputs
-                    .manifest_path
-                    .clone()
-                    .context("manifest_path is required when use_manifest_v2 is false")?;
-                let ez_manifest = parse_manifest(manifest_path)
-                    .context("couldn't parse EzManifest for mTLS SNI")?;
-                mtls::mtls::BootManifest::V1(ez_manifest)
-            };
-            // In V2, only the Setup Isolate SNI is registered at boot; workload SNIs are reported
-            // via `mtls_manager.report_snis(...)` once loaded dynamically.
-            let isolate_identities = mtls::mtls::load_initial_snis(&boot_manifest);
             let config = mtls::mtls::EzMtlsManagerConfig {
                 mtls_key_path: key_path.clone(),
                 csr_path: csr_path.clone(),
                 proxy_address: proxy_address.clone(),
-                isolate_identities,
             };
             let mtls_manager = mtls::mtls::EzMtlsManager::build(config).await.context("Failed to bootstrap EzMtlsManager. mTLS connection must be successful.")?;
             let acceptor = mtls_manager.create_tls_acceptor().await.context("Failed to create TLS acceptor")?;
@@ -422,6 +434,8 @@ fn main() -> anyhow::Result<()> {
                         ez_to_ez_outbound_address,
                         metrics::ez_to_ez_outbound::EzToEzOutboundMetrics::default(),
                         outbound_tls_config,
+                        enforcer_inputs.enable_mtls,
+                        max_decoding_message_size,
                     )
                     .await?,
                 ))
@@ -476,7 +490,7 @@ fn main() -> anyhow::Result<()> {
         let container_manager_args = ContainerManagerArgs {
             isolate_junction: Box::new(isolate_junction.clone()),
             container_manager_request_rx,
-            isolate_state_manager,
+            isolate_state_manager: isolate_state_manager.clone(),
             isolate_service_mapper,
             isolate_ez_service_mngr,
             manifest_validator,
@@ -504,6 +518,25 @@ fn main() -> anyhow::Result<()> {
                 .await
                 .context("container manager failed")?;
 
+        // With v2 manifests only the Setup Isolate is booted at startup, the rest of the Isolates are
+        // loaded after the EZ Node has bootstrapped.
+        if enforcer_inputs.use_manifest_v2 {
+            let ez_management_address = enforcer_inputs
+                .ez_management_address
+                .clone()
+                .context("ez_management_address is required when use_manifest_v2 is true")?;
+            let node_bootstrap = NodeBootstrap::new(
+                isolate_state_manager.clone(),
+                container_manager_requester.clone(),
+                NodeBootstrapConfig { ez_management_address, max_decoding_message_size },
+            );
+            tokio::spawn(async move {
+                if let Err(e) = node_bootstrap.run().await {
+                    log::error!("FATAL: EZ Node bootstrap failed: {:?}", e);
+                }
+            });
+        }
+
         if enforcer_inputs.health_manager_interval_secs > 0 {
             health_manager.run_in_background(tokio::time::Duration::from_secs(
                 enforcer_inputs.health_manager_interval_secs,
@@ -530,7 +563,7 @@ fn main() -> anyhow::Result<()> {
 
 async fn launch_ez_public_api_server(
     ez_public_api: EzPublicApiService,
-    diagnostics_service: Option<EnforcerDiagnosticService>,
+    #[cfg(feature = "debug")] diagnostics_service: Option<EnforcerDiagnosticService>,
     socket_addr_str: &str,
     max_decoding_message_size: usize,
 ) {
@@ -543,13 +576,16 @@ async fn launch_ez_public_api_server(
         panic!("Failed to parse PublicApi socket address '{socket_addr_str}': {e}")
     });
 
-    let mut server_builder = Server::builder().add_service(
+    let server_builder = Server::builder().add_service(
         EzPublicApiServer::new(ez_public_api).max_decoding_message_size(max_decoding_message_size),
     );
 
-    if let Some(diag_service) = diagnostics_service {
-        server_builder = server_builder.add_service(DiagnosticServiceServer::new(diag_service));
-    }
+    #[cfg(feature = "debug")]
+    let server_builder = if let Some(diag_service) = diagnostics_service {
+        server_builder.add_service(DiagnosticServiceServer::new(diag_service))
+    } else {
+        server_builder
+    };
 
     let result = match endpoint {
         Endpoint::Tcp(addr) => {

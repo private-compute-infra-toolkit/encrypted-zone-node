@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use anyhow::Result;
+use common_proto::enforcer::v2::IsolateType;
 use container_manager_requester::ContainerManagerRequester;
 use data_scope::{
     manifest_validator::ManifestValidator,
@@ -269,7 +270,7 @@ async fn test_metrics_server_reception() {
                     allowed_attributes: vec![],
                 }],
             },
-            isolate_type: isolate_info::IsolateType {
+            isolate_type: IsolateType {
                 isolate_name: TEST_ISOLATE_NAME.to_string(),
                 publisher_id: TEST_PUBLISHER_ID.to_string(),
             },

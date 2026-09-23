@@ -1,0 +1,29 @@
+{
+  "ratified_isolate_descriptors": [
+    {
+      "isolate_type": {
+        "isolate_name": "crypto_oracle",
+        "publisher_id": "pcit-release-bot@google.com"
+      },
+      "package_filename": "enforcer/container/test_data/test_binary.tar",
+      "binary_filename": "/usr/local/bin/main",
+      "command_line_arguments": [""],
+      "service_specs": [
+        {
+          "service_name": "Greeter",
+          "method_specs": [
+            {
+              "method_name": "SayHello",
+              "input_scope_types": ["DATA_SCOPE_TYPE_PUBLIC"],
+              "output_scope_types": ["DATA_SCOPE_TYPE_PUBLIC"]
+            }
+          ]
+        }
+      ],
+      "ez_backend_dependencies": [],
+      "startup_parameters": {
+        "number_of_isolates": 1
+      }
+    }
+  ]
+}

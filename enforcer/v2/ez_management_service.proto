@@ -17,6 +17,7 @@ syntax = "proto3";
 package enforcer.v2;
 
 import "enforcer/v1/isolate_endorsement.proto";
+import "enforcer/v2/common.proto";
 import "enforcer/v2/opaque_isolate_manifest.proto";
 import "enforcer/v2/ratified_isolate_manifest.proto";
 
@@ -53,8 +54,8 @@ message AllPackagesLoadedResponse {
 
 // Result of processing a package load request.
 message LoadIsolatesResult {
-  // Identifier for the package that this result corresponds to.
-  string package_name = 1;
+  // Identifies the Isolate whose package this result corresponds to.
+  IsolateType isolate_type = 1;
   // Indicates whether loading succeeded without any errors.
   bool success = 2;
   // Result of validating an isolate endorsement.
@@ -105,10 +106,12 @@ message LoadIsolatesResponse {
 
 // A chunk of an isolate package containing the filesystem tarball.
 message IsolatePackageChunk {
-  // Identifier for the package being processed. Useful for parallel processing
-  // without relying on strict sequence ordering. Expected to be provided only
-  // in the first chunk. This should match the package_filename in the isolate_manifest.
-  string package_name = 1;
+  // Uniquely identifies the Isolate whose package is being streamed. Useful
+  // for parallel processing without relying on strict sequence ordering. Must
+  // be provided in the first chunk (where chunk_sequence = 0); subsequent
+  // chunks may either repeat the same value or leave it unset. This must match
+  // the isolate_type of a descriptor in one of the isolate manifests.
+  IsolateType isolate_type = 1;
   // Sequence number for this chunk, starting from 0.
   int32 chunk_sequence = 2;
   // Chunk of the isolate package tarball as bytes. oci_bundle must be provided

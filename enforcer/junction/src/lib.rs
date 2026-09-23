@@ -91,6 +91,7 @@ pub struct IsolateJunction {
     manifest_validator: ManifestValidator,
     metrics: JunctionMetrics,
     shm_payload_threshold: u64,
+    max_decoding_message_size: usize,
 }
 
 #[tonic::async_trait]
@@ -161,7 +162,8 @@ impl Junction for IsolateJunction {
                 // Drop the key/value reference immediately after the clone() to release any locks.
                 drop(isolate_channel_pool_ref);
 
-                let mut client = EzIsolateBridgeClient::new(isolate_channel_pool.next_channel());
+                let mut client = EzIsolateBridgeClient::new(isolate_channel_pool.next_channel())
+                    .max_decoding_message_size(self.max_decoding_message_size);
 
                 // Attempt to transport any inline data to the pre-allocated shared bounds
                 self.write_request_payload_to_shm(
@@ -524,7 +526,8 @@ impl IsolateJunction {
         // Drop the key/value reference immediately after the `clone()` to release any locks.
         drop(isolate_channel_pool_ref);
 
-        let mut client = EzIsolateBridgeClient::new(isolate_channel_pool.next_channel());
+        let mut client = EzIsolateBridgeClient::new(isolate_channel_pool.next_channel())
+            .max_decoding_message_size(self.max_decoding_message_size);
 
         let mut request = tonic::Request::new(outbound_stream);
         if let Some(t) = timeout {
@@ -537,6 +540,7 @@ impl IsolateJunction {
         Ok(invoke_isolate_response_stream)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         data_scope_requester: DataScopeRequester,
         isolate_service_mapper: IsolateServiceMapper,
@@ -545,6 +549,7 @@ impl IsolateJunction {
         state_manager: IsolateStateManager,
         manifest_validator: ManifestValidator,
         shm_payload_threshold: u64,
+        max_decoding_message_size: usize,
     ) -> Self {
         let metrics = JunctionMetrics::default();
         Self {
@@ -557,6 +562,7 @@ impl IsolateJunction {
             manifest_validator,
             metrics,
             shm_payload_threshold,
+            max_decoding_message_size,
         }
     }
 

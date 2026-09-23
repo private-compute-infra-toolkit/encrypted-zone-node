@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use data_scope_proto::enforcer::v1::DataScopeType;
 use enforcer_proto::enforcer::v1::{InvokeIsolateRequest, InvokeIsolateResponse};
 use ez_error::EzError;
 use isolate_info::IsolateId;
@@ -22,7 +23,8 @@ use payload_proto::enforcer::v1::{
 use prost::Message;
 use setup_isolate_client::SetupIsolateClient;
 use setup_isolate_proto::enforcer::v2::{
-    ValidateIsolateEndorsementRequest, ValidateIsolateEndorsementResponse, Validity,
+    FetchTlsCertificateRequest, FetchTlsCertificateResponse, ValidateIsolateEndorsementRequest,
+    ValidateIsolateEndorsementResponse, Validity,
 };
 use setup_isolate_proto::timestamp_proto::google::protobuf::Timestamp;
 use std::sync::Arc;
@@ -59,6 +61,7 @@ async fn test_validate_isolate_endorsement_success() {
         Box::new(junction),
         "PCIT".to_string(),
         "setup-isolate".to_string(),
+        "SetupService".to_string(),
     );
     let req = ValidateIsolateEndorsementRequest { ..Default::default() };
     let res = client.validate_isolate_endorsement(req).await.expect("RPC failed");
@@ -68,15 +71,71 @@ async fn test_validate_isolate_endorsement_success() {
 
     let invoked = last_request.lock().unwrap().clone().expect("No request invoked");
     let cpm = invoked.control_plane_metadata.expect("Missing metadata");
-    assert_eq!(cpm.destination_method_name, "ValidateIsolateEndorsement");
+    assert_eq!(cpm.destination_operator_domain, "PCIT");
     assert_eq!(cpm.destination_publisher_id, "PCIT");
     assert_eq!(cpm.destination_isolate_name, "setup-isolate");
+    assert_eq!(cpm.destination_service_name, "SetupService");
+    assert_eq!(cpm.destination_method_name, "ValidateIsolateEndorsement");
+
+    let iscope = invoked.isolate_input_iscope.expect("Missing input scope");
+    let scope_types: Vec<i32> = iscope.datagram_iscopes.iter().map(|s| s.scope_type).collect();
+    assert_eq!(scope_types, vec![DataScopeType::Public as i32]);
+}
+
+#[tokio::test]
+async fn test_fetch_mtls_certificate_success() {
+    let expected_res = FetchTlsCertificateResponse {
+        certificate_chain: vec![b"leaf-der".to_vec(), b"intermediate-der".to_vec()],
+        trust_anchors: vec![b"root-der".to_vec()],
+    };
+
+    let junction =
+        MockJunction::new(Ok(create_valid_invoke_response(expected_res.encode_to_vec())));
+    let last_request = junction.last_request.clone();
+    let client = SetupIsolateClient::new(
+        Box::new(junction),
+        "PCIT".to_string(),
+        "setup-isolate".to_string(),
+        "SetupService".to_string(),
+    );
+    let req =
+        FetchTlsCertificateRequest { signed_certificate_signing_request: b"csr-der".to_vec() };
+    let res = client.fetch_mtls_certificate(req.clone()).await.expect("RPC failed");
+
+    assert_eq!(res, expected_res);
+
+    // The CSR must reach the setup isolate unmodified.
+    let invoked = last_request.lock().unwrap().clone().expect("No request invoked");
+    let cpm = invoked.control_plane_metadata.expect("Missing metadata");
+    assert_eq!(cpm.destination_operator_domain, "PCIT");
+    assert_eq!(cpm.destination_publisher_id, "PCIT");
+    assert_eq!(cpm.destination_isolate_name, "setup-isolate");
+    assert_eq!(cpm.destination_service_name, "SetupService");
+    assert_eq!(cpm.destination_method_name, "FetchMtlsCertificate");
+
+    let iscope = invoked.isolate_input_iscope.expect("Missing input scope");
+    let scope_types: Vec<i32> = iscope.datagram_iscopes.iter().map(|s| s.scope_type).collect();
+    assert_eq!(scope_types, vec![DataScopeType::Public as i32]);
+
+    let input = invoked.isolate_input.expect("Missing isolate input");
+    let datagram = match input.delivery_method {
+        Some(DeliveryMethod::InlineData(data)) => {
+            data.datagrams.into_iter().next().expect("Missing input datagram")
+        }
+        _ => panic!("Expected inline data in isolate request"),
+    };
+    assert_eq!(FetchTlsCertificateRequest::decode(&*datagram).expect("Failed to decode"), req);
 }
 
 #[tokio::test]
 async fn test_junction_error() {
     let junction = MockJunction::new(Err("junction failure".to_string()));
-    let client = SetupIsolateClient::new(Box::new(junction), "p".to_string(), "i".to_string());
+    let client = SetupIsolateClient::new(
+        Box::new(junction),
+        "p".to_string(),
+        "i".to_string(),
+        "s".to_string(),
+    );
     let res =
         client.validate_isolate_endorsement(ValidateIsolateEndorsementRequest::default()).await;
     let err_msg = res.as_ref().unwrap_err().to_string();
@@ -89,7 +148,12 @@ async fn test_junction_error() {
 async fn test_missing_isolate_output() {
     let junction =
         MockJunction::new(Ok(InvokeIsolateResponse { isolate_output: None, ..Default::default() }));
-    let client = SetupIsolateClient::new(Box::new(junction), "p".to_string(), "i".to_string());
+    let client = SetupIsolateClient::new(
+        Box::new(junction),
+        "p".to_string(),
+        "i".to_string(),
+        "s".to_string(),
+    );
     let res =
         client.validate_isolate_endorsement(ValidateIsolateEndorsementRequest::default()).await;
     assert_eq!(res.as_ref().unwrap_err().to_string(), "Missing isolate output");
@@ -101,7 +165,12 @@ async fn test_invalid_delivery_method() {
         isolate_output: Some(EzHybridPayload { delivery_method: None }),
         ..Default::default()
     }));
-    let client = SetupIsolateClient::new(Box::new(junction), "p".to_string(), "i".to_string());
+    let client = SetupIsolateClient::new(
+        Box::new(junction),
+        "p".to_string(),
+        "i".to_string(),
+        "s".to_string(),
+    );
     let res =
         client.validate_isolate_endorsement(ValidateIsolateEndorsementRequest::default()).await;
     assert_eq!(res.as_ref().unwrap_err().to_string(), "Expected inline data in isolate response");
@@ -115,7 +184,12 @@ async fn test_missing_datagram() {
         }),
         ..Default::default()
     }));
-    let client = SetupIsolateClient::new(Box::new(junction), "p".to_string(), "i".to_string());
+    let client = SetupIsolateClient::new(
+        Box::new(junction),
+        "p".to_string(),
+        "i".to_string(),
+        "s".to_string(),
+    );
 
     let res =
         client.validate_isolate_endorsement(ValidateIsolateEndorsementRequest::default()).await;
@@ -125,7 +199,12 @@ async fn test_missing_datagram() {
 #[tokio::test]
 async fn test_decode_error() {
     let junction = MockJunction::new(Ok(create_valid_invoke_response(vec![0xFF, 0xFF]))); // Invalid protobuf
-    let client = SetupIsolateClient::new(Box::new(junction), "p".to_string(), "i".to_string());
+    let client = SetupIsolateClient::new(
+        Box::new(junction),
+        "p".to_string(),
+        "i".to_string(),
+        "s".to_string(),
+    );
     let res =
         client.validate_isolate_endorsement(ValidateIsolateEndorsementRequest::default()).await;
     assert!(

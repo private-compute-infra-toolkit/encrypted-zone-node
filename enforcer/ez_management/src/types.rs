@@ -28,6 +28,8 @@ pub enum EzManagementError {
     IoError(#[from] std::io::Error),
     #[error("Failed to load isolates ({0:?}): {1}")]
     LoadIsolatesFailed(LoadIsolatesError, String),
+    #[error("Incomplete packages loaded: expected {expected}, received {received}")]
+    IncompletePackagesLoaded { expected: usize, received: usize },
     #[error("Internal error: {0}")]
     InternalError(String),
 }

@@ -30,6 +30,7 @@ rust_library(
         "//enforcer/v1:ez_to_ez_service_rust",
         "//enforcer/v1:payload_rust",
         "@crates//:anyhow",
+        "@crates//:arc-swap",
         "@crates//:boring",
         "@crates//:log",
         "@crates//:prost",
@@ -81,6 +82,7 @@ rust_library(
     srcs = ["src/outbound_ez_to_ez_client.rs"],
     visibility = ["//visibility:public"],
     deps = [
+        ":mtls",
         "//enforcer/v1:enforcer_rust",
         "@crates//:anyhow",
         "@crates//:dyn-clone",
@@ -183,7 +185,6 @@ rust_library(
         "//enforcer/v1:ez_mtls_rust",
         "//enforcer/v1:manifest_rust",
         "@crates//:anyhow",
-        "@crates//:arc-swap",
         "@crates//:boring",
         "@crates//:log",
         "@crates//:sha2",

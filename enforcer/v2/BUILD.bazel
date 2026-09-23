@@ -376,6 +376,7 @@ proto_library(
     srcs = ["ez_management_service.proto"],
     visibility = ["//visibility:public"],
     deps = [
+        ":common_proto",
         ":opaque_isolate_manifest_proto",
         ":ratified_isolate_manifest_proto",
         "//enforcer/v1:isolate_endorsement_proto",

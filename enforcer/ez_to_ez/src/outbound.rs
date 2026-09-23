@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use anyhow::{anyhow, Result};
+use arc_swap::ArcSwapOption;
 use data_scope_proto::enforcer::v1::{EzDataScope, EzStaticScopeInfo};
 use enforcer_proto::enforcer::v1::{
     ControlPlaneMetadata, EzPayloadIsolateScope, InvokeEzRequest, InvokeEzResponse,
@@ -38,12 +39,7 @@ use tonic::transport::Channel;
 
 const EZ_TO_EZ_CHANNEL_SIZE: usize = 256;
 
-/// Configuration for the outbound EZ-to-EZ mTLS.
-#[derive(Clone)]
-pub struct OutboundTlsConfig {
-    pub factory: mtls::mtls::TlsConnectorFactory,
-    pub trust_domain: String,
-}
+pub use outbound_ez_to_ez_client::OutboundTlsConfig;
 
 /// Handles outbound requests from the local enforcer to remote enforcers.
 #[derive(Clone)]
@@ -51,9 +47,12 @@ pub struct OutboundEzToEzHandler<MetricsImpl: ServiceMetrics> {
     proxy_address: String,
     client_channel_pool: GrpcChannelPool,
     metrics: MetricsImpl,
+    max_decoding_message_size: usize,
 
-    // TLS Config is set to turn on mTLS between Ez-to-Ez.
-    tls_config: Option<OutboundTlsConfig>,
+    // Whether TLS configuration is expected for outbound connections.
+    expect_tls_config: bool,
+    // Outbound TLS configuration, dynamically swappable once fetched.
+    tls_config: Arc<ArcSwapOption<OutboundTlsConfig>>,
     // Map from unique SNI to TLS client channel pool.
     // A connection represents the connection to a unique peer enforcer.
     // Since multiple threads may want to create GrpcChannelPool concurrently,
@@ -66,15 +65,20 @@ impl<MetricsImpl: ServiceMetrics> OutboundEzToEzHandler<MetricsImpl> {
         proxy_address: String,
         metrics: MetricsImpl,
         tls_config: Option<OutboundTlsConfig>,
+        expect_tls_config: bool,
+        max_decoding_message_size: usize,
     ) -> Result<Self> {
         let client_channel_pool = GrpcChannelPool::new_from_env(&proxy_address)
             .await
             .map_err(|e| anyhow!("Failed to connect to EzToEz proxy: {}", e))?;
+        let expect_tls_config = expect_tls_config || tls_config.is_some();
         Ok(Self {
             proxy_address,
             client_channel_pool,
             metrics,
-            tls_config,
+            max_decoding_message_size,
+            expect_tls_config,
+            tls_config: Arc::new(ArcSwapOption::new(tls_config.map(Arc::new))),
             tls_channel_pool: Arc::new(RwLock::new(HashMap::new())),
         })
     }
@@ -120,9 +124,14 @@ impl<MetricsImpl: ServiceMetrics> OutboundEzToEzHandler<MetricsImpl> {
     // This function gets or creates a TLS channel based on the SNI constructed from
     // the Control Plane Metadata.
     async fn get_or_create_channel(&self, meta: Option<&ControlPlaneMetadata>) -> Result<Channel> {
-        // Fallback to default pool if TLS is not configured.
-        let tls_config = match &self.tls_config {
+        let tls_config = match self.tls_config.load_full() {
             Some(config) => config,
+            None if self.expect_tls_config => {
+                return Err(tonic::Status::failed_precondition(
+                    "Outbound mTLS is enabled but certificate has not been fetched yet. Remote calls are disabled.",
+                )
+                .into());
+            }
             None => return Ok(self.client_channel_pool.next_channel()),
         };
         // If TLS is configured, we need metadata to route the request (SNI).
@@ -192,7 +201,8 @@ impl<MetricsImpl: ServiceMetrics> OutboundEzToEzClient for OutboundEzToEzHandler
         let original_metadata = request.control_plane_metadata.clone();
         let ez_call_request = invoke_ez_request_to_ez_call_request(request);
         let channel = self.get_or_create_channel(original_metadata.as_ref()).await?;
-        let mut client = EzToEzApiClient::new(channel);
+        let mut client =
+            EzToEzApiClient::new(channel).max_decoding_message_size(self.max_decoding_message_size);
         let mut tonic_request = tonic::Request::new(ez_call_request);
         if let Some(d) = deadline {
             tonic_request.set_timeout(d.saturating_duration_since(Instant::now()));
@@ -216,7 +226,8 @@ impl<MetricsImpl: ServiceMetrics> OutboundEzToEzClient for OutboundEzToEzHandler
         timeout: Option<std::time::Duration>,
     ) -> Result<mpsc::Receiver<anyhow::Result<InvokeEzResponse>>> {
         let channel = self.get_or_create_channel(first_request_metadata).await?;
-        let mut client = EzToEzApiClient::new(channel);
+        let mut client =
+            EzToEzApiClient::new(channel).max_decoding_message_size(self.max_decoding_message_size);
 
         let channels = metrics::observed_proxy_channel::create_proxy_channels(
             EZ_TO_EZ_CHANNEL_SIZE,
@@ -243,6 +254,16 @@ impl<MetricsImpl: ServiceMetrics> OutboundEzToEzClient for OutboundEzToEzHandler
                 Err(e.into())
             }
         }
+    }
+
+    fn set_tls_config(&self, tls_config: OutboundTlsConfig) -> Result<()> {
+        if self.tls_config.load().is_some() {
+            anyhow::bail!(
+                "set_tls_config must be called only once; tls_config has already been set"
+            );
+        }
+        self.tls_config.store(Some(Arc::new(tls_config)));
+        Ok(())
     }
 }
 

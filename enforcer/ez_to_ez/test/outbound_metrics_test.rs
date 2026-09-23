@@ -34,7 +34,15 @@ async fn test_outbound_stream_metrics() {
     let server_address = format!("http://localhost:{}", port);
 
     let metrics = EzToEzOutboundMetrics::default();
-    let handler = OutboundEzToEzHandler::new(server_address, metrics, None).await.unwrap();
+    let handler = OutboundEzToEzHandler::new(
+        server_address,
+        metrics,
+        /* tls_config= */ None,
+        /* expect_tls_config= */ false,
+        4 * 1024 * 1024,
+    )
+    .await
+    .unwrap();
 
     let first_payload = "hello metrics 1";
     let second_payload = "hello metrics 2";

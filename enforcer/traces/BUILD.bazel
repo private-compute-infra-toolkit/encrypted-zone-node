@@ -13,28 +13,34 @@
 # limitations under the License.
 
 load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("//:build_flavors.bzl", "flavors")
 
 package(default_visibility = ["//enforcer:__subpackages__"])
 
-rust_library(
-    name = "traces",
-    srcs = glob(["src/*.rs"]),
-    visibility = ["//visibility:public"],
-    deps = [
-        "//enforcer/grpc_connector",
-        "@crates//:anyhow",
-        "@crates//:console-subscriber",
-        "@crates//:log",
-        "@crates//:opentelemetry",
-        "@crates//:opentelemetry-otlp",
-        "@crates//:opentelemetry_sdk",
-        "@crates//:tokio",
-        "@crates//:tonic",
-        "@crates//:tracing",
-        "@crates//:tracing-opentelemetry",
-        "@crates//:tracing-subscriber",
-    ],
-)
+[
+    rust_library(
+        name = "traces{}".format(flavor.suffix),
+        srcs = glob(["src/*.rs"]),
+        crate_features = flavor.features,
+        crate_name = "traces",
+        visibility = ["//visibility:public"],
+        deps = [
+            "//enforcer/grpc_connector",
+            "@crates//:anyhow",
+            "@crates//:console-subscriber",
+            "@crates//:log",
+            "@crates//:opentelemetry",
+            "@crates//:opentelemetry-otlp",
+            "@crates//:opentelemetry_sdk",
+            "@crates//:tokio",
+            "@crates//:tonic",
+            "@crates//:tracing",
+            "@crates//:tracing-opentelemetry",
+            "@crates//:tracing-subscriber",
+        ],
+    )
+    for flavor in flavors
+]
 
 rust_test(
     name = "traces_export_test",
@@ -70,7 +76,7 @@ rust_test(
     size = "small",
     srcs = ["test/console_subscriber_test.rs"],
     deps = [
-        ":traces",
+        ":traces_debug",
         "@crates//:console-api",
         "@crates//:tokio",
         "@crates//:tonic",
@@ -83,7 +89,7 @@ rust_test(
     size = "small",
     srcs = ["test/console_subscriber_conflict_test.rs"],
     deps = [
-        ":traces",
+        ":traces_debug",
         "@crates//:tokio",
     ],
 )

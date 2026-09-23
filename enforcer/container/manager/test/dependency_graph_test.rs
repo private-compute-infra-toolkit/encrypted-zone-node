@@ -115,7 +115,8 @@ fn test_validate_isolate_dependency_graph_self_loop() {
 
 #[test]
 fn test_validate_isolate_dependency_graph_cycle_path_in_error() {
-    use isolate_info::{register_isolate_type, IsolateType};
+    use common_proto::enforcer::v2::IsolateType;
+    use isolate_info::register_isolate_type;
 
     let a = BinaryServicesIndex::new(false);
     let b = BinaryServicesIndex::new(false);

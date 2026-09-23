@@ -43,7 +43,7 @@ use isolate_test_utils::{
 };
 use junction_test_utils::FakeJunction;
 use manifest_proto::enforcer::v1::ez_backend_dependency::RouteType;
-use outbound_ez_to_ez_client::OutboundEzToEzClient;
+use outbound_ez_to_ez_client::{OutboundEzToEzClient, OutboundTlsConfig};
 use payload_proto::enforcer::v1::{
     ez_hybrid_payload::DeliveryMethod, EzHybridPayload, EzPayloadData,
 };
@@ -221,6 +221,10 @@ impl OutboundEzToEzClient for MockEzToEzOutboundHandler {
             }
         });
         Ok(to_caller_rx)
+    }
+
+    fn set_tls_config(&self, _tls_config: OutboundTlsConfig) -> anyhow::Result<()> {
+        Ok(())
     }
 }
 
@@ -809,10 +813,25 @@ async fn unary_routes_to_remote_handler() {
 }
 
 #[tokio::test]
-async fn unary_routes_to_remote_handler_with_ez_instance_id() {
+async fn unary_routes_to_remote_handler_with_declared_ez_instance_id() {
     let mut harness = TestHarness::new().await.expect("Harness should start");
     let remote_calls = harness.mock_ez_to_ez.call_count.clone();
     let junction_calls = harness.mock_junction.call_count.clone();
+    let service_info = IsolateServiceInfo {
+        operator_domain: TEST_REMOTE_OPERATOR_DOMAIN.to_string(),
+        service_name: TEST_SERVICE_NAME.to_string(),
+        ..Default::default()
+    };
+    add_backend_dependencies(
+        harness.isolate_id,
+        harness.mapper.clone(),
+        harness.manifest_validator.clone(),
+        &service_info,
+        false,
+        TEST_REMOTE_ROUTE_TYPE,
+    )
+    .await
+    .expect("Failed to add backend dependency");
     add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
         .await
         .expect("Should be able to add to DSM/RIM");
@@ -824,6 +843,102 @@ async fn unary_routes_to_remote_handler_with_ez_instance_id() {
 
     assert_eq!(remote_calls.load(Ordering::SeqCst), 1, "Remote handler should have been called");
     assert_eq!(junction_calls.load(Ordering::SeqCst), 0, "Junction should NOT have been called");
+}
+
+#[tokio::test]
+async fn unary_rejects_ez_instance_id_for_internal_route() {
+    let mut harness = TestHarness::new().await.expect("Harness should start");
+    let remote_calls = harness.mock_ez_to_ez.call_count.clone();
+    let junction_calls = harness.mock_junction.call_count.clone();
+    let service_info = IsolateServiceInfo {
+        operator_domain: TEST_INTERNAL_OPERATOR_DOMAIN.to_string(),
+        service_name: TEST_SERVICE_NAME.to_string(),
+        ..Default::default()
+    };
+    add_backend_dependencies(
+        harness.isolate_id,
+        harness.mapper.clone(),
+        harness.manifest_validator.clone(),
+        &service_info,
+        true,
+        RouteType::Internal,
+    )
+    .await
+    .expect("Failed to add internal backend dependency");
+    add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
+        .await
+        .expect("Should be able to add to DSM/RIM");
+
+    let mut request = create_test_request(TEST_INTERNAL_OPERATOR_DOMAIN, TEST_SERVICE_NAME);
+    request.control_plane_metadata.as_mut().unwrap().destination_ez_instance_id =
+        "some_instance_id".to_string();
+    let response = harness.client.invoke_ez(request).await;
+
+    assert_eq!(response.expect_err("Request should fail").code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        remote_calls.load(Ordering::SeqCst),
+        0,
+        "Remote handler should NOT have been called"
+    );
+    assert_eq!(junction_calls.load(Ordering::SeqCst), 0, "Junction should NOT have been called");
+}
+
+// `destination_ez_instance_id` selects *where* a request is delivered, never
+// *whether* it is allowed. No backend dependency is registered here, so the
+// request must be rejected even though an instance id is pinned.
+#[tokio::test]
+async fn unary_rejects_undeclared_destination_with_ez_instance_id() {
+    let mut harness = TestHarness::new().await.expect("Harness should start");
+    let remote_calls = harness.mock_ez_to_ez.call_count.clone();
+    let junction_calls = harness.mock_junction.call_count.clone();
+    add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
+        .await
+        .expect("Should be able to add to DSM/RIM");
+
+    let mut request = create_test_request(TEST_REMOTE_OPERATOR_DOMAIN, TEST_SERVICE_NAME);
+    request.control_plane_metadata.as_mut().unwrap().destination_ez_instance_id =
+        "some_instance_id".to_string();
+    let response = harness.client.invoke_ez(request).await;
+
+    assert_eq!(response.expect_err("Request should fail").code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        remote_calls.load(Ordering::SeqCst),
+        0,
+        "Remote handler should NOT have been called"
+    );
+    assert_eq!(junction_calls.load(Ordering::SeqCst), 0, "Junction should NOT have been called");
+}
+
+// `destination_ez_instance_id` selects *where* a request is delivered, never
+// *whether* it is allowed. No backend dependency is registered here, so the
+// request must be rejected even though an instance id is pinned.
+#[tokio::test]
+async fn stream_rejects_undeclared_destination_with_ez_instance_id() {
+    let mut harness = TestHarness::new().await.expect("Harness should start");
+    let remote_calls = harness.mock_ez_to_ez.call_count.clone();
+    add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
+        .await
+        .expect("Should be able to add to DSM/RIM");
+
+    let mut request = create_test_request(TEST_REMOTE_OPERATOR_DOMAIN, TEST_SERVICE_NAME);
+    request.control_plane_metadata.as_mut().unwrap().destination_ez_instance_id =
+        "some_instance_id".to_string();
+    let (req_tx, req_rx) = mpsc::channel(CHANNEL_SIZE);
+    req_tx.send(request).await.expect("Should send request successfully");
+    let mut response_stream = harness
+        .client
+        .stream_invoke_ez(ReceiverStream::new(req_rx))
+        .await
+        .expect("Stream should set up")
+        .into_inner();
+    let response = response_stream.message().await;
+
+    assert_eq!(response.expect_err("Stream should fail").code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        remote_calls.load(Ordering::SeqCst),
+        0,
+        "Remote handler should NOT have been called"
+    );
 }
 
 #[tokio::test]
@@ -2952,4 +3067,149 @@ async fn stream_routes_shm_response_to_shm_data() {
         }
         _ => panic!("Expected ShmData delivery method"),
     }
+}
+
+#[tokio::test]
+async fn stream_rejects_midstream_route_mismatch_remote_to_internal() {
+    let mut harness = TestHarness::new().await.expect("Harness should start");
+
+    let expected_remote = IsolateServiceInfo {
+        operator_domain: TEST_REMOTE_OPERATOR_DOMAIN.to_string(),
+        service_name: TEST_SERVICE_NAME.to_string(),
+        ..Default::default()
+    };
+    add_backend_dependencies(
+        harness.isolate_id,
+        harness.mapper.clone(),
+        harness.manifest_validator.clone(),
+        &expected_remote,
+        false,
+        TEST_REMOTE_ROUTE_TYPE,
+    )
+    .await
+    .expect("Failed to add component");
+
+    let mismatched_internal = IsolateServiceInfo {
+        operator_domain: TEST_INTERNAL_OPERATOR_DOMAIN.to_string(),
+        service_name: TEST_SERVICE_NAME.to_string(),
+        ..Default::default()
+    };
+    add_backend_dependencies(
+        harness.isolate_id,
+        harness.mapper.clone(),
+        harness.manifest_validator.clone(),
+        &mismatched_internal,
+        true,
+        TEST_INTERNAL_ROUTE_TYPE,
+    )
+    .await
+    .expect("Failed to add component");
+
+    add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
+        .await
+        .expect("Should be able to add to DSM/RIM");
+
+    let (req_tx, req_rx) = mpsc::channel(CHANNEL_SIZE);
+    req_tx
+        .send(create_test_request(&expected_remote.operator_domain, &expected_remote.service_name))
+        .await
+        .expect("Should be able to send request");
+
+    let mut response_stream = harness
+        .client
+        .stream_invoke_ez(ReceiverStream::new(req_rx))
+        .await
+        .expect("We should be able to setup the stream")
+        .into_inner();
+
+    req_tx
+        .send(create_test_request(
+            &mismatched_internal.operator_domain,
+            &mismatched_internal.service_name,
+        ))
+        .await
+        .expect("Should be able to send mismatched request");
+
+    // Wait for the first response
+    let first_resp = response_stream.message().await;
+    assert!(first_resp.is_ok(), "First request should succeed");
+
+    // Pull second response which should fail due to midstream route mismatch
+    let second_resp = response_stream.message().await;
+    let err = second_resp.expect_err("Second request should error out");
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    assert!(err.message().contains("Mid-stream route mismatch"));
+}
+
+#[tokio::test]
+async fn stream_rejects_midstream_route_mismatch_internal_to_remote() {
+    let mut harness = TestHarness::new().await.expect("Harness should start");
+
+    let expected_internal = IsolateServiceInfo {
+        operator_domain: TEST_INTERNAL_OPERATOR_DOMAIN.to_string(),
+        service_name: TEST_SERVICE_NAME.to_string(),
+        ..Default::default()
+    };
+    add_backend_dependencies(
+        harness.isolate_id,
+        harness.mapper.clone(),
+        harness.manifest_validator.clone(),
+        &expected_internal,
+        true,
+        TEST_INTERNAL_ROUTE_TYPE,
+    )
+    .await
+    .expect("Failed to add component");
+
+    let mismatched_remote = IsolateServiceInfo {
+        operator_domain: TEST_REMOTE_OPERATOR_DOMAIN.to_string(),
+        service_name: TEST_SERVICE_NAME.to_string(),
+        ..Default::default()
+    };
+    add_backend_dependencies(
+        harness.isolate_id,
+        harness.mapper.clone(),
+        harness.manifest_validator.clone(),
+        &mismatched_remote,
+        false,
+        TEST_REMOTE_ROUTE_TYPE,
+    )
+    .await
+    .expect("Failed to add component");
+
+    add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
+        .await
+        .expect("Should be able to add to DSM/RIM");
+
+    let (req_tx, req_rx) = mpsc::channel(CHANNEL_SIZE);
+    req_tx
+        .send(create_test_request(
+            &expected_internal.operator_domain,
+            &expected_internal.service_name,
+        ))
+        .await
+        .expect("Should be able to send request");
+
+    let mut response_stream = harness
+        .client
+        .stream_invoke_ez(ReceiverStream::new(req_rx))
+        .await
+        .expect("We should be able to setup the stream")
+        .into_inner();
+
+    req_tx
+        .send(create_test_request(
+            &mismatched_remote.operator_domain,
+            &mismatched_remote.service_name,
+        ))
+        .await
+        .expect("Should be able to send mismatched request");
+
+    let first_resp = response_stream.message().await;
+    assert!(first_resp.is_ok(), "First request should succeed");
+
+    let second_resp = response_stream.message().await;
+    let err = second_resp.expect_err("Second request should error out");
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    assert!(err.message().contains("Mid-stream route mismatch"));
 }

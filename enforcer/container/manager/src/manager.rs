@@ -15,6 +15,7 @@
 pub mod dependency_graph;
 
 use anyhow::{ensure, Context, Result};
+use common_proto::enforcer::v2::IsolateType;
 use container::{Container, ContainerOptions, ContainerRoot, MountOptions, NetworkOptions};
 use container_manager_request::{
     ContainerManagerRequest, GetRunStatusRequest, GetRunStatusResponse,
@@ -97,6 +98,7 @@ pub struct ContainerManager<ContainerT: Container> {
     operator_role: String,
     isolate_arg_config: IsolateArgConfig,
     setup_isolate_client: Option<Arc<SetupIsolateClient>>,
+    is_manifest_v2: bool,
 }
 
 #[derive(Debug)]
@@ -190,7 +192,7 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             },
         };
 
-        let mut setup_isolate_client = None;
+        let mut setup_isolate_target = None;
         let is_manifest_v1 = matches!(args.manifest_source, ManifestSource::V1 { .. });
         let initial_isolates = match args.manifest_source {
             ManifestSource::V1 { manifest_path } => {
@@ -201,19 +203,24 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             ManifestSource::V2 { setup_isolate_manifest_path } => {
                 let setup_manifest = SetupManifest::load_from_path(setup_isolate_manifest_path)
                     .context("Failed to load v2 setup isolate manifest")?;
-                let sni = setup_manifest.extract_sni_params();
-                setup_isolate_client = Some(Arc::new(SetupIsolateClient::new(
-                    args.isolate_junction.clone(),
-                    sni.publisher_id,
-                    sni.isolate_name,
-                )));
-                vec![setup_manifest
+                let parsed_isolate = setup_manifest
                     .into_parsed_isolate()
-                    .context("Failed to parse setup isolate descriptor")?]
+                    .context("Failed to parse setup isolate descriptor")?;
+                let service_name = parsed_isolate
+                    .service_specs
+                    .first()
+                    .map(|s| s.service_name.clone())
+                    .unwrap_or_default();
+                setup_isolate_target = Some((
+                    parsed_isolate.publisher_id.clone(),
+                    parsed_isolate.isolate_name.clone(),
+                    service_name,
+                ));
+                vec![parsed_isolate]
             }
         };
 
-        let isolate_mngr = Self {
+        let mut isolate_mngr = Self {
             isolate_container_map: Arc::new(DashMap::new()),
             container_startup_args_map: Arc::new(DashMap::new()),
             etc_hosts_written: Arc::new(DashMap::new()),
@@ -230,12 +237,24 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             enable_syscall_filtering: args.enable_syscall_filtering,
             operator_role: args.operator_role.clone(),
             isolate_arg_config,
-            setup_isolate_client,
+            setup_isolate_client: None,
+            is_manifest_v2: !is_manifest_v1,
         };
 
         isolate_mngr.process_and_boot_isolates(initial_isolates).await?;
         if is_manifest_v1 {
             isolate_mngr.state_manager.set_isolates_registered();
+        }
+
+        // Built after the Setup Isolate is registered so that the client can resolve its
+        // BinaryServicesIndex.
+        if let Some((publisher_id, isolate_name, service_name)) = setup_isolate_target {
+            isolate_mngr.setup_isolate_client = Some(Arc::new(SetupIsolateClient::new(
+                isolate_mngr.isolate_junction.clone(),
+                publisher_id,
+                isolate_name,
+                service_name,
+            )));
         }
 
         // Spawn to avoid blocking the constructor
@@ -550,9 +569,10 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             .await
             .context("Failed to get binary services index")?;
 
-        // TODO: Perform attestation for Ratified Isolates
         ensure!(
-            binary_services_index.is_ratified_binary() == publisher_id.eq(RATIFIED_ISOLATE_DOMAIN),
+            self.is_manifest_v2
+                || binary_services_index.is_ratified_binary()
+                    == publisher_id.eq(RATIFIED_ISOLATE_DOMAIN),
             "Provided Package domain is incorrect {}",
             publisher_id
         );
@@ -791,7 +811,7 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
                 isolate_fifo_path: isolate_ez_bridge_ready_enforcer_side_fifo_path,
                 otel_metrics_address: otlp_metrics_enforcer_side_uds_path,
                 metrics_policy: container_startup_args.metrics_policy,
-                isolate_type: isolate_info::IsolateType {
+                isolate_type: IsolateType {
                     isolate_name: container_startup_args.isolate_name.clone(),
                     publisher_id: container_startup_args.publisher_id,
                 },

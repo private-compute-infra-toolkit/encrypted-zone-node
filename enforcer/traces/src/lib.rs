@@ -99,6 +99,7 @@ pub async fn setup_telemetry(
 
     // 2. Initialize console_subscriber IF a port is provided, independent of OpenTelemetry.
     // This starts the gRPC server listening on localhost for tokio-console connections.
+    #[cfg(feature = "debug")]
     let console_layer = console_subscriber_port.as_ref().map(|port| {
         let (layer, server) = console_subscriber::ConsoleLayer::builder()
             .server_addr((std::net::Ipv6Addr::LOCALHOST, *port))
@@ -111,6 +112,8 @@ pub async fn setup_telemetry(
         });
         layer
     });
+    #[cfg(not(feature = "debug"))]
+    let console_layer: Option<tracing_subscriber::layer::Identity> = None;
 
     // 3. Register whatever layers were successfully configured.
     // Registry::default() builds the base subscriber. We optionally add our layers to it.
@@ -120,6 +123,11 @@ pub async fn setup_telemetry(
     // We ignore errors here because `set_global_default` will fail if it's called
     // multiple times in the same process, which happens frequently during unit tests.
     let _ = tracing::subscriber::set_global_default(subscriber);
+
+    #[cfg(not(feature = "debug"))]
+    if console_subscriber_port.is_some() {
+        tracing::warn!("--console_subscriber_port is ignored in production optimized builds. tokio-console subscriber remains strictly disabled.");
+    }
 
     Ok(tracer_provider)
 }

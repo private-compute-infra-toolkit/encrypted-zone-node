@@ -452,6 +452,7 @@ pub async fn setup_test_context_with_junction(
         Box::new(junction),
         "EZ_Trusted".to_string(),
         "setup".to_string(),
+        "SetupService".to_string(),
     ));
     setup_test_context_with_client(responses, Some(setup_client)).await
 }
@@ -473,16 +474,32 @@ pub async fn setup_test_context_with_client(
     ctx
 }
 
+pub const RATIFIED_PUBLISHER_ID: &str = "EZ_Trusted";
+pub const OPAQUE_PUBLISHER_ID: &str = "adtech.com";
+
+/// Identity of an Isolate published in the ratified manifest.
+pub fn ratified_isolate_type(isolate_name: &str) -> IsolateType {
+    IsolateType {
+        isolate_name: isolate_name.to_string(),
+        publisher_id: RATIFIED_PUBLISHER_ID.to_string(),
+    }
+}
+
+/// Identity of an Isolate published in the opaque manifest.
+pub fn opaque_isolate_type(isolate_name: &str) -> IsolateType {
+    IsolateType {
+        isolate_name: isolate_name.to_string(),
+        publisher_id: OPAQUE_PUBLISHER_ID.to_string(),
+    }
+}
+
 pub fn create_ratified_manifest(
     isolate_name: &str,
     package_filename: &str,
 ) -> RatifiedIsolateManifest {
     RatifiedIsolateManifest {
         ratified_isolate_descriptors: vec![RatifiedIsolateDescriptor {
-            isolate_type: Some(IsolateType {
-                isolate_name: isolate_name.to_string(),
-                publisher_id: "EZ_Trusted".to_string(),
-            }),
+            isolate_type: Some(ratified_isolate_type(isolate_name)),
             package_filename: package_filename.to_string(),
             binary_filename: format!("main_{isolate_name}"),
             ..Default::default()
@@ -493,10 +510,7 @@ pub fn create_ratified_manifest(
 pub fn create_opaque_manifest(isolate_name: &str, package_filename: &str) -> OpaqueIsolateManifest {
     OpaqueIsolateManifest {
         opaque_isolate_descriptors: vec![OpaqueIsolateDescriptor {
-            isolate_type: Some(IsolateType {
-                isolate_name: isolate_name.to_string(),
-                publisher_id: "adtech.com".to_string(),
-            }),
+            isolate_type: Some(opaque_isolate_type(isolate_name)),
             package_filename: package_filename.to_string(),
             binary_filename: format!("main_{isolate_name}"),
             ..Default::default()
@@ -522,7 +536,7 @@ pub fn create_opaque_response(manifest: OpaqueIsolateManifest) -> LoadIsolatesRe
 }
 
 pub fn create_chunk_response(
-    package_name: &str,
+    isolate_type: Option<IsolateType>,
     chunk_sequence: i32,
     chunk_bytes: &[u8],
     is_last_chunk: bool,
@@ -532,7 +546,7 @@ pub fn create_chunk_response(
         response: Some(load_isolates_response::Response::IsolatePackageChunk(
             IsolatePackageChunk {
                 isolate_package_endorsements: endorsements.to_vec(),
-                package_name: package_name.to_string(),
+                isolate_type,
                 chunk_sequence,
                 package_tar_chunk: chunk_bytes.to_vec(),
                 is_last_chunk,
@@ -542,10 +556,10 @@ pub fn create_chunk_response(
 }
 
 pub fn create_single_chunk_response(
-    package_name: &str,
+    isolate_type: IsolateType,
     chunk_bytes: &[u8],
 ) -> LoadIsolatesResponse {
-    create_chunk_response(package_name, 0, chunk_bytes, true, &[])
+    create_chunk_response(Some(isolate_type), 0, chunk_bytes, true, &[])
 }
 
 pub fn create_all_packages_loaded_response() -> LoadIsolatesResponse {

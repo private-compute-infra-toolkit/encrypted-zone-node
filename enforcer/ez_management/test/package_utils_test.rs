@@ -27,18 +27,23 @@ fn test_calculate_sha256_known_string() {
     assert_eq!(calculate_sha256(b"hello world"), HELLO_WORLD_SHA256);
 }
 
+use common_proto::enforcer::v2::IsolateType;
 use ez_management::package_utils::{
     AssembledPackage, PackageAccumulator, ENV_MAX_PACKAGE_SIZE_BYTES,
 };
 use ez_management_proto::enforcer::v2::IsolatePackageChunk;
 
+fn isolate_type(isolate_name: &str) -> IsolateType {
+    IsolateType { isolate_name: isolate_name.to_string(), publisher_id: "adtech.com".to_string() }
+}
+
 #[test]
 fn test_accumulator_single_chunk() {
     let mut accumulator = PackageAccumulator::new();
-    assert!(accumulator.current_package_name.is_empty());
+    assert!(!accumulator.current_isolate_type.is_some());
 
     let chunk = IsolatePackageChunk {
-        package_name: "test_pkg".to_string(),
+        isolate_type: Some(isolate_type("test_isolate")),
         chunk_sequence: 0,
         package_tar_chunk: b"hello world".to_vec(),
         is_last_chunk: true,
@@ -49,12 +54,12 @@ fn test_accumulator_single_chunk() {
     assert_eq!(
         result,
         Some(AssembledPackage {
-            package_name: "test_pkg".to_string(),
+            isolate_type: isolate_type("test_isolate"),
             package_bytes: b"hello world".to_vec(),
             endorsements: b"test_endorsement".to_vec(),
         })
     );
-    assert!(accumulator.current_package_name.is_empty());
+    assert!(!accumulator.current_isolate_type.is_some());
     assert_eq!(accumulator.expected_sequence, 0);
 }
 
@@ -63,7 +68,7 @@ fn test_accumulator_multi_chunk() {
     let mut accumulator = PackageAccumulator::new();
 
     let chunk0 = IsolatePackageChunk {
-        package_name: "test_pkg".to_string(),
+        isolate_type: Some(isolate_type("test_isolate")),
         chunk_sequence: 0,
         package_tar_chunk: b"chunk_0_data,".to_vec(),
         is_last_chunk: false,
@@ -72,14 +77,14 @@ fn test_accumulator_multi_chunk() {
 
     let res0 = accumulator.push_chunk(chunk0).expect("Chunk 0 should succeed");
     assert!(res0.is_none());
-    assert!(!accumulator.current_package_name.is_empty());
-    assert_eq!(accumulator.current_package_name, "test_pkg");
+    assert!(accumulator.current_isolate_type.is_some());
+    assert_eq!(accumulator.current_isolate_type, Some(isolate_type("test_isolate")));
     assert_eq!(accumulator.buffer, b"chunk_0_data,");
     assert_eq!(accumulator.expected_sequence, 1);
     assert_eq!(accumulator.endorsements, b"endorsements_data");
 
     let chunk1 = IsolatePackageChunk {
-        package_name: "".to_string(), // subsequent chunks can omit package_name
+        isolate_type: None, // subsequent chunks can omit the isolate_type
         chunk_sequence: 1,
         package_tar_chunk: b"chunk_1_data,".to_vec(),
         is_last_chunk: false,
@@ -91,7 +96,7 @@ fn test_accumulator_multi_chunk() {
     assert_eq!(accumulator.expected_sequence, 2);
 
     let chunk2 = IsolatePackageChunk {
-        package_name: "test_pkg".to_string(),
+        isolate_type: Some(isolate_type("test_isolate")),
         chunk_sequence: 2,
         package_tar_chunk: b"chunk_2_data".to_vec(),
         is_last_chunk: true,
@@ -102,21 +107,21 @@ fn test_accumulator_multi_chunk() {
     assert_eq!(
         res2,
         Some(AssembledPackage {
-            package_name: "test_pkg".to_string(),
+            isolate_type: isolate_type("test_isolate"),
             package_bytes: b"chunk_0_data,chunk_1_data,chunk_2_data".to_vec(),
             endorsements: b"endorsements_data".to_vec(),
         })
     );
-    assert!(accumulator.current_package_name.is_empty());
+    assert!(!accumulator.current_isolate_type.is_some());
     assert_eq!(accumulator.expected_sequence, 0);
 }
 
 #[test]
-fn test_accumulator_wrong_name() {
+fn test_accumulator_wrong_isolate_type() {
     let mut accumulator = PackageAccumulator::new();
 
     let chunk0 = IsolatePackageChunk {
-        package_name: "test_pkg".to_string(),
+        isolate_type: Some(isolate_type("test_isolate")),
         chunk_sequence: 0,
         package_tar_chunk: b"hello".to_vec(),
         is_last_chunk: false,
@@ -125,7 +130,7 @@ fn test_accumulator_wrong_name() {
     accumulator.push_chunk(chunk0).unwrap();
 
     let chunk1 = IsolatePackageChunk {
-        package_name: "wrong_pkg".to_string(),
+        isolate_type: Some(isolate_type("wrong_isolate")),
         chunk_sequence: 1,
         package_tar_chunk: b"world".to_vec(),
         is_last_chunk: false,
@@ -133,7 +138,38 @@ fn test_accumulator_wrong_name() {
     };
     let result = accumulator.push_chunk(chunk1);
     assert!(result.is_err());
-    assert!(accumulator.current_package_name.is_empty());
+    assert!(!accumulator.current_isolate_type.is_some());
+}
+
+#[test]
+fn test_accumulator_same_isolate_name_different_publisher_rejected() {
+    let mut accumulator = PackageAccumulator::new();
+
+    let chunk0 = IsolatePackageChunk {
+        isolate_type: Some(IsolateType {
+            isolate_name: "test_isolate".to_string(),
+            publisher_id: "adtech.com".to_string(),
+        }),
+        chunk_sequence: 0,
+        package_tar_chunk: b"hello".to_vec(),
+        is_last_chunk: false,
+        ..Default::default()
+    };
+    accumulator.push_chunk(chunk0).unwrap();
+
+    let chunk1 = IsolatePackageChunk {
+        isolate_type: Some(IsolateType {
+            isolate_name: "test_isolate".to_string(),
+            publisher_id: "other-publisher.com".to_string(),
+        }),
+        chunk_sequence: 1,
+        package_tar_chunk: b"world".to_vec(),
+        is_last_chunk: false,
+        ..Default::default()
+    };
+    let result = accumulator.push_chunk(chunk1);
+    assert!(result.is_err());
+    assert!(!accumulator.current_isolate_type.is_some());
 }
 
 #[test]
@@ -141,7 +177,7 @@ fn test_accumulator_wrong_sequence() {
     let mut accumulator = PackageAccumulator::new();
 
     let chunk0 = IsolatePackageChunk {
-        package_name: "test_pkg".to_string(),
+        isolate_type: Some(isolate_type("test_isolate")),
         chunk_sequence: 0,
         package_tar_chunk: b"hello".to_vec(),
         is_last_chunk: false,
@@ -150,7 +186,7 @@ fn test_accumulator_wrong_sequence() {
     accumulator.push_chunk(chunk0).unwrap();
 
     let chunk_bad = IsolatePackageChunk {
-        package_name: "test_pkg".to_string(),
+        isolate_type: Some(isolate_type("test_isolate")),
         chunk_sequence: 2, // Expected 1
         package_tar_chunk: b"world".to_vec(),
         is_last_chunk: false,
@@ -158,15 +194,15 @@ fn test_accumulator_wrong_sequence() {
     };
     let result = accumulator.push_chunk(chunk_bad);
     assert!(result.is_err());
-    assert!(accumulator.current_package_name.is_empty());
+    assert!(!accumulator.current_isolate_type.is_some());
 }
 
 #[test]
-fn test_accumulator_missing_name_on_first_chunk() {
+fn test_accumulator_missing_isolate_type_on_first_chunk() {
     let mut accumulator = PackageAccumulator::new();
 
     let chunk = IsolatePackageChunk {
-        package_name: "".to_string(),
+        isolate_type: None,
         chunk_sequence: 0,
         package_tar_chunk: b"hello".to_vec(),
         is_last_chunk: false,
@@ -174,7 +210,8 @@ fn test_accumulator_missing_name_on_first_chunk() {
     };
     let result = accumulator.push_chunk(chunk);
     assert!(result.is_err());
-    assert!(accumulator.current_package_name.is_empty());
+    assert!(result.unwrap_err().to_string().contains("without isolate_type"));
+    assert!(!accumulator.current_isolate_type.is_some());
 }
 
 #[test]
@@ -183,7 +220,7 @@ fn test_accumulator_max_size_limit_exceeded() {
     accumulator.max_package_size_bytes = 10;
 
     let chunk0 = IsolatePackageChunk {
-        package_name: "test_pkg".to_string(),
+        isolate_type: Some(isolate_type("test_isolate")),
         chunk_sequence: 0,
         package_tar_chunk: b"12345678".to_vec(), // 8 bytes <= 10 bytes
         is_last_chunk: false,
@@ -192,7 +229,7 @@ fn test_accumulator_max_size_limit_exceeded() {
     accumulator.push_chunk(chunk0).expect("Chunk under limit should succeed");
 
     let chunk1 = IsolatePackageChunk {
-        package_name: "test_pkg".to_string(),
+        isolate_type: Some(isolate_type("test_isolate")),
         chunk_sequence: 1,
         package_tar_chunk: b"12345".to_vec(), // 8 + 5 = 13 bytes > 10 bytes
         is_last_chunk: true,
@@ -202,7 +239,7 @@ fn test_accumulator_max_size_limit_exceeded() {
     assert!(result.is_err());
     let err_str = result.unwrap_err().to_string();
     assert!(err_str.contains("exceeds maximum allowed size"));
-    assert!(accumulator.current_package_name.is_empty());
+    assert!(!accumulator.current_isolate_type.is_some());
 }
 
 #[test]
@@ -212,7 +249,7 @@ fn test_accumulator_max_size_from_env_var() {
     assert_eq!(accumulator.max_package_size_bytes, 15);
 
     let chunk = IsolatePackageChunk {
-        package_name: "test_pkg".to_string(),
+        isolate_type: Some(isolate_type("test_isolate")),
         chunk_sequence: 0,
         package_tar_chunk: vec![0u8; 20], // 20 bytes > 15 bytes
         is_last_chunk: true,
@@ -229,18 +266,18 @@ fn test_accumulator_reset() {
     let mut accumulator = PackageAccumulator::new();
 
     let chunk0 = IsolatePackageChunk {
-        package_name: "test_pkg".to_string(),
+        isolate_type: Some(isolate_type("test_isolate")),
         chunk_sequence: 0,
         package_tar_chunk: b"hello".to_vec(),
         is_last_chunk: false,
         isolate_package_endorsements: b"endorsement".to_vec(),
     };
     accumulator.push_chunk(chunk0).unwrap();
-    assert!(!accumulator.current_package_name.is_empty());
+    assert!(accumulator.current_isolate_type.is_some());
 
     accumulator.reset();
-    assert!(accumulator.current_package_name.is_empty());
-    assert_eq!(accumulator.current_package_name, "");
+    assert!(!accumulator.current_isolate_type.is_some());
+    assert_eq!(accumulator.current_isolate_type, None);
     assert_eq!(accumulator.buffer, b"");
     assert_eq!(accumulator.expected_sequence, 0);
     assert_eq!(accumulator.endorsements, b"");
@@ -261,7 +298,7 @@ fn test_accumulator_invalid_env_var() {
 fn test_accumulator_endorsements_on_chunk_nonzero_rejected() {
     let mut accumulator = PackageAccumulator::new();
     let chunk0 = IsolatePackageChunk {
-        package_name: "test_pkg".to_string(),
+        isolate_type: Some(isolate_type("test_isolate")),
         chunk_sequence: 0,
         package_tar_chunk: b"chunk0".to_vec(),
         is_last_chunk: false,
@@ -270,7 +307,7 @@ fn test_accumulator_endorsements_on_chunk_nonzero_rejected() {
     accumulator.push_chunk(chunk0).unwrap();
 
     let chunk1 = IsolatePackageChunk {
-        package_name: "test_pkg".to_string(),
+        isolate_type: Some(isolate_type("test_isolate")),
         chunk_sequence: 1,
         package_tar_chunk: b"chunk1".to_vec(),
         is_last_chunk: true,

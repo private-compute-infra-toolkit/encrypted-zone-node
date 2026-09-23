@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::types::EzManagementError;
+use common_proto::enforcer::v2::IsolateType;
 use ez_management_proto::enforcer::v2::IsolatePackageChunk;
 use sha2::{Digest, Sha256};
 
@@ -25,9 +26,9 @@ pub const ENV_MAX_PACKAGE_SIZE_BYTES: &str = "EZ_MAX_PACKAGE_SIZE_BYTES";
 pub const DEFAULT_MAX_PACKAGE_SIZE_BYTES: usize = 512 * 1024 * 1024; // 512 MB
 
 /// An assembled isolate package containing all accumulated chunks and metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct AssembledPackage {
-    pub package_name: String,
+    pub isolate_type: IsolateType,
     pub package_bytes: Vec<u8>,
     pub endorsements: Vec<u8>,
 }
@@ -35,7 +36,7 @@ pub struct AssembledPackage {
 /// Accumulator for streaming chunks of an isolate package.
 #[derive(Debug, Clone)]
 pub struct PackageAccumulator {
-    pub current_package_name: String,
+    pub current_isolate_type: Option<IsolateType>,
     pub buffer: Vec<u8>,
     pub expected_sequence: i32,
     pub endorsements: Vec<u8>,
@@ -48,7 +49,7 @@ impl PackageAccumulator {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
-            current_package_name: String::new(),
+            current_isolate_type: None,
             buffer: Vec::new(),
             expected_sequence: 0,
             endorsements: Vec::new(),
@@ -56,15 +57,22 @@ impl PackageAccumulator {
         }
     }
 
+    /// Returns true while the chunks of a package are still being accumulated.
+    pub(crate) fn is_package_in_progress(&self) -> bool {
+        self.current_isolate_type.is_some()
+    }
+
     /// Resets all internal state for package accumulation.
     pub fn reset(&mut self) {
-        self.current_package_name.clear();
+        self.current_isolate_type = None;
         self.buffer.clear();
         self.expected_sequence = 0;
         self.endorsements.clear();
     }
 
     /// Pushes a package chunk into the accumulator.
+    /// The isolate_type is expected only on the first chunk of a package; subsequent
+    /// chunks may either repeat the same isolate_type or leave it unset.
     ///
     /// Returns `Ok(Some(AssembledPackage))` only when the last chunk has been received.
     /// Automatically clears all internal state upon completion or on error.
@@ -72,29 +80,29 @@ impl PackageAccumulator {
         &mut self,
         mut chunk: IsolatePackageChunk,
     ) -> Result<Option<AssembledPackage>, EzManagementError> {
-        if self.current_package_name.is_empty() {
-            if chunk.package_name.is_empty() {
+        if let Some(incoming) = chunk.isolate_type.take() {
+            let current = self.current_isolate_type.get_or_insert_with(|| incoming.clone());
+            if *current != incoming {
+                let err = format!(
+                    "Received chunk for Isolate '{incoming:?}' while still streaming Isolate '{current:?}'"
+                );
                 self.reset();
-                return Err(EzManagementError::UnexpectedMessage(
-                    "Received IsolatePackageChunk without package_name in current or prior chunks"
-                        .to_string(),
-                ));
+                return Err(EzManagementError::UnexpectedMessage(err));
             }
-            self.current_package_name = std::mem::take(&mut chunk.package_name);
-        } else if !chunk.package_name.is_empty() && chunk.package_name != self.current_package_name
-        {
-            let err = format!(
-                "Received chunk for package '{}' while still streaming package '{}'",
-                chunk.package_name, self.current_package_name
-            );
+        } else if self.current_isolate_type.is_none() {
             self.reset();
-            return Err(EzManagementError::UnexpectedMessage(err));
+            return Err(EzManagementError::UnexpectedMessage(
+                "Received IsolatePackageChunk without isolate_type in current or prior chunks"
+                    .to_string(),
+            ));
         }
 
         if chunk.chunk_sequence != self.expected_sequence {
             let err = format!(
-                "Invalid chunk sequence for package '{}': expected {}, got {}",
-                self.current_package_name, self.expected_sequence, chunk.chunk_sequence
+                "Invalid chunk sequence for Isolate '{}': expected {}, got {}",
+                self.describe_current_isolate_type(),
+                self.expected_sequence,
+                chunk.chunk_sequence
             );
             self.reset();
             return Err(EzManagementError::UnexpectedMessage(err));
@@ -104,8 +112,8 @@ impl PackageAccumulator {
             Some(seq) => seq,
             None => {
                 let err = format!(
-                    "Chunk sequence overflowed for package '{}'",
-                    self.current_package_name
+                    "Chunk sequence overflowed for Isolate '{}'",
+                    self.describe_current_isolate_type()
                 );
                 self.reset();
                 return Err(EzManagementError::UnexpectedMessage(err));
@@ -117,7 +125,7 @@ impl PackageAccumulator {
 
         if chunk.is_last_chunk {
             let package = AssembledPackage {
-                package_name: std::mem::take(&mut self.current_package_name),
+                isolate_type: self.current_isolate_type.take().unwrap_or_default(),
                 package_bytes: std::mem::take(&mut self.buffer),
                 endorsements: std::mem::take(&mut self.endorsements),
             };
@@ -136,8 +144,8 @@ impl PackageAccumulator {
         if !endorsements.is_empty() {
             if chunk_sequence != 0 {
                 let err = format!(
-                    "Received isolate_package_endorsements on chunk sequence {chunk_sequence} for package '{}', expected only on initial chunk",
-                    self.current_package_name
+                    "Received isolate_package_endorsements on chunk sequence {chunk_sequence} for Isolate '{}', expected only on initial chunk",
+                    self.describe_current_isolate_type()
                 );
                 self.reset();
                 return Err(EzManagementError::UnexpectedMessage(err));
@@ -152,8 +160,8 @@ impl PackageAccumulator {
             Some(sz) => sz,
             None => {
                 let err = format!(
-                    "Package size calculation overflowed for package '{}'",
-                    self.current_package_name
+                    "Package size calculation overflowed for Isolate '{}'",
+                    self.describe_current_isolate_type()
                 );
                 self.reset();
                 return Err(EzManagementError::UnexpectedMessage(err));
@@ -162,8 +170,10 @@ impl PackageAccumulator {
 
         if new_size > self.max_package_size_bytes {
             let err = format!(
-                "Package '{}' exceeds maximum allowed size of {} bytes (accumulated {} bytes)",
-                self.current_package_name, self.max_package_size_bytes, new_size
+                "Package for Isolate '{}' exceeds maximum allowed size of {} bytes (accumulated {} bytes)",
+                self.describe_current_isolate_type(),
+                self.max_package_size_bytes,
+                new_size
             );
             self.reset();
             return Err(EzManagementError::UnexpectedMessage(err));
@@ -176,6 +186,10 @@ impl PackageAccumulator {
         }
 
         Ok(())
+    }
+
+    fn describe_current_isolate_type(&self) -> String {
+        self.current_isolate_type.as_ref().map(|t| format!("{t:?}")).unwrap_or_default()
     }
 }
 

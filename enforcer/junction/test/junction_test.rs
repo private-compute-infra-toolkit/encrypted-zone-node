@@ -52,6 +52,8 @@ use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status, Streaming};
 
+const DEFAULT_MAX_DECODING_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
+
 #[derive(Clone)]
 struct MetadataCheckingIsolate {
     expected_header_key: String,
@@ -138,6 +140,7 @@ async fn test_metadata_propagation_to_isolate() {
         isolate_state_manager.clone(),
         manifest_validator.clone(),
         100 * 1024 * 1024, // 100MiB
+        DEFAULT_MAX_DECODING_MESSAGE_SIZE,
     );
 
     let isolate_service_info = IsolateServiceInfo {
@@ -1335,6 +1338,7 @@ async fn test_junction_unary_datascope_bypass() {
         isolate_state_manager.clone(),
         manifest_validator.clone(),
         100 * 1024 * 1024,
+        DEFAULT_MAX_DECODING_MESSAGE_SIZE,
     );
 
     let isolate_service_info = IsolateServiceInfo {
@@ -1473,6 +1477,7 @@ async fn test_junction_streaming_deadlock_fix() {
         isolate_state_manager.clone(),
         manifest_validator.clone(),
         100 * 1024 * 1024,
+        DEFAULT_MAX_DECODING_MESSAGE_SIZE,
     );
 
     let isolate_service_info = IsolateServiceInfo {
@@ -1576,6 +1581,7 @@ async fn test_junction_unary_flow_shm_response_to_inline_data() {
         isolate_state_manager.clone(),
         manifest_validator.clone(),
         100 * 1024 * 1024, // 100MiB
+        DEFAULT_MAX_DECODING_MESSAGE_SIZE,
     );
 
     let isolate_service_info = IsolateServiceInfo {
@@ -1733,6 +1739,7 @@ async fn test_junction_streaming_request_shm_payload() {
         isolate_state_manager.clone(),
         manifest_validator.clone(),
         1, // Threshold of 1 byte to force SHM writing
+        DEFAULT_MAX_DECODING_MESSAGE_SIZE,
     );
 
     let isolate_service_info = IsolateServiceInfo {
@@ -1909,6 +1916,7 @@ async fn test_junction_streaming_response_shm_payload() {
         isolate_state_manager.clone(),
         manifest_validator.clone(),
         100 * 1024 * 1024, // threshold high, so request is inline
+        DEFAULT_MAX_DECODING_MESSAGE_SIZE,
     );
 
     let isolate_service_info = IsolateServiceInfo {
@@ -2088,6 +2096,7 @@ async fn test_junction_streaming_half_close_without_http2_headers() {
         isolate_state_manager.clone(),
         manifest_validator.clone(),
         100 * 1024 * 1024,
+        DEFAULT_MAX_DECODING_MESSAGE_SIZE,
     );
 
     let isolate_service_info = IsolateServiceInfo {

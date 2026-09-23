@@ -60,7 +60,7 @@ rust_test(
     deps = [
         ":console_helper",
         ":console_helper_rust_proto",
-        "//enforcer/traces",
+        "//enforcer/traces:traces_debug",
         "@crates//:tokio",
         "@crates//:tokio-stream",
         "@crates//:tonic",

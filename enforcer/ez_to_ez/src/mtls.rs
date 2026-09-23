@@ -13,40 +13,19 @@
 // limitations under the License.
 
 use anyhow::{anyhow, Context, Result};
-use arc_swap::ArcSwap;
 use boring::pkey::{PKey, Private};
 use boring::ssl::{SslAcceptor, SslConnector, SslMethod, SslVerifyMode};
 use boring::x509::{store::X509StoreBuilder, X509};
 use ez_mtls_proto::enforcer::v1::ez_mtls_service_client::EzMtlsServiceClient;
-use ez_mtls_proto::enforcer::v1::{GetCertificateRequest, PolicyHint, ReportSniRequest};
+use ez_mtls_proto::enforcer::v1::{GetCertificateRequest, PolicyHint};
 use grpc_connector::GrpcChannelPool;
-use manifest_parser::v2::SetupManifest;
 use manifest_proto::enforcer::v1::{ez_manifest::ManifestType, EzManifest};
 use sha2::Digest;
-use std::sync::Arc;
 use tonic::transport::Channel;
 
 const HASH_VERSION: &str = "a";
 
 pub use manifest_parser::v2::IsolateIdentity;
-
-/// Manifest available at boot-time for initial mTLS bootstrapping.
-#[derive(Clone, Debug)]
-pub enum BootManifest {
-    V1(EzManifest),
-    V2(SetupManifest),
-}
-
-/// Extracts initial isolate identities from a boot-time manifest.
-///
-/// Extracts all identities in V1, or only the Setup Isolate identity in V2.
-/// Subsequent V2 workload identities are reported at runtime via [`EzMtlsManager::report_snis`].
-pub fn load_initial_snis(manifest: &BootManifest) -> Vec<IsolateIdentity> {
-    match manifest {
-        BootManifest::V1(ez_manifest) => extract_sni_params(ez_manifest),
-        BootManifest::V2(setup_manifest) => vec![setup_manifest.extract_sni_params()],
-    }
-}
 
 /// Generates a Server Name Indication (SNI) string based on the provided parameters.
 ///
@@ -168,33 +147,18 @@ pub struct EzMtlsManagerConfig {
     pub csr_path: String,
     // Address to talk to EZ proxy.
     pub proxy_address: String,
-    // Isolate identities to register for initial SNI routing.
-    pub isolate_identities: Vec<IsolateIdentity>,
 }
 
-/// A manager for the EzMtlsService connection that holds the current certificate and SNIs.
+/// A manager that holds the mTLS certificate, private key, trust anchors, and SPIFFE identity.
 #[derive(Clone)]
 pub struct EzMtlsManager {
-    #[allow(dead_code)]
-    config: EzMtlsManagerConfig,
-
-    // Certificates will be fetched periodically every 24 hours.
-    // Therefore, we should keep the connection.
-    // A channel pool is held for periodic interaction with the proxy.
-    #[allow(dead_code)]
-    client_channel_pool: GrpcChannelPool,
-    // Client for the EzMtlsService.
-    client: EzMtlsServiceClient<Channel>,
-
     // Leaf private key for mTLS encryption.
     leaf_private_key: PKey<Private>,
-    // Certificate signing request in der format.
-    csr: Vec<u8>,
     // Vector of X509 certificates.
     // The leaf certificate is at index 0, followed by intermediate certificates.
-    cert_chain: Arc<ArcSwap<Vec<X509>>>,
+    cert_chain: Vec<X509>,
     // Trust anchors for certificate verification.
-    trust_anchors: Arc<ArcSwap<Vec<X509>>>,
+    trust_anchors: Vec<X509>,
     // The SPIFFE URI of this manager parsed from the leaf certificate.
     spiffe_identity: SpiffeUri,
 }
@@ -202,22 +166,11 @@ pub struct EzMtlsManager {
 impl EzMtlsManager {
     /// Builds and initializes a new `EzMtlsManager`.
     pub async fn build(config: EzMtlsManagerConfig) -> Result<Self> {
-        let (client_channel_pool, mut client) = Self::create_client(&config).await?;
+        let (_client_channel_pool, mut client) = Self::create_client(&config).await?;
         let (leaf_private_key, csr) = Self::load_keys(&config).await?;
         let (cert_chain, trust_anchors) = Self::fetch_certs(&mut client, &csr).await?;
         let spiffe_identity = Self::parse_spiffe_id(&cert_chain)?;
-        Self::report_snis_internal(&mut client, &spiffe_identity, &config.isolate_identities)
-            .await?;
-        Ok(Self {
-            config,
-            client_channel_pool,
-            client,
-            leaf_private_key,
-            csr,
-            cert_chain: Arc::new(ArcSwap::from_pointee(cert_chain)),
-            trust_anchors: Arc::new(ArcSwap::from_pointee(trust_anchors)),
-            spiffe_identity,
-        })
+        Ok(Self { leaf_private_key, cert_chain, trust_anchors, spiffe_identity })
     }
 
     /// Returns the SPIFFE identity of this manager.
@@ -285,31 +238,6 @@ impl EzMtlsManager {
         let spiffe_identity = Self::extract_spiffe_uri_from_cert(leaf_cert)
             .context("Failed to extract SPIFFE ID from leaf certificate")?;
         Ok(spiffe_identity)
-    }
-
-    /// Reports SNIs to the proxy.
-    async fn report_snis_internal(
-        client: &mut EzMtlsServiceClient<Channel>,
-        spiffe_identity: &SpiffeUri,
-        isolate_identities: &[IsolateIdentity],
-    ) -> Result<()> {
-        let mut snis = Vec::new();
-        for identity in isolate_identities {
-            snis.push(sni(
-                "",
-                &identity.isolate_name,
-                &identity.publisher_id,
-                &spiffe_identity.operator_domain,
-                &spiffe_identity.trust_domain,
-            ));
-        }
-
-        let req = ReportSniRequest { sni: snis };
-        client
-            .report_sni(tonic::Request::new(req))
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to report SNIs to EzMtlsService: {}", e))?;
-        Ok(())
     }
 
     /// Helper function to extract exactly one SPIFFE URI from a certificate.
@@ -381,34 +309,10 @@ impl EzMtlsManager {
         }
     }
 
-    /// Fetches a certificate from the mTLS service using the CSR path in config, and stores it internally.
-    pub async fn fetch_certificate(&self) -> Result<()> {
-        let mut client = self.client.clone();
-        let (parsed_certs, new_anchors) = Self::fetch_certs(&mut client, &self.csr).await?;
-
-        self.cert_chain.store(Arc::new(parsed_certs));
-
-        if let Some(last_cert) = new_anchors.first() {
-            let mut anchors = self.trust_anchors.load().as_ref().clone();
-            anchors.push(last_cert.clone());
-            self.trust_anchors.store(Arc::new(anchors));
-        }
-        Ok(())
-    }
-
-    /// Reports isolate identities to the mTLS service to update the proxy's routing table.
-    ///
-    /// Callers must provide the complete list of active isolate identities for this node.
-    pub async fn report_snis(&self, isolate_identities: &[IsolateIdentity]) -> Result<()> {
-        let mut client = self.client.clone();
-        Self::report_snis_internal(&mut client, &self.spiffe_identity, isolate_identities).await
-    }
-
     /// Helper function to build the X509 store from trust anchors.
     fn build_x509_store(&self) -> Result<boring::x509::store::X509Store> {
         let mut store = X509StoreBuilder::new()?;
-        let anchors = self.trust_anchors.load();
-        for ca_cert in &**anchors {
+        for ca_cert in &self.trust_anchors {
             store.add_cert(ca_cert.clone())?;
         }
         Ok(store.build())
@@ -419,23 +323,13 @@ impl EzMtlsManager {
         let mut acceptor = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls())?;
         acceptor.set_private_key(&self.leaf_private_key)?;
 
-        {
-            let cert_chain_guard = self.cert_chain.load();
-            if cert_chain_guard.is_empty() {
-                anyhow::bail!("Certificate chain not fetched yet");
-            }
-            let certs = &**cert_chain_guard;
+        let leaf_cert =
+            self.cert_chain.first().ok_or_else(|| anyhow!("No leaf certificate found in chain"))?;
+        acceptor.set_certificate(leaf_cert)?;
 
-            // Leaf certificate is at index 0.
-            let leaf_cert =
-                certs.first().ok_or_else(|| anyhow!("No leaf certificate found in chain"))?;
-            acceptor.set_certificate(leaf_cert)?;
-
-            // Set intermediate certificates in the chain.
-            for cert in certs.iter().skip(1) {
-                acceptor.add_extra_chain_cert(cert.clone())?;
-            }
-        } // cert_chain_guard is dropped here
+        for cert in self.cert_chain.iter().skip(1) {
+            acceptor.add_extra_chain_cert(cert.clone())?;
+        }
 
         let store = self.build_x509_store()?;
         acceptor.set_verify_cert_store(store)?;
@@ -457,21 +351,13 @@ impl EzMtlsManager {
         let mut connector = SslConnector::builder(SslMethod::tls())?;
         connector.set_private_key(&self.leaf_private_key)?;
 
-        {
-            let cert_chain_guard = self.cert_chain.load();
-            if cert_chain_guard.is_empty() {
-                anyhow::bail!("Certificate chain not fetched yet");
-            }
-            let certs = &**cert_chain_guard;
+        let leaf_cert =
+            self.cert_chain.first().ok_or_else(|| anyhow!("No leaf certificate found in chain"))?;
+        connector.set_certificate(leaf_cert)?;
 
-            let leaf_cert =
-                certs.first().ok_or_else(|| anyhow!("No leaf certificate found in chain"))?;
-            connector.set_certificate(leaf_cert)?;
-
-            for cert in certs.iter().skip(1) {
-                connector.add_extra_chain_cert(cert.clone())?;
-            }
-        } // cert_chain_guard is dropped here
+        for cert in self.cert_chain.iter().skip(1) {
+            connector.add_extra_chain_cert(cert.clone())?;
+        }
 
         let store = self.build_x509_store()?;
         connector.set_verify_cert_store(store)?;

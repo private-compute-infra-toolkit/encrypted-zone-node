@@ -202,6 +202,7 @@ impl TestHarness {
             isolate_state_manager.clone(),
             manifest_validator.clone(),
             100 * 1024 * 1024, // 100 MiB to force inline
+            4 * 1024 * 1024,
         );
 
         // Start fake Isolate server

@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## 0.26.0 (2026-09-23)
+
+
+### EZ Policy Enforcer
+
+* **enforcer:** Bound Setup Isolate readiness wait with a timeout
+* **enforcer:** enforce mid-stream route invariance in stream_invoke_ez
+* **enforcer:** gate DiagnosticService and console_subscriber with debug
+* **enforcer:** Key Isolate packages by IsolateType in EzManagement
+* **enforcer:** Load Isolate packages dynamically at Node bootstrap
+* **enforcer:** Pass max_decoding_message_size to EzToEz outbound client
+* **enforcer:** Pass max_decoding_message_size to junction
+* **enforcer:** Populate routing metadata in SetupIsolateClient
+* **enforcer:** Send package_filename in endorsement claims
+* **enforcer:** Send Public input scope on setup isolate RPCs
+* **enforcer:** Skip publisher_id domain check for v2 manifests
+* **enforcer:** validate manifest deps for destination_ez_instance_id
+
+
+### mTLS
+
+* **mtls:** Add cert fetch to setup isolate client
+* **mtls:** add enable_tls_cert_remote_fetch flag
+* **mtls:** add expect TLS bool to outbound
+* **mtls:** remove dynamic cert fetch
+* **mtls:** remove sni dynamic reporting
+
 ## 0.25.0 (2026-09-17)
 
 

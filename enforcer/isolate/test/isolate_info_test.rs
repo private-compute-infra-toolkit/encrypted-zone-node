@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_proto::enforcer::v2::IsolateType;
 use isolate_info::{
     get_binary_services_index, get_isolate_name, get_isolate_type, register_isolate_type,
-    BinaryServicesIndex, IsolateType,
+    BinaryServicesIndex,
 };
 
 #[test]

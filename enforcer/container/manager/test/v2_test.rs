@@ -356,3 +356,51 @@ async fn test_container_manager_v2_get_setup_isolate_client() {
     harness.stop().await;
     ensure_isolate_stopped(fake_container_id).await.expect("Container should stop");
 }
+
+#[tokio::test]
+async fn test_v2_ratified_isolate_accepts_non_ez_trusted_publisher() {
+    const EXTERNAL_PUBLISHER: &str = "pcit-release-bot@google.com";
+
+    let mut harness = TestHarness::new_v2(
+        "enforcer/manifest_parser/test/testdata/v2_setup.json",
+        &IsolateRuntimeConfigs::default(),
+        "test_operator".to_string(),
+    )
+    .await
+    .expect("ContainerManager should start with v2 setup manifest");
+
+    let setup_containers =
+        check_container_started(vec![SETUP_BINARY]).await.expect("Setup container should start");
+    let _client = notify_isolate_ready(setup_containers[0].1.clone())
+        .await
+        .expect("Setup isolate should be ready");
+
+    harness
+        .load_workload_manifests_from_paths(
+            Some("enforcer/manifest_parser/test/testdata/v2_ratified_external_publisher.json"),
+            None,
+        )
+        .await
+        .expect("Ratified isolate with a non EZ_Trusted publisher should load");
+
+    let workload_containers =
+        start_and_ready_containers_in_dependency_order(vec![HELLOWORLD_BINARY])
+            .await
+            .expect("Workload container should start and be readied");
+
+    let greeter_index = harness
+        .isolate_service_mapper
+        .get_service_index(&IsolateServiceInfo {
+            operator_domain: EXTERNAL_PUBLISHER.to_string(),
+            service_name: GREETER_SERVICE.to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("Ratified Greeter should be registered under its own publisher domain");
+    assert!(service_info_has_valid_binary_index(&greeter_index));
+
+    harness.stop().await;
+    for (id, _) in setup_containers.into_iter().chain(workload_containers.into_iter()) {
+        ensure_isolate_stopped(id).await.expect("Container should stop");
+    }
+}

@@ -843,3 +843,74 @@ async fn test_inbound_launch_server_bind_failure() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn test_inbound_large_payload_unary_and_streaming() {
+    let temp_dir = tempfile::Builder::new().prefix("inbound_large_payload_test").tempdir().unwrap();
+    let uds_path = temp_dir.path().join("ez_to_ez.sock");
+    let uds_address = format!("unix://{}", uds_path.to_str().unwrap());
+
+    let fake_junction = FakeJunction::default();
+    let handler = InboundEzToEzHandler::new(Box::new(fake_junction.clone()));
+
+    let max_decoding_message_size = 16 * 1024 * 1024; // 16 MiB
+    let server_address = uds_address.clone();
+    let server_handle = tokio::spawn(async move {
+        inbound_ez_to_ez_handler::launch_server(
+            handler,
+            &server_address,
+            max_decoding_message_size,
+            /*tls_config=*/ None,
+        )
+        .await;
+    });
+
+    sleep(Duration::from_millis(50)).await;
+    let channel_pool = GrpcChannelPool::new(
+        uds_address,
+        DEFAULT_POOL_SIZE,
+        DEFAULT_CONNECT_RETRY_COUNT,
+        DEFAULT_CONNECT_RETRY_DELAY_MS,
+        DEFAULT_CONNECT_RETRY_SCALING,
+    )
+    .await
+    .unwrap();
+    let channel = channel_pool.next_channel();
+    let mut client =
+        EzToEzApiClient::new(channel).max_decoding_message_size(max_decoding_message_size);
+
+    // 8 MiB payload (> Tonic's default 4 MiB limit)
+    let large_payload = "b".repeat(8 * 1024 * 1024);
+    let request = create_test_request(large_payload.as_str());
+
+    // 1. Verify unary call with 8 MiB payload
+    let unary_response = client
+        .ez_call(Request::new(request.clone()))
+        .await
+        .expect("8 MiB unary call should succeed")
+        .into_inner();
+    let unary_output = unary_response.payload_data.unwrap().datagrams[0].clone();
+    assert_eq!(unary_output.len(), large_payload.len());
+    assert_eq!(unary_output, large_payload.as_bytes());
+
+    // 2. Verify streaming call with 8 MiB payload
+    let (to_handler_tx, to_handler_rx) = mpsc::channel(10);
+    let request_stream = ReceiverStream::new(to_handler_rx);
+    let mut response_stream =
+        client.ez_streaming_call(Request::new(request_stream)).await.unwrap().into_inner();
+
+    to_handler_tx.send(request).await.unwrap();
+    let stream_response = response_stream
+        .next()
+        .await
+        .expect("Stream should yield response")
+        .expect("8 MiB streaming response should succeed");
+    let stream_output = stream_response.payload_data.unwrap().datagrams[0].clone();
+    assert_eq!(stream_output.len(), large_payload.len());
+    assert_eq!(stream_output, large_payload.as_bytes());
+
+    drop(to_handler_tx);
+    assert!(response_stream.next().await.is_none());
+
+    server_handle.abort();
+}
