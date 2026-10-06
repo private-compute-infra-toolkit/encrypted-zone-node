@@ -16,11 +16,13 @@ use crate::error::DataScopeError::InternalError;
 use crate::request::{
     AddIsolateRequest, DataScopeManagerResponse, FreezeIsolateScopeRequest, GetIsolateRequest,
     GetIsolateResponse, GetIsolateScopeRequest, GetIsolateScopeResponse, RemoveIsolateRequest,
-    RemoveIsolateResponse, UnretireIsolateRequest, ValidateIsolateRequest,
+    RemoveIsolateResponse, UnretireIsolateRequest, ValidateDataTransferResponse,
+    ValidateIsolateRequest,
 };
 use crate::{
     data_scope_manager::DataScopeManager, ratified_isolate_manager::RatifiedIsolateManager,
 };
+use data_scope_proto::enforcer::v1::DataScopeType;
 use isolate_info::IsolateId;
 use metrics::histogram;
 use std::time::Instant;
@@ -138,6 +140,10 @@ impl DataScopeRequester {
         &self,
         freeze_isolate_request: FreezeIsolateScopeRequest,
     ) -> DataScopeManagerResponse<()> {
+        // Ratified Isolates have no dynamic scope to freeze.
+        if freeze_isolate_request.isolate_id.is_ratified_isolate() {
+            return Ok(());
+        }
         self.data_scope_manager.freeze_isolate_scope(freeze_isolate_request).await
     }
 
@@ -166,5 +172,18 @@ impl DataScopeRequester {
         } else {
             self.data_scope_manager.get_isolate_scope(get_isolate_scope_request).await
         }
+    }
+
+    /// Validates that data at `data_scope` may flow to the destination, escalating it if needed.
+    pub async fn validate_data_transfer(
+        &self,
+        destination_isolate_id: IsolateId,
+        data_scope: DataScopeType,
+    ) -> DataScopeManagerResponse<ValidateDataTransferResponse> {
+        // Don't need to change scope of destination Ratified Isolates.
+        if destination_isolate_id.is_ratified_isolate() {
+            return Ok(ValidateDataTransferResponse::default());
+        }
+        self.data_scope_manager.validate_data_transfer(destination_isolate_id, data_scope).await
     }
 }

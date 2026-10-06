@@ -21,7 +21,6 @@ pub use container_manager_request::{
     MountWritableFile, ResetIsolateRequest, ResetIsolateResponse,
 };
 use setup_isolate_client::SetupIsolateClient;
-use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 /// Requester to send requests to ContainerManager. Consumers are encouraged to clone the requester.
@@ -144,7 +143,7 @@ impl ContainerManagerRequester {
     }
 
     /// Send request to ContainerManager to get the SetupIsolateClient, if available.
-    pub async fn get_setup_isolate_client(&self) -> Result<Option<Arc<SetupIsolateClient>>> {
+    pub async fn get_setup_isolate_client(&self) -> Result<Option<SetupIsolateClient>> {
         let (response_tx, response_rx) = oneshot::channel();
         self.send_request(ContainerManagerRequest::GetSetupIsolateClient { resp: response_tx })
             .await;

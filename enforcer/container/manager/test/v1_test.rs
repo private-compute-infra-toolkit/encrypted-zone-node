@@ -19,7 +19,7 @@ use container_test_utils::{FakeContainer, Status};
 use data_scope::error::DataScopeError;
 use data_scope::request::{GetIsolateRequest, ValidateBackendDependencyRequest};
 use data_scope_proto::enforcer::v1::DataScopeType;
-use enforcer_proto::enforcer::v1::{CreateMemshareRequest, IsolateState};
+use enforcer_proto::enforcer::v1::IsolateState;
 use interceptor::RequestType;
 use isolate_info::{IsolateId, IsolateServiceIndex, IsolateServiceInfo};
 use manifest_proto::enforcer::v1::IsolateRuntimeConfigs;
@@ -245,7 +245,7 @@ async fn test_isolate_reset() {
 
     let mem_share_response = harness
         .shared_memory_manager
-        .create_shared_mem_file(isolate_ids[0], CreateMemshareRequest { region_size: 128 })
+        .create_shared_mem_file(isolate_ids[0], 128, DataScopeType::Public)
         .await
         .expect("Should create shared mem file");
 
@@ -1117,6 +1117,79 @@ async fn test_non_existent_otel_traces_uds() {
 
     drop(tracked_container);
     drop(tracker);
+    harness.stop().await;
+    ensure_isolate_stopped(fake_container_id).await.expect("Container should stop");
+}
+
+#[tokio::test]
+async fn test_v1_get_setup_isolate_client() {
+    let mut harness = TestHarness::new(
+        JSON_MANIFEST_PATH_SETUP_ISOLATE,
+        &IsolateRuntimeConfigs::default(),
+        /* otel_endpoint= */ None,
+        /* operator_role= */ "".to_string(),
+    )
+    .await
+    .expect("TestHarness::new should succeed");
+
+    let setup_containers =
+        check_container_started(vec![SETUP_BINARY]).await.expect("Setup container should start");
+    assert_eq!(setup_containers.len(), 1);
+    let (fake_container_id, isolate_ez_bridge_enforcer_side_uds_path) = setup_containers[0].clone();
+    let _client = notify_isolate_ready(isolate_ez_bridge_enforcer_side_uds_path)
+        .await
+        .expect("Setup isolate should be ready");
+
+    let expected_binary_index = get_binary_service_index(
+        &mut harness,
+        SETUP_ISOLATE_DOMAIN.to_string(),
+        SETUP_SERVICE.to_string(),
+    )
+    .await
+    .expect("SetupService should have a valid binary index");
+
+    let client = harness
+        .container_manager_requester
+        .get_setup_isolate_client()
+        .await
+        .expect("get_setup_isolate_client should succeed")
+        .expect("SetupIsolateClient should be present for setup_isolate under EZ_Trusted");
+    assert_eq!(client.binary_services_index(), Some(expected_binary_index));
+
+    harness.stop().await;
+    ensure_isolate_stopped(fake_container_id).await.expect("Container should stop");
+}
+
+#[tokio::test]
+async fn test_v1_get_setup_isolate_client_none_without_setup_isolate() {
+    let mut harness = TestHarness::new(
+        JSON_MANIFEST_PATH_RATIFIED_ISOLATE,
+        &IsolateRuntimeConfigs::default(),
+        /* otel_endpoint= */ None,
+        /* operator_role= */ "".to_string(),
+    )
+    .await
+    .expect("TestHarness::new should succeed");
+
+    let isolate_and_uds_vec =
+        check_container_started(vec![HELLOWORLD_BINARY]).await.expect("Container should start");
+    assert_eq!(isolate_and_uds_vec.len(), 1);
+    let (fake_container_id, isolate_ez_bridge_enforcer_side_uds_path) =
+        isolate_and_uds_vec[0].clone();
+    let _client = notify_isolate_ready(isolate_ez_bridge_enforcer_side_uds_path)
+        .await
+        .expect("Isolate should be ready");
+
+    let client = harness
+        .container_manager_requester
+        .get_setup_isolate_client()
+        .await
+        .expect("get_setup_isolate_client should succeed");
+    assert!(
+        client.is_none(),
+        "SetupIsolateClient should be None when isolate_name is not setup_isolate"
+    );
+
     harness.stop().await;
     ensure_isolate_stopped(fake_container_id).await.expect("Container should stop");
 }

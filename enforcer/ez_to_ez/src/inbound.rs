@@ -287,6 +287,7 @@ fn invoke_isolate_response_to_ez_call_response(response: InvokeIsolateResponse) 
     }
 }
 
+#[derive(Clone)]
 pub struct InboundTlsConfig {
     pub acceptor: SslAcceptor,
     pub handshake_timeout: Duration,

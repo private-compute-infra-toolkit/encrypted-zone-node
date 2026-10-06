@@ -18,6 +18,7 @@ use container_manager_requester::ContainerManagerRequester;
 use container_manager_request::ContainerManagerRequest;
 use data_scope::manifest_validator::ManifestValidator;
 use data_scope::requester::DataScopeRequester;
+use data_scope_proto::enforcer::v1::DataScopeType;
 use enforcer_proto::enforcer::v1::{
     fileshare_event, isolate_ez_bridge_client::IsolateEzBridgeClient,
     isolate_ez_bridge_server::IsolateEzBridgeServer,
@@ -170,7 +171,7 @@ async fn test_fileshare_event_propagation() {
     let sender_id = sender_harness.isolate_id;
 
     let fileshare_handle = fileshare_manager
-        .create_fileshare(sender_id)
+        .create_fileshare(sender_id, DataScopeType::Public)
         .await
         .expect("Create fileshare should succeed");
 

@@ -30,12 +30,13 @@ use setup_isolate_proto::enforcer::v2::{
 };
 use std::sync::Arc;
 
+/// Client for communicating with the Setup Isolate. Cheaply cloneable.
 #[derive(Clone, Debug)]
 pub struct SetupIsolateClient {
     junction: Arc<Box<dyn Junction>>,
-    publisher_id: String,
-    isolate_name: String,
-    service_name: String,
+    publisher_id: Arc<str>,
+    isolate_name: Arc<str>,
+    service_name: Arc<str>,
     binary_services_index: Option<BinaryServicesIndex>,
 }
 
@@ -56,9 +57,9 @@ impl SetupIsolateClient {
         });
         Self {
             junction: Arc::new(junction),
-            publisher_id,
-            isolate_name,
-            service_name,
+            publisher_id: publisher_id.into(),
+            isolate_name: isolate_name.into(),
+            service_name: service_name.into(),
             binary_services_index,
         }
     }
@@ -98,10 +99,10 @@ impl SetupIsolateClient {
                 requester_is_local: true,
                 responder_is_local: true,
                 // TODO: b/562279963 - Until we support empty domain for routing.
-                destination_operator_domain: self.publisher_id.clone(),
-                destination_publisher_id: self.publisher_id.clone(),
-                destination_isolate_name: self.isolate_name.clone(),
-                destination_service_name: self.service_name.clone(),
+                destination_operator_domain: self.publisher_id.to_string(),
+                destination_publisher_id: self.publisher_id.to_string(),
+                destination_isolate_name: self.isolate_name.to_string(),
+                destination_service_name: self.service_name.to_string(),
                 destination_method_name: method_name.to_string(),
                 ..Default::default()
             }),

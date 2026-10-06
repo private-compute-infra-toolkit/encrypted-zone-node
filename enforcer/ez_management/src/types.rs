@@ -18,6 +18,10 @@ use ez_management_proto::enforcer::v2::LoadIsolatesError;
 pub enum EzManagementError {
     #[error("Failed to connect to EzManagementService: {0}")]
     ConnectionFailed(String),
+    #[error("Failed to fetch operator info from EzManagementService: {0}")]
+    FetchOperatorInfoFailed(String),
+    #[error("Invalid OperatorInfo from EzManagementService: {0}")]
+    InvalidOperatorInfo(String),
     #[error("gRPC stream error: {0}")]
     StreamError(String),
     #[error("Unexpected message received: {0}")]

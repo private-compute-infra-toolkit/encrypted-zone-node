@@ -377,6 +377,7 @@ proto_library(
     visibility = ["//visibility:public"],
     deps = [
         ":common_proto",
+        ":isolate_startup_parameters_proto",
         ":opaque_isolate_manifest_proto",
         ":ratified_isolate_manifest_proto",
         "//enforcer/v1:isolate_endorsement_proto",

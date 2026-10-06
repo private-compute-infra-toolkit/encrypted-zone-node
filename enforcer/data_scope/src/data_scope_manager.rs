@@ -17,7 +17,7 @@ use crate::error::DataScopeError;
 use crate::request::{
     AddIsolateRequest, FreezeIsolateScopeRequest, GetIsolateRequest, GetIsolateResponse,
     GetIsolateScopeRequest, GetIsolateScopeResponse, RemoveIsolateRequest, RemoveIsolateResponse,
-    UnretireIsolateRequest, ValidateIsolateRequest,
+    UnretireIsolateRequest, ValidateDataTransferResponse, ValidateIsolateRequest,
 };
 use data_scope_proto::enforcer::v1::DataScopeType;
 use indexmap::set::IndexSet;
@@ -379,14 +379,41 @@ impl DataScopeManager {
         &self,
         validate_isolate_request: ValidateIsolateRequest,
     ) -> Result<(), DataScopeError> {
-        let isolate_id = validate_isolate_request.isolate_id;
-        let requested_scope = validate_isolate_request.requested_scope;
-        if requested_scope == DataScopeType::Unspecified {
-            return Err(DataScopeError::InvalidDataScopeType);
-        }
+        let ValidateIsolateRequest { isolate_id, requested_scope } = validate_isolate_request;
 
         let mut state_guard = self.state.lock().await;
         let state = &mut *state_guard;
+
+        Self::escalate_isolate_scope(state, isolate_id, requested_scope)?;
+        Ok(())
+    }
+
+    /// Escalates `destination_isolate_id` into `mem_share_data_scope` so it can receive the data.
+    pub async fn validate_data_transfer(
+        &self,
+        destination_isolate_id: IsolateId,
+        mem_share_data_scope: DataScopeType,
+    ) -> Result<ValidateDataTransferResponse, DataScopeError> {
+        let mut state_guard = self.state.lock().await;
+        let state = &mut *state_guard;
+
+        Self::escalate_isolate_scope(state, destination_isolate_id, mem_share_data_scope)?;
+
+        let is_retiring =
+            self.handle_sensitive_session(mem_share_data_scope, state, destination_isolate_id)?;
+        Ok(ValidateDataTransferResponse { is_retiring })
+    }
+
+    /// Escalates `isolate_id` to `requested_scope` if its manifest allows it. This is a no-op if
+    /// the Isolate's current scope is already at or above `requested_scope`.
+    fn escalate_isolate_scope(
+        state: &mut DataScopeManagerState,
+        isolate_id: IsolateId,
+        requested_scope: DataScopeType,
+    ) -> Result<(), DataScopeError> {
+        if requested_scope == DataScopeType::Unspecified {
+            return Err(DataScopeError::InvalidDataScopeType);
+        }
 
         let Some(&current_data_scope) = state.isolate_scope_index.get(&isolate_id) else {
             return Err(DataScopeError::UnknownIsolateId);
@@ -399,27 +426,29 @@ impl DataScopeManager {
             return Err(DataScopeError::DisallowedByManifest);
         }
 
-        if requested_scope > current_data_scope {
-            state.isolate_scope_index.insert(isolate_id, requested_scope);
+        if requested_scope <= current_data_scope {
+            return Ok(());
+        }
 
-            if state.active_isolates.contains(&isolate_id)
-                && !state.retiring_isolates.contains(&isolate_id)
-            {
-                let binary_services_index = isolate_id.get_binary_services_index();
-                let scope_index = state
-                    .available_scope_isolate_index
-                    .get_mut(&binary_services_index)
-                    .ok_or(DataScopeError::InvalidIsolateServiceIndex)?;
+        state.isolate_scope_index.insert(isolate_id, requested_scope);
 
-                change_isolate_scope(
-                    scope_index,
-                    &mut state.isolate_scope_index,
-                    isolate_id,
-                    requested_scope,
-                    current_data_scope,
-                    strictest_allowed_scope,
-                );
-            }
+        if state.active_isolates.contains(&isolate_id)
+            && !state.retiring_isolates.contains(&isolate_id)
+        {
+            let binary_services_index = isolate_id.get_binary_services_index();
+            let scope_index = state
+                .available_scope_isolate_index
+                .get_mut(&binary_services_index)
+                .ok_or(DataScopeError::InvalidIsolateServiceIndex)?;
+
+            change_isolate_scope(
+                scope_index,
+                &mut state.isolate_scope_index,
+                isolate_id,
+                requested_scope,
+                current_data_scope,
+                strictest_allowed_scope,
+            );
         }
         Ok(())
     }

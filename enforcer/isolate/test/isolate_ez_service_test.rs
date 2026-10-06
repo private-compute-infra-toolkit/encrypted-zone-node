@@ -18,8 +18,8 @@ use container_manager_requester::ContainerManagerRequester;
 use data_scope::{
     manifest_validator::ManifestValidator,
     request::{
-        AddBackendDependenciesRequest, AddIsolateRequest, GetIsolateScopeRequest,
-        ValidateIsolateRequest,
+        AddBackendDependenciesRequest, AddIsolateRequest, AddManifestScopeRequest,
+        GetIsolateScopeRequest, ValidateIsolateRequest,
     },
     requester::DataScopeRequester,
 };
@@ -308,6 +308,68 @@ impl TestHarness {
     async fn new() -> Result<Self> {
         Self::new_with_arguments(false, ScopeDragInstruction::KeepSame, SHM_PAYLOAD_LARGE_THRESHOLD)
             .await
+    }
+
+    async fn new_with_self_hosted_services(service_infos: Vec<IsolateServiceInfo>) -> Result<Self> {
+        let mock_proxy = MockExternalProxy::default();
+        let mut mock_junction = FakeJunction::default();
+        mock_junction.set_fake_isolate(Box::new(DefaultEchoIsolate::new(
+            ScopeDragInstruction::KeepSame,
+            None,
+        )));
+
+        let mock_ez_to_ez = MockEzToEzOutboundHandler::default();
+        let service_mapper = IsolateServiceMapper::default();
+        let binary_services_index = service_mapper
+            .new_binary_index(service_infos, false, "".to_string(), "".to_string())
+            .await?;
+        let isolate_id = IsolateId::new(binary_services_index);
+
+        let (tx, container_manager_rx) = mpsc::channel(1);
+        let container_manager_requester = ContainerManagerRequester::new(tx);
+        let data_scope_requester = DataScopeRequester::new(0);
+
+        let manifest_validator = ManifestValidator::default();
+        let isolate_state_manager = IsolateStateManager::new(
+            data_scope_requester.clone(),
+            container_manager_requester.clone(),
+        );
+        let shared_memory_manager =
+            SharedMemManager::new(container_manager_requester.clone(), 64, 4);
+        let interceptor_instance = interceptor::Interceptor::new(service_mapper.clone());
+        let fileshare_manager = FileshareManager::new(container_manager_requester);
+
+        let deps = IsolateEzBridgeDependencies {
+            isolate_id,
+            isolate_junction: Box::new(mock_junction.clone()),
+            isolate_state_manager: isolate_state_manager.clone(),
+            shared_memory_manager: shared_memory_manager.clone(),
+            fileshare_manager: fileshare_manager.clone(),
+            external_proxy_connector: Some(Box::new(mock_proxy.clone())),
+            isolate_service_mapper: service_mapper.clone(),
+            data_scope_requester: data_scope_requester.clone(),
+            manifest_validator: manifest_validator.clone(),
+            ez_to_ez_outbound_handler: Some(Box::new(mock_ez_to_ez.clone())),
+            interceptor: interceptor_instance.clone(),
+            shm_payload_threshold: SHM_PAYLOAD_LARGE_THRESHOLD,
+        };
+        let isolate_ez_bridge_service = IsolateEzBridgeService::new(deps);
+        let client = spawn_test_server(isolate_ez_bridge_service).await;
+
+        Ok(Self {
+            isolate_id,
+            mock_junction,
+            mock_proxy,
+            mock_ez_to_ez,
+            mapper: service_mapper,
+            isolate_state_manager,
+            data_scope_requester,
+            manifest_validator,
+            container_manager_rx,
+            client,
+            interceptor: interceptor_instance,
+            shared_memory_manager,
+        })
     }
 }
 
@@ -883,6 +945,47 @@ async fn unary_rejects_ez_instance_id_for_internal_route() {
     assert_eq!(junction_calls.load(Ordering::SeqCst), 0, "Junction should NOT have been called");
 }
 
+#[tokio::test]
+async fn unary_allows_ez_instance_id_for_self_hosted_peer_service() {
+    let service_info = IsolateServiceInfo {
+        operator_domain: TEST_INTERNAL_OPERATOR_DOMAIN.to_string(),
+        service_name: TEST_SERVICE_NAME.to_string(),
+        ..Default::default()
+    };
+    let mut harness = TestHarness::new_with_self_hosted_services(vec![service_info.clone()])
+        .await
+        .expect("Harness should start");
+    let remote_calls = harness.mock_ez_to_ez.call_count.clone();
+    let junction_calls = harness.mock_junction.call_count.clone();
+
+    // Also register the service as an approved backend dependency for this isolate
+    let dependency_index = harness
+        .mapper
+        .add_backend_dependency_service(&service_info, RouteType::Remote)
+        .await
+        .expect("Should be able to add backend dependency");
+    harness
+        .manifest_validator
+        .add_backend_dependencies(AddBackendDependenciesRequest {
+            binary_services_index: harness.isolate_id.get_binary_services_index(),
+            dependency_index,
+        })
+        .await
+        .expect("Should be able to add backend dependency in manifest");
+
+    add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
+        .await
+        .expect("Should be able to add to DSM/RIM");
+
+    let mut request = create_test_request(TEST_INTERNAL_OPERATOR_DOMAIN, TEST_SERVICE_NAME);
+    request.control_plane_metadata.as_mut().unwrap().destination_ez_instance_id =
+        "peer_replica_1".to_string();
+    let _ = harness.client.invoke_ez(request).await.expect("Peer invoke should succeed");
+
+    assert_eq!(remote_calls.load(Ordering::SeqCst), 1, "Remote handler should have been called");
+    assert_eq!(junction_calls.load(Ordering::SeqCst), 0, "Junction should NOT have been called");
+}
+
 // `destination_ez_instance_id` selects *where* a request is delivered, never
 // *whether* it is allowed. No backend dependency is registered here, so the
 // request must be rejected even though an instance id is pinned.
@@ -1305,7 +1408,7 @@ async fn create_memshare_success() {
         .expect("create_memshare should succeed")
         .into_inner();
 
-    tx.send(CreateMemshareRequest { region_size: REGION_SIZE })
+    tx.send(CreateMemshareRequest { region_size: REGION_SIZE, data_scope: None })
         .await
         .expect("Should be able to send memshare request");
 
@@ -1350,9 +1453,12 @@ async fn create_memshare_freeze_scope_failure() {
         .expect("create_memshare should succeed")
         .into_inner();
 
-    tx.send(enforcer_proto::enforcer::v1::CreateMemshareRequest { region_size: REGION_SIZE })
-        .await
-        .expect("Should be able to send memshare request");
+    tx.send(enforcer_proto::enforcer::v1::CreateMemshareRequest {
+        region_size: REGION_SIZE,
+        data_scope: None,
+    })
+    .await
+    .expect("Should be able to send memshare request");
 
     // Check for a failure response from create_memshare.
     let status = response_stream.message().await.expect_err("Stream should return an error");
@@ -1366,6 +1472,210 @@ async fn create_memshare_freeze_scope_failure() {
             .is_err(),
         "ContainerManager should not have been called"
     );
+}
+
+#[tokio::test]
+async fn create_memshare_rejects_scope_above_manifest() {
+    // Manifest output scope is only enforced for Ratified Isolates.
+    let mut harness = TestHarness::new_with_arguments(
+        true,
+        ScopeDragInstruction::KeepSame,
+        SHM_PAYLOAD_LARGE_THRESHOLD,
+    )
+    .await
+    .expect("Harness should start");
+    harness
+        .isolate_state_manager
+        .add_isolate(AddIsolateRequest {
+            current_data_scope_type: DataScopeType::Public,
+            allowed_data_scope_type: DataScopeType::UserPrivate,
+            isolate_id: harness.isolate_id,
+        })
+        .await;
+    add_manifest_output_scope(&harness, DataScopeType::Public).await;
+
+    let (tx, rx) = mpsc::channel(CHANNEL_SIZE);
+    let mut response_stream = harness
+        .client
+        .create_memshare(ReceiverStream::new(rx))
+        .await
+        .expect("create_memshare should succeed")
+        .into_inner();
+
+    tx.send(CreateMemshareRequest {
+        region_size: REGION_SIZE,
+        data_scope: Some(IsolateDataScope {
+            scope_type: DataScopeType::UserPrivate.into(),
+            ..Default::default()
+        }),
+    })
+    .await
+    .expect("Should be able to send memshare request");
+
+    let status = response_stream.message().await.expect_err("Stream should return an error");
+
+    assert_eq!(status.code(), tonic::Code::PermissionDenied);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), harness.container_manager_rx.recv())
+            .await
+            .is_err(),
+        "ContainerManager should not have been called"
+    );
+}
+
+#[tokio::test]
+async fn create_fileshare_rejects_scope_above_manifest() {
+    // Manifest output scope is only enforced for Ratified Isolates.
+    let harness = TestHarness::new_with_arguments(
+        true,
+        ScopeDragInstruction::KeepSame,
+        SHM_PAYLOAD_LARGE_THRESHOLD,
+    )
+    .await
+    .expect("Harness should start");
+    harness
+        .isolate_state_manager
+        .add_isolate(AddIsolateRequest {
+            current_data_scope_type: DataScopeType::Public,
+            allowed_data_scope_type: DataScopeType::UserPrivate,
+            isolate_id: harness.isolate_id,
+        })
+        .await;
+    add_manifest_output_scope(&harness, DataScopeType::Public).await;
+
+    let mut client = harness.client.clone();
+    let status = client
+        .create_fileshare(CreateFileshareRequest {
+            data_scope: Some(IsolateDataScope {
+                scope_type: DataScopeType::UserPrivate.into(),
+                ..Default::default()
+            }),
+        })
+        .await
+        .expect_err("CreateFileshare should fail");
+
+    assert_eq!(status.code(), tonic::Code::PermissionDenied);
+}
+
+#[tokio::test]
+async fn create_memshare_records_current_scope_of_opaque_isolate() {
+    let mut harness = TestHarness::new().await.expect("Harness should start");
+    harness
+        .isolate_state_manager
+        .add_isolate(AddIsolateRequest {
+            current_data_scope_type: DataScopeType::UserPrivate,
+            allowed_data_scope_type: DataScopeType::UserPrivate,
+            isolate_id: harness.isolate_id,
+        })
+        .await;
+
+    // An Opaque Isolate cannot declare its way out of the scope it is currently in.
+    let handle = create_memshare_handle(&mut harness, DataScopeType::Public).await;
+
+    assert_eq!(recorded_share_scope(&harness, handle), DataScopeType::UserPrivate);
+}
+
+#[tokio::test]
+async fn create_memshare_ignores_stricter_declared_scope_of_opaque_isolate() {
+    let mut harness = TestHarness::new().await.expect("Harness should start");
+    harness
+        .isolate_state_manager
+        .add_isolate(AddIsolateRequest {
+            current_data_scope_type: DataScopeType::Public,
+            allowed_data_scope_type: DataScopeType::UserPrivate,
+            isolate_id: harness.isolate_id,
+        })
+        .await;
+
+    let handle = create_memshare_handle(&mut harness, DataScopeType::UserPrivate).await;
+
+    assert_eq!(recorded_share_scope(&harness, handle), DataScopeType::Public);
+}
+
+#[tokio::test]
+async fn create_memshare_records_declared_scope_of_ratified_isolate() {
+    let mut harness = TestHarness::new_with_arguments(
+        true,
+        ScopeDragInstruction::KeepSame,
+        SHM_PAYLOAD_LARGE_THRESHOLD,
+    )
+    .await
+    .expect("Harness should start");
+    harness
+        .isolate_state_manager
+        .add_isolate(AddIsolateRequest {
+            current_data_scope_type: DataScopeType::Public,
+            allowed_data_scope_type: DataScopeType::UserPrivate,
+            isolate_id: harness.isolate_id,
+        })
+        .await;
+    add_manifest_output_scope(&harness, DataScopeType::UserPrivate).await;
+
+    let handle = create_memshare_handle(&mut harness, DataScopeType::Public).await;
+
+    assert_eq!(recorded_share_scope(&harness, handle), DataScopeType::Public);
+}
+
+/// Creates a memshare through the service, declaring `declared_scope`, and returns its handle.
+async fn create_memshare_handle(
+    harness: &mut TestHarness,
+    declared_scope: DataScopeType,
+) -> String {
+    let (tx, rx) = mpsc::channel(CHANNEL_SIZE);
+    let mut response_stream = harness
+        .client
+        .create_memshare(ReceiverStream::new(rx))
+        .await
+        .expect("create_memshare should succeed")
+        .into_inner();
+    tx.send(CreateMemshareRequest {
+        region_size: REGION_SIZE,
+        data_scope: Some(IsolateDataScope {
+            scope_type: declared_scope.into(),
+            ..Default::default()
+        }),
+    })
+    .await
+    .expect("Should be able to send memshare request");
+
+    match timeout(Duration::from_secs(1), harness.container_manager_rx.recv())
+        .await
+        .expect("ContainerManager did not receive request in time")
+        .expect("ContainerManager request channel should not be closed")
+    {
+        ContainerManagerRequest::MountWritableFile { resp, .. } => resp
+            .send(Ok(container_manager_request::MountFileResponse {}))
+            .expect("Should be able to send MountFileResponse"),
+        _ => panic!("Expected MountWritableFile request"),
+    }
+
+    response_stream
+        .message()
+        .await
+        .expect("Stream should have a response")
+        .expect("Response should be Ok")
+        .shared_memory_handle
+}
+
+/// Returns the scope the SharedMemManager recorded for `handle`.
+fn recorded_share_scope(harness: &TestHarness, handle: String) -> DataScopeType {
+    let receiver_id = IsolateId::new(BinaryServicesIndex::new(false));
+    harness
+        .shared_memory_manager
+        .share_scope(harness.isolate_id, receiver_id, &[handle])
+        .expect("Share should be valid")
+}
+
+async fn add_manifest_output_scope(harness: &TestHarness, max_output_scope: DataScopeType) {
+    harness
+        .manifest_validator
+        .add_scope_info(AddManifestScopeRequest {
+            binary_services_index: harness.isolate_id.get_binary_services_index(),
+            max_input_scope: DataScopeType::UserPrivate,
+            max_output_scope,
+        })
+        .await
+        .expect("Should add manifest scope info");
 }
 
 #[tokio::test]
@@ -2662,7 +2972,7 @@ async fn create_fileshare_success() {
 
     let response = harness
         .client
-        .create_fileshare(CreateFileshareRequest {})
+        .create_fileshare(CreateFileshareRequest { data_scope: None })
         .await
         .expect("CreateFileshare should succeed");
     assert!(!response.get_ref().fileshare_handle.is_empty());
@@ -2810,6 +3120,95 @@ async fn unary_routes_shm_payload_read_failure() {
     let status = response.unwrap_err();
     assert_eq!(status.code(), tonic::Code::Internal);
     assert!(status.message().contains("Failed to read from SHM"));
+}
+
+// Regression test for b/556034613. The SHM payload is read before any routing or policy
+// validation runs, so a crafted ShmSlotReference used to drive the enforcer into an
+// out-of-bounds atomic write. The bridge must reject the request and stay healthy.
+#[tokio::test]
+async fn unary_rejects_malicious_shm_slot_reference() {
+    let mut harness = TestHarness::new().await.expect("Harness should start");
+    let junction_calls = harness.mock_junction.call_count.clone();
+    let service_info = IsolateServiceInfo {
+        operator_domain: TEST_INTERNAL_OPERATOR_DOMAIN.to_string(),
+        service_name: TEST_SERVICE_NAME.to_string(),
+        ..Default::default()
+    };
+    add_backend_dependencies(
+        harness.isolate_id,
+        harness.mapper.clone(),
+        harness.manifest_validator.clone(),
+        &service_info,
+        true,
+        TEST_INTERNAL_ROUTE_TYPE,
+    )
+    .await
+    .expect("Failed to add backend dependency");
+    add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
+        .await
+        .expect("Should be able to add to DSM/RIM");
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_string_lossy().to_string();
+    harness
+        .shared_memory_manager
+        .setup_bridge_communication_buffers(harness.isolate_id, &path)
+        .await
+        .expect("Failed to setup bridge communication buffers");
+
+    // slot_index = 2^44 was entirely unbounded before the fix: depending on the pool geometry it
+    // either panicked while slicing the data mapping or drove free_slots into an atomic
+    // read-modify-write ~2 TiB past the header mapping. Either outcome takes down the enforcer.
+    let mut request =
+        create_test_request(&service_info.operator_domain, &service_info.service_name);
+    request.isolate_request_payload = Some(EzHybridPayload {
+        delivery_method: Some(DeliveryMethod::ShmData(payload_proto::enforcer::v1::ShmSlotData {
+            slots: vec![payload_proto::enforcer::v1::ShmSlotReference {
+                slot_index: 1 << 44,
+                length: 0,
+            }],
+        })),
+    });
+
+    let status =
+        harness.client.invoke_ez(request).await.expect_err("Hostile reference must be rejected");
+    assert_eq!(status.code(), tonic::Code::Internal);
+    assert!(status.message().contains("Failed to read from SHM"), "got: {}", status.message());
+
+    // The request is rejected while parsing the payload, so no routing decision is ever made.
+    assert_eq!(junction_calls.load(Ordering::SeqCst), 0, "Junction should not have been called");
+
+    // The bridge must survive the hostile message and keep serving legitimate SHM traffic.
+    let isolate_pool = ShmSlabPool::new(ShmSlabPoolOptions {
+        file_name: format!("{path}/isolate-writes"),
+        number_of_slots: 64,
+        slot_size: 4,
+        writer: true,
+    })
+    .expect("Failed to create isolate writer pool");
+    let slot_refs =
+        isolate_pool.write_to_pool(TEST_PAYLOAD).await.expect("Failed to write to pool");
+
+    let mut request =
+        create_test_request(&service_info.operator_domain, &service_info.service_name);
+    request.isolate_request_payload = Some(EzHybridPayload {
+        delivery_method: Some(DeliveryMethod::ShmData(payload_proto::enforcer::v1::ShmSlotData {
+            slots: slot_refs,
+        })),
+    });
+    let _ = harness.client.invoke_ez(request).await.expect("Valid invoke should still succeed");
+
+    assert_eq!(junction_calls.load(Ordering::SeqCst), 1, "Junction should have been called");
+    let received_request =
+        harness.mock_junction.invoked_isolate_requests.lock().unwrap().last().unwrap().clone();
+    let payload = received_request.isolate_input.expect("Should have payload");
+    match payload.delivery_method.expect("Should have delivery method") {
+        DeliveryMethod::InlineData(data) => {
+            assert_eq!(data.datagrams.len(), 1);
+            assert_eq!(data.datagrams[0], TEST_PAYLOAD);
+        }
+        _ => panic!("Expected InlineData delivery method"),
+    }
 }
 
 #[tokio::test]

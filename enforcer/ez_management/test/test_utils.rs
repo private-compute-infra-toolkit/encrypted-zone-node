@@ -28,8 +28,10 @@ use ez_management_proto::enforcer::v2::ez_management_service_server::{
     EzManagementService, EzManagementServiceServer,
 };
 use ez_management_proto::enforcer::v2::{
-    load_isolates_request, load_isolates_response, AllPackagesLoadedResponse, IsolatePackageChunk,
-    LoadIsolatesRequest, LoadIsolatesResponse, RatifiedIsolateManifestPayload,
+    load_isolates_request, load_isolates_response, AllPackagesLoadedResponse,
+    FetchIsolateStartupParametersRequest, FetchIsolateStartupParametersResponse,
+    FetchOperatorInfoRequest, FetchOperatorInfoResponse, IsolatePackageChunk, LoadIsolatesRequest,
+    LoadIsolatesResponse, OperatorInfo, RatifiedIsolateManifestPayload,
 };
 use fileshare_manager::FileshareManager;
 use interceptor::Interceptor;
@@ -76,6 +78,7 @@ pub const VALID_TAR: &[u8] = &[0u8; 1024];
 pub struct TestContext {
     pub client: EzManagementClient,
     pub received_requests: Arc<Mutex<Vec<LoadIsolatesRequest>>>,
+    pub operator_info: Arc<Mutex<Result<Option<OperatorInfo>, Status>>>,
     pub server_handle: tokio::task::JoinHandle<()>,
     pub _server_temp_dir: tempfile::TempDir,
     pub _cm_temp_dir: tempfile::TempDir,
@@ -173,10 +176,40 @@ impl Drop for TestContext {
 pub struct MockManagementService {
     pub responses_to_send: Arc<Mutex<Vec<LoadIsolatesResponse>>>,
     pub received_requests: Arc<Mutex<Vec<LoadIsolatesRequest>>>,
+    pub operator_info: Arc<Mutex<Result<Option<OperatorInfo>, Status>>>,
+}
+
+impl Default for MockManagementService {
+    fn default() -> Self {
+        Self {
+            responses_to_send: Arc::new(Mutex::new(Vec::new())),
+            received_requests: Arc::new(Mutex::new(Vec::new())),
+            operator_info: Arc::new(Mutex::new(Ok(Some(OperatorInfo {
+                operator_domain: "test_operator_domain".to_string(),
+                operator_role: "PRIMARY".to_string(),
+            })))),
+        }
+    }
 }
 
 #[tonic::async_trait]
 impl EzManagementService for MockManagementService {
+    async fn fetch_operator_info(
+        &self,
+        _request: Request<FetchOperatorInfoRequest>,
+    ) -> Result<Response<FetchOperatorInfoResponse>, Status> {
+        let operator_info = self.operator_info.lock().unwrap().clone()?;
+        Ok(Response::new(FetchOperatorInfoResponse { operator_info }))
+    }
+
+    async fn fetch_isolate_startup_parameters(
+        &self,
+        _request: Request<FetchIsolateStartupParametersRequest>,
+    ) -> Result<Response<FetchIsolateStartupParametersResponse>, Status> {
+        // TODO: Implement once the Enforcer client for this RPC lands.
+        Ok(Response::new(FetchIsolateStartupParametersResponse::default()))
+    }
+
     type LoadIsolatesStream =
         Pin<Box<dyn Stream<Item = Result<LoadIsolatesResponse, Status>> + Send + 'static>>;
 
@@ -308,7 +341,7 @@ impl Junction for MockSetupIsolateJunction {
 }
 
 pub async fn create_fake_container_manager(
-    setup_client: Option<Arc<SetupIsolateClient>>,
+    setup_client: Option<SetupIsolateClient>,
 ) -> (ContainerManagerRequester, tempfile::TempDir) {
     FakeContainer::clear_tracker();
 
@@ -407,7 +440,9 @@ pub async fn setup_test_context_with_requester(
     let service = MockManagementService {
         responses_to_send: Arc::new(Mutex::new(responses)),
         received_requests: received_requests.clone(),
+        ..Default::default()
     };
+    let operator_info = service.operator_info.clone();
 
     let server_handle = tokio::spawn(async move {
         let _ = Server::builder()
@@ -423,6 +458,7 @@ pub async fn setup_test_context_with_requester(
     TestContext {
         client,
         received_requests,
+        operator_info,
         server_handle,
         _server_temp_dir: server_temp_dir,
         _cm_temp_dir: tempdir().unwrap(),
@@ -448,12 +484,12 @@ pub async fn setup_test_context_with_junction(
     responses: Vec<LoadIsolatesResponse>,
     junction: MockSetupIsolateJunction,
 ) -> TestContext {
-    let setup_client = Arc::new(SetupIsolateClient::new(
+    let setup_client = SetupIsolateClient::new(
         Box::new(junction),
         "EZ_Trusted".to_string(),
         "setup".to_string(),
         "SetupService".to_string(),
-    ));
+    );
     setup_test_context_with_client(responses, Some(setup_client)).await
 }
 
@@ -465,7 +501,7 @@ pub async fn setup_test_context_without_setup_client(
 
 pub async fn setup_test_context_with_client(
     responses: Vec<LoadIsolatesResponse>,
-    setup_client: Option<Arc<SetupIsolateClient>>,
+    setup_client: Option<SetupIsolateClient>,
 ) -> TestContext {
     let (container_manager_requester, cm_temp_dir) =
         create_fake_container_manager(setup_client).await;

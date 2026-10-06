@@ -18,7 +18,7 @@ use data_scope::data_scope_validator::{
 use data_scope::manifest_validator::ManifestValidator;
 use data_scope::request::{
     FreezeIsolateScopeRequest, GetIsolateScopeRequest, ValidateBackendDependencyRequest,
-    ValidateIsolateRequest,
+    ValidateIsolateRequest, ValidateManifestOutputScopeRequest,
 };
 use data_scope::requester::DataScopeRequester;
 use data_scope_proto::enforcer::v1::DataScopeType;
@@ -171,20 +171,21 @@ impl IsolateEzBridge for IsolateEzBridgeService {
         let (mem_share_response_tx, mem_share_response_rx) = channel(CHANNEL_SIZE);
         let state_manager_clone = self.isolate_state_manager.clone();
         let mem_share_manager_clone = self.shared_memory_manager.clone();
+        let manifest_validator_clone = self.manifest_validator.clone();
+        let data_scope_requester_clone = self.data_scope_requester.clone();
         let isolate_id = self.isolate_id;
 
         tokio::spawn(async move {
             while let Some(mem_share_req) = mem_share_request_simple_stream.message().await {
-                // Freeze the DataScope and then Create MemShare-able file
-                let freeze_result = state_manager_clone
-                    .freeze_scope(FreezeIsolateScopeRequest { isolate_id })
-                    .await;
-
-                let mem_share_response = if let Err(e) = freeze_result {
-                    Err(Status::permission_denied(e.to_string()))
-                } else {
-                    mem_share_manager_clone.create_shared_mem_file(isolate_id, mem_share_req).await
-                };
+                let mem_share_response = create_memshare(
+                    &manifest_validator_clone,
+                    &state_manager_clone,
+                    &data_scope_requester_clone,
+                    &mem_share_manager_clone,
+                    isolate_id,
+                    mem_share_req,
+                )
+                .await;
 
                 let send_result = mem_share_response_tx.send(mem_share_response).await;
                 if send_result.is_err() {
@@ -242,16 +243,20 @@ impl IsolateEzBridge for IsolateEzBridgeService {
 
     async fn create_fileshare(
         &self,
-        _request: Request<CreateFileshareRequest>,
+        request: Request<CreateFileshareRequest>,
     ) -> Result<Response<CreateFileshareResponse>, Status> {
-        let _ = self
-            .isolate_state_manager
-            .freeze_scope(FreezeIsolateScopeRequest { isolate_id: self.isolate_id })
-            .await
-            .map_err(|e| Status::internal(format!("Failed to freeze sender scope: {:?}", e)))?;
+        let declared_scope = request.into_inner().data_scope.unwrap_or_default().scope_type();
+        let data_scope = resolve_share_scope(
+            &self.manifest_validator,
+            &self.isolate_state_manager,
+            &self.data_scope_requester,
+            self.isolate_id,
+            declared_scope,
+        )
+        .await?;
         let fileshare_handle = self
             .fileshare_manager
-            .create_fileshare(self.isolate_id)
+            .create_fileshare(self.isolate_id, data_scope)
             .await
             .map_err(|e| e.to_tonic_status())?;
         Ok(Response::new(CreateFileshareResponse { fileshare_handle }))
@@ -1015,7 +1020,15 @@ impl RestrictionsEnforcer {
         let route = destination_isolate_service.get_request_route();
 
         if pinned_to_ez_instance {
-            if route != Route::Remote {
+            // A service defined in the isolate's own binary manifest (e.g.
+            // peer-to-peer / cross-replica workers) is indexed as
+            // Route::Internal locally, but can be called remotely via
+            // destination_ez_instance_id when declared as a backend dependency.
+            let is_peer_replica_service = destination_isolate_service
+                .get_binary_services_index()
+                .is_some_and(|idx| idx == self.isolate_id.get_binary_services_index());
+
+            if route != Route::Remote && !is_peer_replica_service {
                 let detailed_err_msg = format!(
                     "destination_ez_instance_id is only permitted for Route::Remote dependencies; target {}.{} has route {:?}",
                     metadata.destination_operator_domain,
@@ -1122,6 +1135,64 @@ impl RestrictionsEnforcer {
         .await;
         response_tx.send(final_response).await.map_err(|_| ())
     }
+}
+
+/// Freezes the creator's scope and resolves the scope of the data it writes into a new share.
+async fn resolve_share_scope(
+    manifest_validator: &ManifestValidator,
+    isolate_state_manager: &IsolateStateManager,
+    data_scope_requester: &DataScopeRequester,
+    isolate_id: IsolateId,
+    declared_scope: DataScopeType,
+) -> Result<DataScopeType, Status> {
+    if isolate_id.is_ratified_isolate() {
+        if declared_scope == DataScopeType::Unspecified {
+            return Err(Status::invalid_argument(
+                "Ratified Isolates must declare a share DataScope",
+            ));
+        }
+        manifest_validator
+            .validate_output_scope(ValidateManifestOutputScopeRequest {
+                binary_services_index: isolate_id.get_binary_services_index(),
+                emitted_scope: declared_scope,
+            })
+            .await
+            .map_err(|e| Status::permission_denied(e.to_string()))?;
+    }
+
+    isolate_state_manager.freeze_scope(FreezeIsolateScopeRequest { isolate_id }).await.map_err(
+        |e| Status::permission_denied(format!("Failed to freeze sender scope: {:?}", e)),
+    )?;
+
+    if isolate_id.is_ratified_isolate() {
+        return Ok(declared_scope);
+    }
+    data_scope_requester
+        .get_isolate_scope(GetIsolateScopeRequest { isolate_id })
+        .await
+        .map(|response| response.current_scope)
+        .map_err(|e| Status::internal(format!("Failed to get sender scope: {:?}", e)))
+}
+
+/// Resolves the share scope and creates the shared memory region.
+async fn create_memshare(
+    manifest_validator: &ManifestValidator,
+    isolate_state_manager: &IsolateStateManager,
+    data_scope_requester: &DataScopeRequester,
+    shared_memory_manager: &SharedMemManager,
+    isolate_id: IsolateId,
+    request: CreateMemshareRequest,
+) -> Result<CreateMemshareResponse, Status> {
+    let declared_scope = request.data_scope.as_ref().map(|s| s.scope_type()).unwrap_or_default();
+    let data_scope = resolve_share_scope(
+        manifest_validator,
+        isolate_state_manager,
+        data_scope_requester,
+        isolate_id,
+        declared_scope,
+    )
+    .await?;
+    shared_memory_manager.create_shared_mem_file(isolate_id, request.region_size, data_scope).await
 }
 
 fn convert_to_isolate_request(invoke_ez_req: InvokeEzRequest) -> InvokeIsolateRequest {

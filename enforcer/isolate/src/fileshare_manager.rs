@@ -16,6 +16,7 @@ use anyhow::Result;
 use container_manager_request::{MountReadOnlyDirectory, MountWritableDirectory};
 use container_manager_requester::ContainerManagerRequester;
 use dashmap::DashMap;
+use data_scope_proto::enforcer::v1::DataScopeType;
 use isolate_info::IsolateId;
 use std::sync::Arc;
 use thiserror::Error;
@@ -33,6 +34,7 @@ type FileshareHandle = u64;
 struct Fileshare {
     owner_id: IsolateId,
     receiver_id: Option<IsolateId>,
+    data_scope: DataScopeType,
 }
 
 /// Manages fileshares between Isolates.
@@ -95,10 +97,13 @@ impl FileshareManager {
         }
     }
 
-    /// Creates a new fileshare for the given [IsolateId].
+    /// Creates a new fileshare for the given [IsolateId], recording `data_scope` as the scope of
+    /// the data written into it. The caller is responsible for validating it and freezing the
+    /// owner's scope beforehand.
     pub async fn create_fileshare(
         &self,
         sender_isolate_id: IsolateId,
+        data_scope: DataScopeType,
     ) -> Result<String, FileshareManagerError> {
         let fileshare_handle: FileshareHandle = rand::random();
         self.container_manager_requester
@@ -110,9 +115,36 @@ impl FileshareManager {
             .await
             .map_err(|e| FileshareManagerError::MountFailed(e.to_string()))?;
 
-        self.fileshares
-            .insert(fileshare_handle, Fileshare { owner_id: sender_isolate_id, receiver_id: None });
+        self.fileshares.insert(
+            fileshare_handle,
+            Fileshare { owner_id: sender_isolate_id, receiver_id: None, data_scope },
+        );
         Ok(fileshare_handle.to_string())
+    }
+
+    /// Validates that `source_isolate_id` may share every fileshare with `destination_isolate_id`
+    /// and returns the strictest scope recorded across them. Performing these checks for all
+    /// handles up front ensures that no destination is escalated and no directory is mounted when
+    /// any handle in the list is invalid.
+    pub fn share_scope(
+        &self,
+        source_isolate_id: IsolateId,
+        destination_isolate_id: IsolateId,
+        fileshare_handles: &[String],
+    ) -> Result<DataScopeType, FileshareManagerError> {
+        if source_isolate_id == destination_isolate_id {
+            return Err(FileshareManagerError::DestinationSameAsOwner);
+        }
+        fileshare_handles.iter().try_fold(DataScopeType::Unspecified, |strictest, handle| {
+            let handle_u64 =
+                handle.parse::<u64>().map_err(|_| FileshareManagerError::InvalidHandle)?;
+            let fileshare =
+                self.fileshares.get(&handle_u64).ok_or(FileshareManagerError::HandleNotFound)?;
+            if fileshare.owner_id != source_isolate_id {
+                return Err(FileshareManagerError::UnauthorizedNotifyEvent);
+            }
+            Ok(strictest.max(fileshare.data_scope))
+        })
     }
 
     /// Shares a file with the given [IsolateId].

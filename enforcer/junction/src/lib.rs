@@ -19,6 +19,7 @@ use data_scope::request::{
     ValidateManifestInputScopeRequest, ValidateManifestOutputScopeRequest,
 };
 use data_scope::requester::DataScopeRequester;
+use data_scope_proto::enforcer::v1::DataScopeType;
 use enforcer_proto::enforcer::v1::ez_isolate_bridge_client::EzIsolateBridgeClient;
 use enforcer_proto::enforcer::v1::{
     ControlPlaneMetadata, EzPayloadIsolateScope, InvokeIsolateRequest, InvokeIsolateResponse,
@@ -78,6 +79,34 @@ struct RequestContext {
     /// state and this was the final in-flight request, it triggers the transition
     /// to `Idle` and subsequent container reset.
     _inflight_guard: InflightGuard,
+    /// RAII guard tracking this streaming RPC on behalf of the request source Isolate (if any).
+    /// Shares received over this stream may escalate and retire the source Isolate, so this
+    /// guard ensures it transitions from `Retiring` to `Idle` once the stream completes.
+    _source_inflight_guard: Option<InflightGuard>,
+}
+
+struct StartStreamingProxiesArgs {
+    initial_invoke_request: InvokeIsolateRequest,
+    client_to_junction_rx: Receiver<InvokeIsolateRequest>,
+    junction_to_client_tx: Sender<Result<InvokeIsolateResponse, EzError>>,
+    stream_id: u64,
+    metric_attr: MetricAttributes,
+    request_context: RequestContext,
+    metrics_context_rx:
+        oneshot::Receiver<(MetricAttributes, metrics::common::CallTracker<JunctionMetrics>)>,
+    timeout: Option<std::time::Duration>,
+}
+
+#[derive(Clone, Debug)]
+pub struct IsolateJunctionArgs {
+    pub data_scope_requester: DataScopeRequester,
+    pub isolate_service_mapper: IsolateServiceMapper,
+    pub shared_mem_manager: SharedMemManager,
+    pub fileshare_manager: FileshareManager,
+    pub state_manager: IsolateStateManager,
+    pub manifest_validator: ManifestValidator,
+    pub shm_payload_threshold: u64,
+    pub max_decoding_message_size: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -127,18 +156,12 @@ impl Junction for IsolateJunction {
                 let destination_isolate_id = destination_isolate_info.id;
                 let _inflight_guard =
                     self.state_manager.acquire_inflight_guard(destination_isolate_id).await;
+                // Shares may escalate and retire the caller, so hold a guard for it as well to
+                // ensure it transitions from Retiring to Idle once this request completes.
+                let _client_inflight_guard =
+                    self.acquire_optional_inflight_guard(client_isolate_id_option).await;
                 if destination_isolate_info.is_retiring {
-                    if let Err(e) = self
-                        .state_manager
-                        .update_state(destination_isolate_id, IsolateState::Retiring)
-                        .await
-                    {
-                        log::warn!(
-                            "Failed to update isolate {} state to Retiring: {}",
-                            destination_isolate_id,
-                            e
-                        );
-                    }
+                    self.mark_isolate_retiring(destination_isolate_id).await;
                 }
                 let masked_id = rand::random::<u64>();
                 let original_msg_id =
@@ -195,57 +218,61 @@ impl Junction for IsolateJunction {
                     &mut invoke_isolate_response,
                 )?;
 
-                match invoke_isolate_response.control_plane_metadata.as_mut() {
-                    Some(control_plane_metadata) => {
-                        control_plane_metadata.ipc_message_id = original_msg_id;
-                        if !control_plane_metadata.shared_memory_handles.is_empty() {
-                            let mem_share_result = self
-                                .handle_shared_memory(
-                                    control_plane_metadata,
-                                    destination_isolate_id,
-                                    client_isolate_id_option,
-                                )
-                                .await;
-                            if mem_share_result.is_err() {
-                                log::warn!("MemShare failed: {:?}", mem_share_result);
-                                self.metrics.record_error(&metric_attr.base(), "mem_share_failed");
-                                return Err(IsolateStatusCode::MemShareFailed.to_ez_error());
-                            }
+                let Some(control_plane_metadata) =
+                    invoke_isolate_response.control_plane_metadata.as_mut()
+                else {
+                    self.metrics.record_error(&metric_attr.base(), "invalid_request");
+                    log::info!("InvokeIsolateResponse missing required ControlPlaneMetadata");
+                    // TODO Redact error code if error is from Opaque Isolate having private data.
+                    return Err(IsolateStatusCode::MissingControlPlaneMetadata.to_ez_error());
+                };
+                control_plane_metadata.ipc_message_id = original_msg_id;
+
+                // Validate before mounting any shares so that a rejected response never leaves
+                // files or shared memory mounted in the caller's container.
+                self.validate_invoke_response(
+                    destination_isolate_id,
+                    &mut invoke_isolate_response,
+                    is_from_public_api,
+                )
+                .await?;
+
+                if let Some(control_plane_metadata) =
+                    &invoke_isolate_response.control_plane_metadata
+                {
+                    if !control_plane_metadata.shared_memory_handles.is_empty() {
+                        let mem_share_result = self
+                            .handle_shared_memory(
+                                control_plane_metadata,
+                                destination_isolate_id,
+                                client_isolate_id_option,
+                            )
+                            .await;
+                        if mem_share_result.is_err() {
+                            log::warn!("MemShare failed: {:?}", mem_share_result);
+                            self.metrics.record_error(&metric_attr.base(), "mem_share_failed");
+                            return Err(IsolateStatusCode::MemShareFailed.to_ez_error());
                         }
-                        if !control_plane_metadata.fileshare_handles.is_empty() {
-                            let file_share_result = self
-                                .handle_fileshare(
-                                    control_plane_metadata,
-                                    destination_isolate_id,
-                                    client_isolate_id_option,
-                                )
-                                .await;
-                            if let Err(e) = file_share_result {
-                                log::warn!("FileShare failed: {:?}", e);
-                                self.metrics.record_error(&metric_attr.base(), "file_share_failed");
-                                if let Some(fileshare_err) =
-                                    e.downcast_ref::<FileshareManagerError>()
-                                {
-                                    return Err(fileshare_err.to_ez_error());
-                                }
-                                return Err(IsolateStatusCode::FileShareFailed.to_ez_error());
-                            }
-                        }
-                        self.validate_invoke_response(
-                            destination_isolate_id,
-                            &mut invoke_isolate_response,
-                            is_from_public_api,
-                        )
-                        .await?;
-                        Ok(invoke_isolate_response)
                     }
-                    None => {
-                        self.metrics.record_error(&metric_attr.base(), "invalid_request");
-                        log::info!("InvokeIsolateResponse missing required ControlPlaneMetadata");
-                        // TODO Redact error code if error is from Opaque Isolate having private data.
-                        return Err(IsolateStatusCode::MissingControlPlaneMetadata.to_ez_error());
+                    if !control_plane_metadata.fileshare_handles.is_empty() {
+                        let file_share_result = self
+                            .handle_fileshare(
+                                control_plane_metadata,
+                                destination_isolate_id,
+                                client_isolate_id_option,
+                            )
+                            .await;
+                        if let Err(e) = file_share_result {
+                            log::warn!("FileShare failed: {:?}", e);
+                            self.metrics.record_error(&metric_attr.base(), "file_share_failed");
+                            if let Some(fileshare_err) = e.downcast_ref::<FileshareManagerError>() {
+                                return Err(fileshare_err.to_ez_error());
+                            }
+                            return Err(IsolateStatusCode::FileShareFailed.to_ez_error());
+                        }
                     }
                 }
+                Ok(invoke_isolate_response)
             }
             Err(e) => {
                 self.metrics
@@ -372,17 +399,19 @@ impl IsolateJunction {
             };
 
             // Phase 3: Start proxies and initiate RPC
+            let source_inflight_guard =
+                self_clone.acquire_optional_inflight_guard(request_source_isolate_id_option).await;
             let request_context = RequestContext {
                 isolate_id: destination_isolate_id,
                 request_source_isolate_id: request_source_isolate_id_option,
                 original_msg_id: original_ipc_message_id,
                 is_from_public_api,
                 _inflight_guard: inflight_guard,
+                _source_inflight_guard: source_inflight_guard,
             };
 
             self_clone
-                .start_streaming_proxies(
-                    destination_isolate_id,
+                .start_streaming_proxies(StartStreamingProxiesArgs {
                     initial_invoke_request,
                     client_to_junction_rx,
                     junction_to_client_tx,
@@ -391,7 +420,7 @@ impl IsolateJunction {
                     request_context,
                     metrics_context_rx,
                     timeout,
-                )
+                })
                 .await;
         }
         .instrument(span)
@@ -409,17 +438,7 @@ impl IsolateJunction {
 
         let guard = self.state_manager.acquire_inflight_guard(destination_isolate_info.id).await;
         if destination_isolate_info.is_retiring {
-            if let Err(e) = self
-                .state_manager
-                .update_state(destination_isolate_info.id, IsolateState::Retiring)
-                .await
-            {
-                log::warn!(
-                    "Failed to update isolate {} state to Retiring: {}",
-                    destination_isolate_info.id,
-                    e
-                );
-            }
+            self.mark_isolate_retiring(destination_isolate_info.id).await;
         }
         Ok((destination_isolate_info.id, guard))
     }
@@ -442,50 +461,37 @@ impl IsolateJunction {
         Ok((stream_id, original_ipc_message_id))
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn start_streaming_proxies(
-        &self,
-        destination_isolate_id: IsolateId,
-        initial_invoke_request: InvokeIsolateRequest,
-        client_to_junction_rx: Receiver<InvokeIsolateRequest>,
-        junction_to_client_tx: Sender<Result<InvokeIsolateResponse, EzError>>,
-        stream_id: u64,
-        metric_attr: MetricAttributes,
-        request_context: RequestContext,
-        metrics_context_rx: oneshot::Receiver<(
-            MetricAttributes,
-            metrics::common::CallTracker<JunctionMetrics>,
-        )>,
-        timeout: Option<std::time::Duration>,
-    ) {
+    async fn start_streaming_proxies(&self, args: StartStreamingProxiesArgs) {
+        let destination_isolate_id = args.request_context.isolate_id;
+
         let (junction_to_isolate_tx, junction_to_isolate_rx) =
             channel::<InvokeIsolateRequest>(CHANNEL_SIZE);
         let outbound_stream = ReceiverStream::new(junction_to_isolate_rx);
-        if let Err(_e) = junction_to_isolate_tx.send(initial_invoke_request).await {
-            let _ = junction_to_client_tx
+        if let Err(_e) = junction_to_isolate_tx.send(args.initial_invoke_request).await {
+            let _ = args
+                .junction_to_client_tx
                 .send(Err(IsolateStatusCode::DestinationChannelClosed.to_ez_error()))
                 .await;
             return;
         }
 
-        let junction_to_client_tx_clone = junction_to_client_tx.clone();
+        let junction_to_client_tx_clone = args.junction_to_client_tx.clone();
         let self_clone = self.clone();
-        let metric_attr_clone = metric_attr.clone();
         tokio::spawn(async move {
             self_clone
                 .proxy_streaming_isolate_requests(
-                    client_to_junction_rx,
+                    args.client_to_junction_rx,
                     junction_to_isolate_tx,
                     junction_to_client_tx_clone,
                     destination_isolate_id,
-                    stream_id,
-                    metric_attr_clone,
+                    args.stream_id,
+                    args.metric_attr,
                 )
                 .await;
         });
 
         let connect_result = self
-            .establish_isolate_streaming_rpc(destination_isolate_id, outbound_stream, timeout)
+            .establish_isolate_streaming_rpc(destination_isolate_id, outbound_stream, args.timeout)
             .await;
         let Ok(invoke_isolate_response_stream) = connect_result else {
             let connect_error = connect_result.unwrap_err();
@@ -495,7 +501,7 @@ impl IsolateJunction {
                     "Error initiating stream with Isolate: {connect_error:#?}"
                 )),
             });
-            let _ = junction_to_client_tx.send(Err(connect_ez_error)).await;
+            let _ = args.junction_to_client_tx.send(Err(connect_ez_error)).await;
             return;
         };
 
@@ -504,9 +510,9 @@ impl IsolateJunction {
             self_clone2
                 .proxy_streaming_isolate_responses(
                     invoke_isolate_response_stream,
-                    junction_to_client_tx,
-                    request_context,
-                    metrics_context_rx,
+                    args.junction_to_client_tx,
+                    args.request_context,
+                    args.metrics_context_rx,
                 )
                 .await;
         });
@@ -540,29 +546,19 @@ impl IsolateJunction {
         Ok(invoke_isolate_response_stream)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        data_scope_requester: DataScopeRequester,
-        isolate_service_mapper: IsolateServiceMapper,
-        shared_mem_manager: SharedMemManager,
-        fileshare_manager: FileshareManager,
-        state_manager: IsolateStateManager,
-        manifest_validator: ManifestValidator,
-        shm_payload_threshold: u64,
-        max_decoding_message_size: usize,
-    ) -> Self {
+    pub fn new(args: IsolateJunctionArgs) -> Self {
         let metrics = JunctionMetrics::default();
         Self {
-            isolate_service_mapper,
-            data_scope_requester,
-            shared_mem_manager,
+            isolate_service_mapper: args.isolate_service_mapper,
+            data_scope_requester: args.data_scope_requester,
+            shared_mem_manager: args.shared_mem_manager,
             isolate_channel_pool_map: Arc::new(DashMap::new()),
-            fileshare_manager,
-            state_manager,
-            manifest_validator,
+            fileshare_manager: args.fileshare_manager,
+            state_manager: args.state_manager,
+            manifest_validator: args.manifest_validator,
             metrics,
-            shm_payload_threshold,
-            max_decoding_message_size,
+            shm_payload_threshold: args.shm_payload_threshold,
+            max_decoding_message_size: args.max_decoding_message_size,
         }
     }
 
@@ -781,69 +777,70 @@ impl IsolateJunction {
         let original_msg_id = request_context.original_msg_id;
         let request_source_isolate_id_option = request_context.request_source_isolate_id;
         let is_from_public_api = request_context.is_from_public_api;
-        match invoke_isolate_response.control_plane_metadata.as_mut() {
-            Some(control_plane_metadata) => {
-                control_plane_metadata.ipc_message_id = original_msg_id;
-                if !control_plane_metadata.shared_memory_handles.is_empty() {
-                    let mem_share_result = self
-                        .handle_shared_memory(
-                            control_plane_metadata,
-                            isolate_id,
-                            request_source_isolate_id_option,
-                        )
+        let Some(control_plane_metadata) = invoke_isolate_response.control_plane_metadata.as_mut()
+        else {
+            // This case only happens during the initial connect
+            // when we send the Isolate an empty request
+            log::info!("received response with no metadata");
+            return;
+        };
+        control_plane_metadata.ipc_message_id = original_msg_id;
+
+        // Validate before mounting any shares so that a rejected response never leaves
+        // files or shared memory mounted in the request source's container.
+        if let Err(e) = self
+            .validate_invoke_response(isolate_id, &mut invoke_isolate_response, is_from_public_api)
+            .await
+        {
+            self.metrics.record_error(attributes, "validate_invoke_response_error");
+            log::info!("Response validation failed: {:?}", e);
+            let _ = junction_to_client_tx.send(Err(e)).await;
+            return;
+        }
+
+        if let Some(control_plane_metadata) = &invoke_isolate_response.control_plane_metadata {
+            if !control_plane_metadata.shared_memory_handles.is_empty() {
+                let mem_share_result = self
+                    .handle_shared_memory(
+                        control_plane_metadata,
+                        isolate_id,
+                        request_source_isolate_id_option,
+                    )
+                    .await;
+                if mem_share_result.is_err() {
+                    log::info!("MemShare failed: {:?}", mem_share_result);
+                    self.metrics.record_error(attributes, "mem_share_failed");
+                    // Note this error goes to the client, so we should not provide any details
+                    // about the error.
+                    let _ = junction_to_client_tx
+                        .send(Err(IsolateStatusCode::MemShareFailed.to_ez_error()))
                         .await;
-                    if mem_share_result.is_err() {
-                        log::info!("MemShare failed: {:?}", mem_share_result);
-                        self.metrics.record_error(attributes, "mem_share_failed");
-                        // Note this error goes to the client, so we should not provide any details
-                        // about the error.
-                        let _ = junction_to_client_tx
-                            .send(Err(IsolateStatusCode::MemShareFailed.to_ez_error()))
-                            .await;
-                    }
+                    return;
                 }
-                if !control_plane_metadata.fileshare_handles.is_empty() {
-                    let file_share_result = self
-                        .handle_fileshare(
-                            control_plane_metadata,
-                            isolate_id,
-                            request_source_isolate_id_option,
-                        )
-                        .await;
-                    if let Err(e) = file_share_result {
-                        log::info!("FileShare failed: {:?}", e);
-                        self.metrics.record_error(attributes, "file_share_failed");
-                        let ez_err = if let Some(fileshare_err) =
-                            e.downcast_ref::<FileshareManagerError>()
-                        {
+            }
+            if !control_plane_metadata.fileshare_handles.is_empty() {
+                let file_share_result = self
+                    .handle_fileshare(
+                        control_plane_metadata,
+                        isolate_id,
+                        request_source_isolate_id_option,
+                    )
+                    .await;
+                if let Err(e) = file_share_result {
+                    log::info!("FileShare failed: {:?}", e);
+                    self.metrics.record_error(attributes, "file_share_failed");
+                    let ez_err =
+                        if let Some(fileshare_err) = e.downcast_ref::<FileshareManagerError>() {
                             fileshare_err.to_ez_error()
                         } else {
                             IsolateStatusCode::FileShareFailed.to_ez_error()
                         };
-                        let _ = junction_to_client_tx.send(Err(ez_err)).await;
-                    }
+                    let _ = junction_to_client_tx.send(Err(ez_err)).await;
+                    return;
                 }
-                if let Err(e) = self
-                    .validate_invoke_response(
-                        isolate_id,
-                        &mut invoke_isolate_response,
-                        is_from_public_api,
-                    )
-                    .await
-                {
-                    self.metrics.record_error(attributes, "validate_invoke_response_error");
-                    log::info!("Response validation failed: {:?}", e);
-                    let _ = junction_to_client_tx.send(Err(e)).await;
-                } else {
-                    let _ = junction_to_client_tx.send(Ok(invoke_isolate_response)).await;
-                }
-            }
-            None => {
-                // This case only happens during the initial connect
-                // when we send the Isolate an empty request
-                log::info!("received response with no metadata");
             }
         }
+        let _ = junction_to_client_tx.send(Ok(invoke_isolate_response)).await;
     }
 
     async fn validate_invoke_response(
@@ -931,6 +928,12 @@ impl IsolateJunction {
         let Some(destination_isolate_id) = destination_isolate_id_option else {
             return Err(anyhow::anyhow!("missing destination_isolate_id for file share"));
         };
+        let mem_share_data_scope = self.shared_mem_manager.share_scope(
+            source_isolate_id,
+            destination_isolate_id,
+            &control_plane_metadata.shared_memory_handles,
+        )?;
+        self.validate_data_transfer(destination_isolate_id, mem_share_data_scope).await?;
         for file_handle in &control_plane_metadata.shared_memory_handles {
             self.shared_mem_manager
                 .share_file(source_isolate_id, destination_isolate_id, file_handle.to_string())
@@ -948,12 +951,51 @@ impl IsolateJunction {
         let Some(destination_isolate_id) = destination_isolate_id_option else {
             return Err(anyhow::anyhow!("missing destination_isolate_id for file share"));
         };
+        let mem_share_data_scope = self.fileshare_manager.share_scope(
+            source_isolate_id,
+            destination_isolate_id,
+            &control_plane_metadata.fileshare_handles,
+        )?;
+        self.validate_data_transfer(destination_isolate_id, mem_share_data_scope).await?;
         for fileshare_handle in &control_plane_metadata.fileshare_handles {
             self.fileshare_manager
                 .share_file(fileshare_handle, source_isolate_id, destination_isolate_id)
                 .await?;
         }
         Ok(())
+    }
+
+    /// Validates the transfer and retires the destination Isolate if the scope escalation crossed
+    /// the sensitive session threshold.
+    async fn validate_data_transfer(
+        &self,
+        destination_isolate_id: IsolateId,
+        mem_share_data_scope: DataScopeType,
+    ) -> Result<(), DataScopeError> {
+        let response = self
+            .data_scope_requester
+            .validate_data_transfer(destination_isolate_id, mem_share_data_scope)
+            .await?;
+        if response.is_retiring {
+            self.mark_isolate_retiring(destination_isolate_id).await;
+        }
+        Ok(())
+    }
+
+    async fn mark_isolate_retiring(&self, isolate_id: IsolateId) {
+        if let Err(e) = self.state_manager.update_state(isolate_id, IsolateState::Retiring).await {
+            log::warn!("Failed to update isolate {} state to Retiring: {}", isolate_id, e);
+        }
+    }
+
+    async fn acquire_optional_inflight_guard(
+        &self,
+        isolate_id_option: Option<IsolateId>,
+    ) -> Option<InflightGuard> {
+        match isolate_id_option {
+            Some(isolate_id) => Some(self.state_manager.acquire_inflight_guard(isolate_id).await),
+            None => None,
+        }
     }
 }
 

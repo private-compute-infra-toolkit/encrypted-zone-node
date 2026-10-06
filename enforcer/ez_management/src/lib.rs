@@ -23,10 +23,11 @@ use container_manager_requester::{
 use ez_management_proto::enforcer::v2::ez_management_service_client::EzManagementServiceClient;
 use ez_management_proto::enforcer::v2::load_isolates_request::Request as LoadIsolatesRequestType;
 use ez_management_proto::enforcer::v2::load_isolates_response::Response as LoadIsolatesResponseType;
-pub use ez_management_proto::enforcer::v2::LoadIsolatesError;
 use ez_management_proto::enforcer::v2::{
-    LoadIsolatesRequest, LoadIsolatesResponse, LoadIsolatesResult, ReadyToLoadPackagesRequest,
+    FetchOperatorInfoRequest, LoadIsolatesRequest, LoadIsolatesResponse, LoadIsolatesResult,
+    ReadyToLoadPackagesRequest,
 };
+pub use ez_management_proto::enforcer::v2::{LoadIsolatesError, OperatorInfo};
 use grpc_connector::GrpcChannelPool;
 use isolate_endorsement_proto::enforcer::v1::{ValidateIsolateEndorsementResponse, Validity};
 use isolate_info::{get_binary_services_index, BinaryServicesIndex};
@@ -35,6 +36,7 @@ use package_utils::{AssembledPackage, PackageAccumulator};
 use setup_isolate_proto::enforcer::v2::{ExpectedClaims, ValidateIsolateEndorsementRequest};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tokio::sync::mpsc::{self, Sender};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
@@ -44,6 +46,7 @@ pub use types::EzManagementError;
 const DEFAULT_REQUEST_CHANNEL_BUFFER_SIZE: usize = 512;
 const ENV_PACKAGE_OUTPUT_DIR: &str = "EZ_PACKAGE_OUTPUT_DIR";
 const DEFAULT_PACKAGE_OUTPUT_DIR: &str = "/tmp";
+const FETCH_OPERATOR_INFO_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Client for communicating with the EzManagementService.
 #[derive(Clone)]
@@ -110,6 +113,31 @@ impl EzManagementClient {
             isolate_packages: HashMap::new(),
             _package_temp_dir: Some(Arc::new(package_temp_dir)),
         })
+    }
+
+    /// Fetches and validates the node-level [`OperatorInfo`].
+    pub async fn fetch_operator_info(&self) -> Result<OperatorInfo, EzManagementError> {
+        let mut client = self.client.clone();
+        let response = tokio::time::timeout(
+            FETCH_OPERATOR_INFO_TIMEOUT,
+            client.fetch_operator_info(FetchOperatorInfoRequest {}),
+        )
+        .await
+        .map_err(|_| {
+            EzManagementError::FetchOperatorInfoFailed(format!(
+                "timed out after {FETCH_OPERATOR_INFO_TIMEOUT:?}"
+            ))
+        })?
+        .map_err(|e| EzManagementError::FetchOperatorInfoFailed(e.to_string()))?;
+        let operator_info = response.into_inner().operator_info.ok_or_else(|| {
+            EzManagementError::InvalidOperatorInfo("operator_info is missing".to_string())
+        })?;
+        if operator_info.operator_domain.is_empty() || operator_info.operator_role.is_empty() {
+            return Err(EzManagementError::InvalidOperatorInfo(format!(
+                "operator_domain and operator_role must be non-empty: {operator_info:?}"
+            )));
+        }
+        Ok(operator_info)
     }
 
     /// Loads manifests and streams isolate packages from EzManagementService, launching
@@ -288,7 +316,7 @@ impl EzManagementClient {
     async fn get_setup_isolate_client(
         &self,
         isolate_type: &IsolateType,
-    ) -> Result<std::sync::Arc<setup_isolate_client::SetupIsolateClient>, EzManagementError> {
+    ) -> Result<setup_isolate_client::SetupIsolateClient, EzManagementError> {
         let client_opt = match self.container_manager_requester.get_setup_isolate_client().await {
             Ok(c) => c,
             Err(e) => {

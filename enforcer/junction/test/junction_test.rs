@@ -11,11 +11,13 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-use container_manager_request::{ContainerManagerRequest, ResetIsolateResponse};
+use container_manager_request::{
+    ContainerManagerRequest, MountDirectoryResponse, MountFileResponse, ResetIsolateResponse,
+};
 use container_manager_requester::ContainerManagerRequester;
 use data_scope::error::DataScopeError;
 use data_scope::manifest_validator::ManifestValidator;
-use data_scope::request::AddManifestScopeRequest;
+use data_scope::request::{AddIsolateRequest, AddManifestScopeRequest, GetIsolateScopeRequest};
 use data_scope::requester::DataScopeRequester;
 use data_scope_proto::enforcer::v1::DataScopeType;
 use enforcer_proto::enforcer::v1::ez_isolate_bridge_server::{
@@ -26,14 +28,14 @@ use enforcer_proto::enforcer::v1::{
     IsolateDataScope, IsolateState,
 };
 use fileshare_manager::FileshareManager;
-use isolate_info::{IsolateId, IsolateServiceInfo};
+use isolate_info::{BinaryServicesIndex, IsolateId, IsolateServiceInfo};
 use isolate_service_mapper::IsolateServiceMapper;
 use isolate_test_utils::{
     create_echo_invoke_isolate_response, ScopeDragInstruction, DEFAULT_ISOLATE_UNIX_SOCKET,
     ECHO_ISOLATE_METHOD_NAME, ECHO_ISOLATE_OPERATOR_DOMAIN, ECHO_ISOLATE_SERVICE_NAME,
     ERROR_ISOLATE_SERVICE_NAME, TEST_ERROR_CODE, TEST_ERROR_MESSAGE,
 };
-use junction::IsolateJunction;
+use junction::{IsolateJunction, IsolateJunctionArgs};
 use junction_test_utils::{
     create_add_isolate_request, TestHarness, CLONE_ECHO_ISOLATE_SERVICE_NAME,
     JUNCTION_TEST_CHANNEL_SIZE, QUALIFIED_ECHO_ISOLATE_SERVICE_NAME,
@@ -132,16 +134,16 @@ async fn test_metadata_propagation_to_isolate() {
     let manifest_validator = ManifestValidator::default();
     let isolate_state_manager =
         IsolateStateManager::new(data_scope_requester.clone(), container_manager_requester.clone());
-    let isolate_junction = IsolateJunction::new(
-        data_scope_requester.clone(),
-        isolate_service_mapper.clone(),
-        shared_memory_manager.clone(),
-        fileshare_manager.clone(),
-        isolate_state_manager.clone(),
-        manifest_validator.clone(),
-        100 * 1024 * 1024, // 100MiB
-        DEFAULT_MAX_DECODING_MESSAGE_SIZE,
-    );
+    let isolate_junction = IsolateJunction::new(IsolateJunctionArgs {
+        data_scope_requester: data_scope_requester.clone(),
+        isolate_service_mapper: isolate_service_mapper.clone(),
+        shared_mem_manager: shared_memory_manager.clone(),
+        fileshare_manager: fileshare_manager.clone(),
+        state_manager: isolate_state_manager.clone(),
+        manifest_validator: manifest_validator.clone(),
+        shm_payload_threshold: 100 * 1024 * 1024, // 100MiB
+        max_decoding_message_size: DEFAULT_MAX_DECODING_MESSAGE_SIZE,
+    });
 
     let isolate_service_info = IsolateServiceInfo {
         operator_domain: ECHO_ISOLATE_OPERATOR_DOMAIN.to_string(),
@@ -1330,16 +1332,16 @@ async fn test_junction_unary_datascope_bypass() {
     let isolate_state_manager =
         IsolateStateManager::new(data_scope_requester.clone(), container_manager_requester.clone());
 
-    let isolate_junction = IsolateJunction::new(
-        data_scope_requester.clone(),
-        isolate_service_mapper.clone(),
-        shared_memory_manager.clone(),
-        fileshare_manager.clone(),
-        isolate_state_manager.clone(),
-        manifest_validator.clone(),
-        100 * 1024 * 1024,
-        DEFAULT_MAX_DECODING_MESSAGE_SIZE,
-    );
+    let isolate_junction = IsolateJunction::new(IsolateJunctionArgs {
+        data_scope_requester: data_scope_requester.clone(),
+        isolate_service_mapper: isolate_service_mapper.clone(),
+        shared_mem_manager: shared_memory_manager.clone(),
+        fileshare_manager: fileshare_manager.clone(),
+        state_manager: isolate_state_manager.clone(),
+        manifest_validator: manifest_validator.clone(),
+        shm_payload_threshold: 100 * 1024 * 1024,
+        max_decoding_message_size: DEFAULT_MAX_DECODING_MESSAGE_SIZE,
+    });
 
     let isolate_service_info = IsolateServiceInfo {
         operator_domain: "scope.test".to_string(),
@@ -1469,16 +1471,16 @@ async fn test_junction_streaming_deadlock_fix() {
     let manifest_validator = ManifestValidator::default();
     let isolate_state_manager =
         IsolateStateManager::new(data_scope_requester.clone(), container_manager_requester.clone());
-    let isolate_junction = IsolateJunction::new(
-        data_scope_requester.clone(),
-        isolate_service_mapper.clone(),
-        shared_memory_manager.clone(),
-        fileshare_manager.clone(),
-        isolate_state_manager.clone(),
-        manifest_validator.clone(),
-        100 * 1024 * 1024,
-        DEFAULT_MAX_DECODING_MESSAGE_SIZE,
-    );
+    let isolate_junction = IsolateJunction::new(IsolateJunctionArgs {
+        data_scope_requester: data_scope_requester.clone(),
+        isolate_service_mapper: isolate_service_mapper.clone(),
+        shared_mem_manager: shared_memory_manager.clone(),
+        fileshare_manager: fileshare_manager.clone(),
+        state_manager: isolate_state_manager.clone(),
+        manifest_validator: manifest_validator.clone(),
+        shm_payload_threshold: 100 * 1024 * 1024,
+        max_decoding_message_size: DEFAULT_MAX_DECODING_MESSAGE_SIZE,
+    });
 
     let isolate_service_info = IsolateServiceInfo {
         operator_domain: "deadlock_domain".to_string(),
@@ -1573,16 +1575,16 @@ async fn test_junction_unary_flow_shm_response_to_inline_data() {
     let manifest_validator = ManifestValidator::default();
     let isolate_state_manager =
         IsolateStateManager::new(data_scope_requester.clone(), container_manager_requester.clone());
-    let isolate_junction = IsolateJunction::new(
-        data_scope_requester.clone(),
-        isolate_service_mapper.clone(),
-        shared_memory_manager.clone(),
-        fileshare_manager.clone(),
-        isolate_state_manager.clone(),
-        manifest_validator.clone(),
-        100 * 1024 * 1024, // 100MiB
-        DEFAULT_MAX_DECODING_MESSAGE_SIZE,
-    );
+    let isolate_junction = IsolateJunction::new(IsolateJunctionArgs {
+        data_scope_requester: data_scope_requester.clone(),
+        isolate_service_mapper: isolate_service_mapper.clone(),
+        shared_mem_manager: shared_memory_manager.clone(),
+        fileshare_manager: fileshare_manager.clone(),
+        state_manager: isolate_state_manager.clone(),
+        manifest_validator: manifest_validator.clone(),
+        shm_payload_threshold: 100 * 1024 * 1024, // 100MiB
+        max_decoding_message_size: DEFAULT_MAX_DECODING_MESSAGE_SIZE,
+    });
 
     let isolate_service_info = IsolateServiceInfo {
         operator_domain: ECHO_ISOLATE_OPERATOR_DOMAIN.to_string(),
@@ -1731,16 +1733,16 @@ async fn test_junction_streaming_request_shm_payload() {
     let manifest_validator = ManifestValidator::default();
     let isolate_state_manager =
         IsolateStateManager::new(data_scope_requester.clone(), container_manager_requester.clone());
-    let isolate_junction = IsolateJunction::new(
-        data_scope_requester.clone(),
-        isolate_service_mapper.clone(),
-        shared_memory_manager.clone(),
-        fileshare_manager.clone(),
-        isolate_state_manager.clone(),
-        manifest_validator.clone(),
-        1, // Threshold of 1 byte to force SHM writing
-        DEFAULT_MAX_DECODING_MESSAGE_SIZE,
-    );
+    let isolate_junction = IsolateJunction::new(IsolateJunctionArgs {
+        data_scope_requester: data_scope_requester.clone(),
+        isolate_service_mapper: isolate_service_mapper.clone(),
+        shared_mem_manager: shared_memory_manager.clone(),
+        fileshare_manager: fileshare_manager.clone(),
+        state_manager: isolate_state_manager.clone(),
+        manifest_validator: manifest_validator.clone(),
+        shm_payload_threshold: 1, // Threshold of 1 byte to force SHM writing
+        max_decoding_message_size: DEFAULT_MAX_DECODING_MESSAGE_SIZE,
+    });
 
     let isolate_service_info = IsolateServiceInfo {
         operator_domain: ECHO_ISOLATE_OPERATOR_DOMAIN.to_string(),
@@ -1908,16 +1910,16 @@ async fn test_junction_streaming_response_shm_payload() {
     let manifest_validator = ManifestValidator::default();
     let isolate_state_manager =
         IsolateStateManager::new(data_scope_requester.clone(), container_manager_requester.clone());
-    let isolate_junction = IsolateJunction::new(
-        data_scope_requester.clone(),
-        isolate_service_mapper.clone(),
-        shared_memory_manager.clone(),
-        fileshare_manager.clone(),
-        isolate_state_manager.clone(),
-        manifest_validator.clone(),
-        100 * 1024 * 1024, // threshold high, so request is inline
-        DEFAULT_MAX_DECODING_MESSAGE_SIZE,
-    );
+    let isolate_junction = IsolateJunction::new(IsolateJunctionArgs {
+        data_scope_requester: data_scope_requester.clone(),
+        isolate_service_mapper: isolate_service_mapper.clone(),
+        shared_mem_manager: shared_memory_manager.clone(),
+        fileshare_manager: fileshare_manager.clone(),
+        state_manager: isolate_state_manager.clone(),
+        manifest_validator: manifest_validator.clone(),
+        shm_payload_threshold: 100 * 1024 * 1024, // threshold high, so request is inline
+        max_decoding_message_size: DEFAULT_MAX_DECODING_MESSAGE_SIZE,
+    });
 
     let isolate_service_info = IsolateServiceInfo {
         operator_domain: ECHO_ISOLATE_OPERATOR_DOMAIN.to_string(),
@@ -2088,16 +2090,16 @@ async fn test_junction_streaming_half_close_without_http2_headers() {
     let manifest_validator = ManifestValidator::default();
     let isolate_state_manager =
         IsolateStateManager::new(data_scope_requester.clone(), container_manager_requester.clone());
-    let isolate_junction = IsolateJunction::new(
-        data_scope_requester.clone(),
-        isolate_service_mapper.clone(),
-        shared_memory_manager.clone(),
-        fileshare_manager.clone(),
-        isolate_state_manager.clone(),
-        manifest_validator.clone(),
-        100 * 1024 * 1024,
-        DEFAULT_MAX_DECODING_MESSAGE_SIZE,
-    );
+    let isolate_junction = IsolateJunction::new(IsolateJunctionArgs {
+        data_scope_requester: data_scope_requester.clone(),
+        isolate_service_mapper: isolate_service_mapper.clone(),
+        shared_mem_manager: shared_memory_manager.clone(),
+        fileshare_manager: fileshare_manager.clone(),
+        state_manager: isolate_state_manager.clone(),
+        manifest_validator: manifest_validator.clone(),
+        shm_payload_threshold: 100 * 1024 * 1024,
+        max_decoding_message_size: DEFAULT_MAX_DECODING_MESSAGE_SIZE,
+    });
 
     let isolate_service_info = IsolateServiceInfo {
         operator_domain: ECHO_ISOLATE_OPERATOR_DOMAIN.to_string(),
@@ -2159,4 +2161,324 @@ async fn test_junction_streaming_half_close_without_http2_headers() {
         .expect("Test deadlocked! The isolate server never observed a stream half-close sent by the client.");
 
     let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn test_memshare_denied_when_receiver_scope_disallowed() {
+    let mut test_harness = TestHarness::new().await;
+    let read_only_mounts =
+        spawn_fake_container_manager(test_harness.container_manager_request_rx.take().unwrap());
+    let memshare_handle = test_harness
+        .shared_mem_manager
+        .create_shared_mem_file(test_harness.echo_isolate_id, 1024, DataScopeType::UserPrivate)
+        .await
+        .unwrap()
+        .shared_memory_handle;
+    let receiver_id = add_receiver_isolate(&test_harness, DataScopeType::Public).await;
+
+    let result =
+        invoke_with_share_handles(&test_harness, receiver_id, vec![memshare_handle], vec![]).await;
+
+    assert!(result.is_err());
+    assert_eq!(receiver_scope(&test_harness, receiver_id).await, DataScopeType::Public);
+    assert!(!read_only_mounts.lock().unwrap().contains(&receiver_id));
+
+    let _ = test_harness.isolate_server_shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn test_fileshare_denied_when_receiver_scope_disallowed() {
+    let mut test_harness = TestHarness::new().await;
+    let read_only_mounts =
+        spawn_fake_container_manager(test_harness.container_manager_request_rx.take().unwrap());
+    let fileshare_handle = test_harness
+        .fileshare_manager
+        .create_fileshare(test_harness.echo_isolate_id, DataScopeType::UserPrivate)
+        .await
+        .unwrap();
+    let receiver_id = add_receiver_isolate(&test_harness, DataScopeType::Public).await;
+
+    let result =
+        invoke_with_share_handles(&test_harness, receiver_id, vec![], vec![fileshare_handle]).await;
+
+    assert!(result.is_err());
+    assert_eq!(receiver_scope(&test_harness, receiver_id).await, DataScopeType::Public);
+    assert!(!read_only_mounts.lock().unwrap().contains(&receiver_id));
+
+    let _ = test_harness.isolate_server_shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn test_memshare_allowed_when_receiver_scope_permits() {
+    let mut test_harness = TestHarness::new().await;
+    let read_only_mounts =
+        spawn_fake_container_manager(test_harness.container_manager_request_rx.take().unwrap());
+    let memshare_handle = test_harness
+        .shared_mem_manager
+        .create_shared_mem_file(test_harness.echo_isolate_id, 1024, DataScopeType::UserPrivate)
+        .await
+        .unwrap()
+        .shared_memory_handle;
+    let receiver_id = add_receiver_isolate(&test_harness, DataScopeType::UserPrivate).await;
+
+    let result =
+        invoke_with_share_handles(&test_harness, receiver_id, vec![memshare_handle], vec![]).await;
+
+    assert!(result.is_ok());
+    assert_eq!(receiver_scope(&test_harness, receiver_id).await, DataScopeType::UserPrivate);
+    assert!(read_only_mounts.lock().unwrap().contains(&receiver_id));
+
+    let _ = test_harness.isolate_server_shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn test_memshare_from_ratified_sharer_uses_declared_scope() {
+    // The sharer may emit UserPrivate but declares Public, so a Public receiver can mount it.
+    let mut test_harness = TestHarness::new_with_arguments(
+        u64::MAX,
+        ScopeDragInstruction::KeepSame,
+        true,
+        DataScopeType::UserPrivate,
+        None,
+    )
+    .await;
+    let read_only_mounts =
+        spawn_fake_container_manager(test_harness.container_manager_request_rx.take().unwrap());
+    let memshare_handle = test_harness
+        .shared_mem_manager
+        .create_shared_mem_file(test_harness.echo_isolate_id, 1024, DataScopeType::Public)
+        .await
+        .unwrap()
+        .shared_memory_handle;
+    let receiver_id = add_receiver_isolate(&test_harness, DataScopeType::Public).await;
+
+    let mut request = create_random_request(
+        test_harness.isolate_service_info_map.get(ECHO_ISOLATE_SERVICE_NAME).unwrap(),
+    );
+    request.isolate_input_iscope.as_mut().unwrap().datagram_iscopes[0].scope_type =
+        DataScopeType::Public.into();
+    request.control_plane_metadata.as_mut().unwrap().shared_memory_handles = vec![memshare_handle];
+
+    let result =
+        test_harness.isolate_junction.invoke_isolate(Some(receiver_id), request, false, None).await;
+
+    assert!(result.is_ok());
+    assert_eq!(receiver_scope(&test_harness, receiver_id).await, DataScopeType::Public);
+    assert!(read_only_mounts.lock().unwrap().contains(&receiver_id));
+
+    let _ = test_harness.isolate_server_shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn test_memshare_retires_receiver_at_sensitive_session_threshold() {
+    // Retire the receiver as soon as it takes part in a single sensitive session.
+    let mut test_harness = TestHarness::new_with_arguments(
+        1,
+        ScopeDragInstruction::KeepUnspecified,
+        false,
+        DataScopeType::UserPrivate,
+        None,
+    )
+    .await;
+    let _read_only_mounts =
+        spawn_fake_container_manager(test_harness.container_manager_request_rx.take().unwrap());
+    let memshare_handle = test_harness
+        .shared_mem_manager
+        .create_shared_mem_file(test_harness.echo_isolate_id, 1024, DataScopeType::UserPrivate)
+        .await
+        .unwrap()
+        .shared_memory_handle;
+    let receiver_id = add_receiver_isolate(&test_harness, DataScopeType::UserPrivate).await;
+
+    let result =
+        invoke_with_share_handles(&test_harness, receiver_id, vec![memshare_handle], vec![]).await;
+
+    assert!(result.is_ok());
+    assert_eq!(
+        test_harness.isolate_state_manager.get_isolate_state(receiver_id),
+        Some(IsolateState::Retiring)
+    );
+
+    let _ = test_harness.isolate_server_shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn test_streaming_memshare_denied_terminates_stream() {
+    let mut test_harness = TestHarness::new().await;
+    let read_only_mounts =
+        spawn_fake_container_manager(test_harness.container_manager_request_rx.take().unwrap());
+    let memshare_handle = test_harness
+        .shared_mem_manager
+        .create_shared_mem_file(test_harness.echo_isolate_id, 1024, DataScopeType::UserPrivate)
+        .await
+        .unwrap()
+        .shared_memory_handle;
+    let receiver_id = add_receiver_isolate(&test_harness, DataScopeType::Public).await;
+
+    let mut client_channels =
+        test_harness.isolate_junction.stream_invoke_isolate(Some(receiver_id), false, None).await;
+
+    let mut request = create_random_request(
+        test_harness.isolate_service_info_map.get(ECHO_ISOLATE_SERVICE_NAME).unwrap(),
+    );
+    let control_plane_metadata = request.control_plane_metadata.as_mut().unwrap();
+    control_plane_metadata.shared_memory_handles = vec![memshare_handle];
+
+    assert!(client_channels.client_to_junction.send(request).await.is_ok());
+
+    let response_result = client_channels.junction_to_client.recv().await.unwrap();
+    assert!(response_result.is_err());
+    assert_eq!(receiver_scope(&test_harness, receiver_id).await, DataScopeType::Public);
+    assert!(!read_only_mounts.lock().unwrap().contains(&receiver_id));
+
+    let _ = test_harness.isolate_server_shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn test_memshare_with_unowned_handle_fails_before_escalating_receiver() {
+    let mut test_harness = TestHarness::new().await;
+    let read_only_mounts =
+        spawn_fake_container_manager(test_harness.container_manager_request_rx.take().unwrap());
+    let owned_handle = test_harness
+        .shared_mem_manager
+        .create_shared_mem_file(test_harness.echo_isolate_id, 1024, DataScopeType::UserPrivate)
+        .await
+        .unwrap()
+        .shared_memory_handle;
+    let other_owner_id = add_receiver_isolate(&test_harness, DataScopeType::UserPrivate).await;
+    let unowned_handle = test_harness
+        .shared_mem_manager
+        .create_shared_mem_file(other_owner_id, 1024, DataScopeType::UserPrivate)
+        .await
+        .unwrap()
+        .shared_memory_handle;
+    let receiver_id = add_receiver_isolate(&test_harness, DataScopeType::UserPrivate).await;
+
+    let result = invoke_with_share_handles(
+        &test_harness,
+        receiver_id,
+        vec![owned_handle, unowned_handle],
+        vec![],
+    )
+    .await;
+
+    assert!(result.is_err());
+    assert_eq!(receiver_scope(&test_harness, receiver_id).await, DataScopeType::Public);
+    assert!(!read_only_mounts.lock().unwrap().contains(&receiver_id));
+
+    let _ = test_harness.isolate_server_shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn test_fileshare_with_unowned_handle_fails_before_escalating_receiver() {
+    let mut test_harness = TestHarness::new().await;
+    let read_only_mounts =
+        spawn_fake_container_manager(test_harness.container_manager_request_rx.take().unwrap());
+    let owned_handle = test_harness
+        .fileshare_manager
+        .create_fileshare(test_harness.echo_isolate_id, DataScopeType::UserPrivate)
+        .await
+        .unwrap();
+    let other_owner_id = add_receiver_isolate(&test_harness, DataScopeType::UserPrivate).await;
+    let unowned_handle = test_harness
+        .fileshare_manager
+        .create_fileshare(other_owner_id, DataScopeType::UserPrivate)
+        .await
+        .unwrap();
+    let receiver_id = add_receiver_isolate(&test_harness, DataScopeType::UserPrivate).await;
+
+    let result = invoke_with_share_handles(
+        &test_harness,
+        receiver_id,
+        vec![],
+        vec![owned_handle, unowned_handle],
+    )
+    .await;
+
+    assert!(result.is_err());
+    assert_eq!(receiver_scope(&test_harness, receiver_id).await, DataScopeType::Public);
+    assert!(!read_only_mounts.lock().unwrap().contains(&receiver_id));
+
+    let _ = test_harness.isolate_server_shutdown_tx.send(());
+}
+
+fn spawn_fake_container_manager(
+    mut container_manager_request_rx: mpsc::Receiver<ContainerManagerRequest>,
+) -> Arc<Mutex<Vec<IsolateId>>> {
+    let read_only_mounts = Arc::new(Mutex::new(Vec::new()));
+    let recorded_mounts = read_only_mounts.clone();
+    tokio::spawn(async move {
+        while let Some(request) = container_manager_request_rx.recv().await {
+            match request {
+                ContainerManagerRequest::MountWritableFile { resp, .. } => {
+                    let _ = resp.send(Ok(MountFileResponse {}));
+                }
+                ContainerManagerRequest::MountReadOnlyFile { req, resp } => {
+                    recorded_mounts.lock().unwrap().push(req.isolate_id);
+                    let _ = resp.send(Ok(MountFileResponse {}));
+                }
+                ContainerManagerRequest::MountWritableDirectory { resp, .. } => {
+                    let _ = resp.send(Ok(MountDirectoryResponse {}));
+                }
+                ContainerManagerRequest::MountReadOnlyDirectory { req, resp } => {
+                    recorded_mounts.lock().unwrap().push(req.isolate_id);
+                    let _ = resp.send(Ok(MountDirectoryResponse {}));
+                }
+                _ => {}
+            }
+        }
+    });
+    read_only_mounts
+}
+
+async fn add_receiver_isolate(
+    test_harness: &TestHarness,
+    allowed_data_scope_type: DataScopeType,
+) -> IsolateId {
+    let isolate_id = IsolateId::new(BinaryServicesIndex::new(false));
+    test_harness
+        .isolate_state_manager
+        .add_isolate(AddIsolateRequest {
+            current_data_scope_type: DataScopeType::Public,
+            allowed_data_scope_type,
+            isolate_id,
+        })
+        .await;
+    // Both the SDK and the Junction channel must be up before the Isolate is considered Ready.
+    test_harness
+        .isolate_state_manager
+        .update_state(isolate_id, IsolateState::Ready)
+        .await
+        .expect("Receiver isolate should report Ready");
+    test_harness
+        .isolate_state_manager
+        .mark_channel_connected(isolate_id)
+        .await
+        .expect("Receiver isolate channel should connect");
+    isolate_id
+}
+
+async fn invoke_with_share_handles(
+    test_harness: &TestHarness,
+    receiver_id: IsolateId,
+    shared_memory_handles: Vec<String>,
+    fileshare_handles: Vec<String>,
+) -> Result<InvokeIsolateResponse, ez_error::EzError> {
+    let mut request = create_random_request(
+        test_harness.isolate_service_info_map.get(ECHO_ISOLATE_SERVICE_NAME).unwrap(),
+    );
+    let control_plane_metadata = request.control_plane_metadata.as_mut().unwrap();
+    control_plane_metadata.shared_memory_handles = shared_memory_handles;
+    control_plane_metadata.fileshare_handles = fileshare_handles;
+
+    test_harness.isolate_junction.invoke_isolate(Some(receiver_id), request, false, None).await
+}
+
+async fn receiver_scope(test_harness: &TestHarness, receiver_id: IsolateId) -> DataScopeType {
+    test_harness
+        .data_scope_requester
+        .get_isolate_scope(GetIsolateScopeRequest { isolate_id: receiver_id })
+        .await
+        .expect("Receiver should be registered")
+        .current_scope
 }

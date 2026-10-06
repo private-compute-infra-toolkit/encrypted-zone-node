@@ -661,6 +661,7 @@ async fn test_write_package_to_disk_io_failure() {
     let service = MockManagementService {
         responses_to_send: Arc::new(Mutex::new(vec![])),
         received_requests: Arc::new(Mutex::new(vec![])),
+        ..Default::default()
     };
     let server_handle = tokio::spawn(async move {
         let _ = Server::builder()
@@ -717,4 +718,43 @@ async fn test_duplicate_descriptors_across_manifests() {
             ratified_isolate_type("ratified_1")
         ),
     );
+}
+
+#[tokio::test]
+async fn test_fetch_operator_info_and_errors() {
+    let ctx = setup_test_context(vec![]).await;
+    let client = &ctx.client;
+    let operator_info = &ctx.operator_info;
+
+    let fetched = client.fetch_operator_info().await.expect("fetch_operator_info should succeed");
+    assert_eq!(fetched.operator_domain, "test_operator_domain");
+    assert_eq!(fetched.operator_role, "PRIMARY");
+
+    *operator_info.lock().unwrap() = Ok(None);
+    let err =
+        client.fetch_operator_info().await.expect_err("missing operator_info should be rejected");
+    assert!(matches!(err, EzManagementError::InvalidOperatorInfo(_)));
+
+    let invalid_cases = [("", "PRIMARY"), ("example.com", "")];
+    for (domain, role) in invalid_cases {
+        *operator_info.lock().unwrap() = Ok(Some(ez_management::OperatorInfo {
+            operator_domain: domain.to_string(),
+            operator_role: role.to_string(),
+        }));
+        let err = client
+            .fetch_operator_info()
+            .await
+            .expect_err("invalid operator_info should be rejected");
+        assert!(
+            matches!(err, EzManagementError::InvalidOperatorInfo(_)),
+            "domain={domain:?} role={role:?}: {err:?}"
+        );
+    }
+
+    *operator_info.lock().unwrap() = Err(tonic::Status::internal("failed to resolve role"));
+    let err = client
+        .fetch_operator_info()
+        .await
+        .expect_err("RPC error should return FetchOperatorInfoFailed");
+    assert!(matches!(err, EzManagementError::FetchOperatorInfoFailed(_)));
 }

@@ -46,6 +46,29 @@ pub enum ShmSlabPoolError {
 
     #[error("Shared memory file operation failed: {0}")]
     FileOperationFailed(#[from] std::io::Error),
+
+    #[error(
+        "Invalid slot reference: slot_index ({slot_index}) is out of bounds for a pool of {number_of_slots} slots"
+    )]
+    InvalidSlotIndex { slot_index: i64, number_of_slots: u64 },
+
+    #[error(
+        "Invalid slot reference: length ({length} bytes) is out of bounds for a slot of {slot_size} bytes"
+    )]
+    InvalidSlotLength { length: i64, slot_size: u64 },
+
+    #[error(
+        "Invalid slot reference batch: number of slot references ({requested}) exceeds pool capacity ({capacity} slots)"
+    )]
+    TooManySlotReferences { requested: usize, capacity: u64 },
+
+    #[error(
+        "Invalid slot reference batch: slot_index ({slot_index}) is referenced more than once"
+    )]
+    DuplicateSlotReference { slot_index: i64 },
+
+    #[error("Slot write of {write_len} bytes exceeds the slot capacity of {slot_len} bytes")]
+    SlotWriteOverflow { write_len: usize, slot_len: usize },
 }
 
 pub type Result<T> = std::result::Result<T, ShmSlabPoolError>;
@@ -379,56 +402,177 @@ impl ShmSlabPool {
         let needed_slots = (payload_len as u64).div_ceil(self.slot_size);
         let mut allocated_slots = self.allocate_slots(needed_slots).await?;
 
-        let mut payload_offset = 0;
-        let mut bytes_left = payload_len;
-
-        for slot_ref in &mut allocated_slots {
-            let write_len = std::cmp::min(bytes_left, self.slot_size as usize);
-            let slot_offset = slot_ref.slot_index as u64 * self.slot_size;
-            let slot_ptr = self.data_mmap.as_ptr().wrapping_add(slot_offset as usize) as *mut u8;
-            let slot_data = &payload[payload_offset..payload_offset + write_len];
-
-            unsafe {
-                std::ptr::copy_nonoverlapping(slot_data.as_ptr(), slot_ptr, write_len);
+        if let Err(err) = self.write_payload_to_slots(payload, &mut allocated_slots) {
+            // Release the slots we just claimed so a rejected write does not leak them.
+            if let Err(free_err) = self.free_slots(&allocated_slots) {
+                log::warn!("Failed to free slots after a failed write: {free_err:?}");
             }
-            slot_ref.length = write_len as i64;
-            payload_offset += write_len;
-            bytes_left -= write_len;
+            return Err(err);
         }
 
         Ok(allocated_slots)
     }
 
-    // Reads the payload from the pool based on the given slot references and frees the slots.
-    pub fn read_from_pool(&self, slot_references: &[ShmSlotReference]) -> Result<Vec<u8>> {
-        let mut payload = Vec::new();
+    // Copies the payload across the given slots, shrinking each reference to the number of bytes
+    // actually written to it.
+    fn write_payload_to_slots(
+        &self,
+        payload: &[u8],
+        allocated_slots: &mut [ShmSlotReference],
+    ) -> Result<()> {
+        let mut payload_offset = 0;
+        for slot_ref in allocated_slots.iter_mut() {
+            let write_len = std::cmp::min(payload.len() - payload_offset, self.slot_size as usize);
+            // These references come from our own allocator rather than the wire, but validating
+            // them through the same path keeps the unsafe write below provably in bounds.
+            let slot_range = self.validate_slot_reference(slot_ref)?;
+            if write_len > slot_range.len() {
+                return Err(ShmSlabPoolError::SlotWriteOverflow {
+                    write_len,
+                    slot_len: slot_range.len(),
+                });
+            }
+            let slot_data = &payload[payload_offset..payload_offset + write_len];
 
-        for slot_ref in slot_references {
-            let data_offset = slot_ref.slot_index as u64 * self.slot_size;
-            let slot_data = &self.data_mmap
-                [data_offset as usize..(data_offset + slot_ref.length as u64) as usize];
-            // Here we are copying the payload out of the shared memory slots
-            // into the payload vector returned to the caller so we can free the slot
-            // immediately for reuse.
-            payload.extend_from_slice(slot_data);
+            // SAFETY: slot_range is within the data mapping and write_len <= slot_range.len(), so
+            // the destination is mapped; write_to_pool rejects read-only pools before we get here,
+            // so it is also writable.
+            unsafe {
+                let slot_ptr = (self.data_mmap.as_ptr() as *mut u8).add(slot_range.start);
+                std::ptr::copy_nonoverlapping(slot_data.as_ptr(), slot_ptr, write_len);
+            }
+            slot_ref.length = write_len as i64;
+            payload_offset += write_len;
+        }
+        Ok(())
+    }
+
+    /// Validates an untrusted [`ShmSlotReference`] against the pool geometry and returns the byte
+    /// range it designates in the data mapping.
+    ///
+    /// Both `int64` fields are supplied by the peer over the wire, so every path that indexes,
+    /// dereferences or does pointer arithmetic on a reference MUST go through here first.
+    /// `slot_index < number_of_slots` and `length <= slot_size` keep both the data slice and the
+    /// header bitmask pointer in bounds; the arithmetic is checked anyway so a future change to
+    /// the pool geometry cannot silently reintroduce an overflow. See b/556034613.
+    ///
+    /// This deliberately does not check that the slot is marked allocated in the header bitmask:
+    /// the Isolate owns the bitmask of the pool it writes to, so it carries no trust.
+    fn validate_slot_reference(
+        &self,
+        slot_ref: &ShmSlotReference,
+    ) -> Result<std::ops::Range<usize>> {
+        let invalid_index = || ShmSlabPoolError::InvalidSlotIndex {
+            slot_index: slot_ref.slot_index,
+            number_of_slots: self.number_of_slots,
+        };
+        let invalid_length = || ShmSlabPoolError::InvalidSlotLength {
+            length: slot_ref.length,
+            slot_size: self.slot_size,
+        };
+
+        // Rejects negative indices, which would otherwise become enormous values when cast to u64.
+        let slot_index = u64::try_from(slot_ref.slot_index).map_err(|_| invalid_index())?;
+        if slot_index >= self.number_of_slots {
+            return Err(invalid_index());
         }
 
-        self.free_slots(slot_references)?;
+        // Rejects negative lengths and any length that would spill into neighbouring slots.
+        let length = u64::try_from(slot_ref.length).map_err(|_| invalid_length())?;
+        if length > self.slot_size {
+            return Err(invalid_length());
+        }
+
+        let start = slot_index.checked_mul(self.slot_size).ok_or_else(invalid_index)?;
+        let end = start.checked_add(length).ok_or_else(invalid_length)?;
+        if end > self.data_mmap.len() as u64 {
+            return Err(invalid_index());
+        }
+
+        Ok(start as usize..end as usize)
+    }
+
+    // Reads the payload from the pool based on the given slot references and frees the slots.
+    //
+    // The references come from the peer and are untrusted: the whole batch is validated up front,
+    // so an invalid request is rejected without mutating the allocation bitmask. See b/556034613.
+    pub fn read_from_pool(&self, slot_references: &[ShmSlotReference]) -> Result<Vec<u8>> {
+        // A legitimate payload never spans more slots than the pool has. Without this cap a peer
+        // can send an arbitrarily long list of references and force an unbounded allocation below.
+        if slot_references.len() as u64 > self.number_of_slots {
+            return Err(ShmSlabPoolError::TooManySlotReferences {
+                requested: slot_references.len(),
+                capacity: self.number_of_slots,
+            });
+        }
+
+        // Validation pass: bounds-check each reference and reject repeated slot indices, which
+        // would otherwise let a peer inflate one written slot into a pool-sized payload and clear
+        // the same allocation bit repeatedly. A single reference cannot collide with itself, so
+        // the tracking bitmask is only allocated for actual batches.
+        let mut seen_slots = vec![
+            0u64;
+            if slot_references.len() > 1 {
+                calculate_number_of_bitmasks(self.number_of_slots) as usize
+            } else {
+                0
+            }
+        ];
+        let mut payload_len = 0;
+        for slot_ref in slot_references {
+            let slot_range = self.validate_slot_reference(slot_ref)?;
+            let slot_index = slot_ref.slot_index as u64;
+            if let Some(seen_mask) = seen_slots.get_mut((slot_index / 64) as usize) {
+                let slot_bit = 1u64 << (slot_index % 64);
+                if *seen_mask & slot_bit != 0 {
+                    return Err(ShmSlabPoolError::DuplicateSlotReference {
+                        slot_index: slot_ref.slot_index,
+                    });
+                }
+                *seen_mask |= slot_bit;
+            }
+            payload_len += slot_range.len();
+        }
+
+        // Copy pass: each slot is copied into the payload returned to the caller and freed right
+        // away so it can be reused.
+        let mut payload = Vec::with_capacity(payload_len);
+        for slot_ref in slot_references {
+            let slot_range = self.validate_slot_reference(slot_ref)?;
+            payload.extend_from_slice(&self.data_mmap[slot_range]);
+            self.free_slot(slot_ref.slot_index)?;
+        }
 
         Ok(payload)
     }
 
     // Frees the allocated slots using Atomic CAS.
     fn free_slots(&self, slot_references: &[ShmSlotReference]) -> Result<()> {
-        let mask_ptr = self.header_mmap.as_ptr() as *const AtomicU64;
-
         for slot_ref in slot_references {
-            let mask_idx = slot_ref.slot_index as u64 / 64;
-            let bit_idx = slot_ref.slot_index as u64 % 64;
-
-            let atomic_mask = unsafe { &*mask_ptr.add(mask_idx as usize) };
-            atomic_mask.fetch_and(!(1 << bit_idx), Ordering::SeqCst);
+            self.free_slot(slot_ref.slot_index)?;
         }
+        Ok(())
+    }
+
+    // Clears the allocation bit of a single slot. The index is untrusted (it may come straight
+    // from the wire), so it is bounds-checked here rather than trusted from the caller.
+    fn free_slot(&self, slot_index: i64) -> Result<()> {
+        let slot_index = u64::try_from(slot_index)
+            .ok()
+            .filter(|index| *index < self.number_of_slots)
+            .ok_or(ShmSlabPoolError::InvalidSlotIndex {
+                slot_index,
+                number_of_slots: self.number_of_slots,
+            })?;
+
+        let mask_idx = slot_index / 64;
+        let bit_idx = slot_index % 64;
+
+        // SAFETY: mask_idx < number_of_slots.div_ceil(64), which is the number of AtomicU64s in
+        // the header mapping. The mapping is page-aligned, hence aligned for AtomicU64.
+        let atomic_mask =
+            unsafe { &*(self.header_mmap.as_ptr() as *const AtomicU64).add(mask_idx as usize) };
+        atomic_mask.fetch_and(!(1 << bit_idx), Ordering::SeqCst);
         Ok(())
     }
 

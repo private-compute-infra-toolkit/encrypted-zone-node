@@ -1203,3 +1203,185 @@ async fn test_unretire_isolate_active_errors() -> Result<(), Box<dyn std::error:
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_validate_data_transfer_escalates_receiver() -> Result<(), DataScopeError> {
+    let data_scope_requester = DataScopeRequester::new(u64::MAX);
+    let receiver_id = add_isolate_with_scopes(
+        &data_scope_requester,
+        DataScopeType::Public,
+        DataScopeType::UserPrivate,
+        false,
+    )
+    .await?;
+    data_scope_requester.activate_isolate(receiver_id).await?;
+    data_scope_requester.validate_data_transfer(receiver_id, DataScopeType::UserPrivate).await?;
+
+    assert_eq!(
+        current_scope_of(&data_scope_requester, receiver_id).await?,
+        DataScopeType::UserPrivate
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_validate_data_transfer_denied_when_receiver_disallows_scope(
+) -> Result<(), DataScopeError> {
+    let data_scope_requester = DataScopeRequester::new(u64::MAX);
+    let receiver_id = add_isolate_with_scopes(
+        &data_scope_requester,
+        DataScopeType::Public,
+        DataScopeType::Public,
+        false,
+    )
+    .await?;
+    data_scope_requester.activate_isolate(receiver_id).await?;
+    let result =
+        data_scope_requester.validate_data_transfer(receiver_id, DataScopeType::UserPrivate).await;
+
+    assert!(matches!(result, Err(DataScopeError::DisallowedByManifest)));
+    assert_eq!(current_scope_of(&data_scope_requester, receiver_id).await?, DataScopeType::Public);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_validate_data_transfer_skipped_for_ratified_receiver() -> Result<(), DataScopeError> {
+    let data_scope_requester = DataScopeRequester::new(u64::MAX);
+    let ratified_id = add_isolate_with_scopes(
+        &data_scope_requester,
+        DataScopeType::Public,
+        DataScopeType::Public,
+        true,
+    )
+    .await?;
+
+    // Ratified Isolates enforce their manifest declared scope themselves, so they may receive
+    // data at any scope.
+    assert!(data_scope_requester
+        .validate_data_transfer(ratified_id, DataScopeType::UserPrivate)
+        .await
+        .is_ok());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_validate_data_transfer_unknown_receiver() -> Result<(), DataScopeError> {
+    let data_scope_requester = DataScopeRequester::new(u64::MAX);
+    let unknown_id = IsolateId::new(*TEST_BINARY_SERVICES_INDEX);
+
+    assert!(matches!(
+        data_scope_requester.validate_data_transfer(unknown_id, DataScopeType::Public).await,
+        Err(DataScopeError::UnknownIsolateId)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_validate_data_transfer_counts_sensitive_session_per_transfer(
+) -> Result<(), DataScopeError> {
+    let data_scope_requester = DataScopeRequester::new(u64::MAX);
+    let receiver_id = add_isolate_with_scopes(
+        &data_scope_requester,
+        DataScopeType::Public,
+        DataScopeType::UserPrivate,
+        false,
+    )
+    .await?;
+    data_scope_requester.activate_isolate(receiver_id).await?;
+
+    data_scope_requester.validate_data_transfer(receiver_id, DataScopeType::UserPrivate).await?;
+    // The receiver is already at the shared scope, but receiving more sensitive data must still
+    // count as a sensitive session so that it eventually retires.
+    data_scope_requester.validate_data_transfer(receiver_id, DataScopeType::UserPrivate).await?;
+
+    assert_eq!(sensitive_session_count_of(&data_scope_requester, receiver_id).await?, Some(2));
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_validate_data_transfer_ignores_non_sensitive_escalation() -> Result<(), DataScopeError>
+{
+    let data_scope_requester = DataScopeRequester::new(u64::MAX);
+    let receiver_id = add_isolate_with_scopes(
+        &data_scope_requester,
+        DataScopeType::Public,
+        DataScopeType::UserPrivate,
+        false,
+    )
+    .await?;
+    data_scope_requester.activate_isolate(receiver_id).await?;
+
+    data_scope_requester.validate_data_transfer(receiver_id, DataScopeType::DomainOwned).await?;
+
+    assert_eq!(
+        current_scope_of(&data_scope_requester, receiver_id).await?,
+        DataScopeType::DomainOwned
+    );
+    assert_eq!(sensitive_session_count_of(&data_scope_requester, receiver_id).await?, Some(0));
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_validate_data_transfer_retires_receiver_at_threshold() -> Result<(), DataScopeError> {
+    // Retire the receiver as soon as it takes part in a single sensitive session.
+    let data_scope_requester = DataScopeRequester::new(1);
+    let receiver_id = add_isolate_with_scopes(
+        &data_scope_requester,
+        DataScopeType::Public,
+        DataScopeType::UserPrivate,
+        false,
+    )
+    .await?;
+    data_scope_requester.activate_isolate(receiver_id).await?;
+
+    let response = data_scope_requester
+        .validate_data_transfer(receiver_id, DataScopeType::UserPrivate)
+        .await?;
+
+    assert!(response.is_retiring);
+    // A retiring Isolate must no longer be handed out for new sensitive requests.
+    assert!(matches!(
+        data_scope_requester
+            .get_isolate(GetIsolateRequest {
+                binary_services_index: *TEST_BINARY_SERVICES_INDEX,
+                data_scope_type: DataScopeType::UserPrivate,
+            })
+            .await,
+        Err(DataScopeError::NoMatchingIsolates)
+    ));
+    Ok(())
+}
+
+async fn add_isolate_with_scopes(
+    data_scope_requester: &DataScopeRequester,
+    current_scope: DataScopeType,
+    allowed_scope: DataScopeType,
+    is_ratified: bool,
+) -> Result<IsolateId, DataScopeError> {
+    let mut add_isolate_request = create_add_isolate_request(is_ratified);
+    add_isolate_request.current_data_scope_type = current_scope;
+    add_isolate_request.allowed_data_scope_type = allowed_scope;
+    let isolate_id = add_isolate_request.isolate_id;
+    data_scope_requester.add_isolate(add_isolate_request).await?;
+    Ok(isolate_id)
+}
+
+async fn current_scope_of(
+    data_scope_requester: &DataScopeRequester,
+    isolate_id: IsolateId,
+) -> Result<DataScopeType, DataScopeError> {
+    Ok(data_scope_requester
+        .get_isolate_scope(GetIsolateScopeRequest { isolate_id })
+        .await?
+        .current_scope)
+}
+
+async fn sensitive_session_count_of(
+    data_scope_requester: &DataScopeRequester,
+    isolate_id: IsolateId,
+) -> Result<Option<u64>, DataScopeError> {
+    Ok(data_scope_requester
+        .get_isolate_scope(GetIsolateScopeRequest { isolate_id })
+        .await?
+        .sensitive_session_count)
+}

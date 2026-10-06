@@ -166,6 +166,7 @@ rust_test(
         "//enforcer/data_scope",
         "//enforcer/interceptor",
         "//enforcer/isolate:isolate_info",
+        "//enforcer/setup_isolate_client",
         "//enforcer/v1:data_scope_rust",
         "//enforcer/v1:enforcer_rust",
         "//enforcer/v1:manifest_rust",

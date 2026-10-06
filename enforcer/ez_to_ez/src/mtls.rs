@@ -12,16 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, ensure, Context, Result};
+use boring::ec::{EcGroup, EcKey};
+use boring::hash::MessageDigest;
+use boring::nid::Nid;
 use boring::pkey::{PKey, Private};
 use boring::ssl::{SslAcceptor, SslConnector, SslMethod, SslVerifyMode};
-use boring::x509::{store::X509StoreBuilder, X509};
+use boring::x509::store::X509StoreBuilder;
+use boring::x509::{X509Req, X509};
 use ez_mtls_proto::enforcer::v1::ez_mtls_service_client::EzMtlsServiceClient;
 use ez_mtls_proto::enforcer::v1::{GetCertificateRequest, PolicyHint};
 use grpc_connector::GrpcChannelPool;
 use manifest_proto::enforcer::v1::{ez_manifest::ManifestType, EzManifest};
+use setup_isolate_client::SetupIsolateClient;
+use setup_isolate_proto::enforcer::v2::FetchTlsCertificateRequest;
 use sha2::Digest;
-use tonic::transport::Channel;
 
 const HASH_VERSION: &str = "a";
 
@@ -138,15 +143,39 @@ impl<S: tonic::transport::server::Connected> tonic::transport::server::Connected
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct EzMtlsManagerConfig {
-    // TODO: All keys and CSRs will be generated in enforcer memory.
-    // Path to read the mTLS private key in der format.
-    pub mtls_key_path: String,
-    // Path to read the CSR in der format.
-    pub csr_path: String,
-    // Address to talk to EZ proxy.
-    pub proxy_address: String,
+    /// Path to read the mTLS private key in pem format.
+    pub mtls_key_path: Option<String>,
+    /// Path to read the CSR in der format.
+    pub csr_path: Option<String>,
+    /// Address to talk to EZ proxy.
+    pub proxy_address: Option<String>,
+    /// Client to talk to Setup Isolate. If set, generates the private key and CSR
+    /// in memory and fetches the mTLS certificate from the Setup Isolate instead of
+    /// reading from disk and proxy.
+    pub setup_isolate_client: Option<SetupIsolateClient>,
+}
+
+impl EzMtlsManagerConfig {
+    // TODO: Deprecate this once static mTLS cert fetching via proxy is removed.
+    pub fn new_with_proxy(mtls_key_path: String, csr_path: String, proxy_address: String) -> Self {
+        Self {
+            mtls_key_path: Some(mtls_key_path),
+            csr_path: Some(csr_path),
+            proxy_address: Some(proxy_address),
+            setup_isolate_client: None,
+        }
+    }
+
+    pub fn new_with_setup_isolate(setup_isolate_client: SetupIsolateClient) -> Self {
+        Self {
+            mtls_key_path: None,
+            csr_path: None,
+            proxy_address: None,
+            setup_isolate_client: Some(setup_isolate_client),
+        }
+    }
 }
 
 /// A manager that holds the mTLS certificate, private key, trust anchors, and SPIFFE identity.
@@ -166,9 +195,8 @@ pub struct EzMtlsManager {
 impl EzMtlsManager {
     /// Builds and initializes a new `EzMtlsManager`.
     pub async fn build(config: EzMtlsManagerConfig) -> Result<Self> {
-        let (_client_channel_pool, mut client) = Self::create_client(&config).await?;
         let (leaf_private_key, csr) = Self::load_keys(&config).await?;
-        let (cert_chain, trust_anchors) = Self::fetch_certs(&mut client, &csr).await?;
+        let (cert_chain, trust_anchors) = Self::fetch_certs(&config, &csr).await?;
         let spiffe_identity = Self::parse_spiffe_id(&cert_chain)?;
         Ok(Self { leaf_private_key, cert_chain, trust_anchors, spiffe_identity })
     }
@@ -178,36 +206,83 @@ impl EzMtlsManager {
         self.spiffe_identity.clone()
     }
 
-    /// Creates the gRPC client and channel pool.
-    async fn create_client(
-        config: &EzMtlsManagerConfig,
-    ) -> Result<(GrpcChannelPool, EzMtlsServiceClient<Channel>)> {
-        let client_channel_pool = GrpcChannelPool::new_from_env(&config.proxy_address)
-            .await
-            .map_err(|e| anyhow!("Failed to connect to EzToEz proxy: {}", e))?;
-        let client = EzMtlsServiceClient::new(client_channel_pool.next_channel());
-        Ok((client_channel_pool, client))
-    }
-
-    /// Reads the leaf private key and CSR from disk.
+    /// Loads the leaf private key and CSR from disk, or generates them in memory if
+    /// setup_isolate_client is set.
+    ///
+    /// # Returns
+    /// A tuple of `(leaf_private_key, csr_bytes)` where `leaf_private_key` is the
+    /// private key for mTLS encryption and `csr_bytes` is the raw Certificate
+    /// Signing Request (CSR) bytes.
     async fn load_keys(config: &EzMtlsManagerConfig) -> Result<(PKey<Private>, Vec<u8>)> {
-        let leaf_private_key_bytes = tokio::fs::read(&config.mtls_key_path)
-            .await
-            .context("Failed to read leaf private key from path")?;
+        if config.setup_isolate_client.is_some() {
+            return Self::generate_key_and_csr();
+        }
+
+        let key_path = config
+            .mtls_key_path
+            .as_ref()
+            .context("mtls_key_path must be provided when setup_isolate_client is not set")?;
+        let csr_path = config
+            .csr_path
+            .as_ref()
+            .context("csr_path must be provided when setup_isolate_client is not set")?;
+
+        let leaf_private_key_bytes =
+            tokio::fs::read(key_path).await.context("Failed to read leaf private key from path")?;
         let leaf_private_key = PKey::private_key_from_pem(&leaf_private_key_bytes)
             .context("Failed to parse leaf private key from pem")?;
 
-        let csr =
-            tokio::fs::read(&config.csr_path).await.context("Failed to read leaf CSR from path")?;
+        let csr = tokio::fs::read(csr_path).await.context("Failed to read leaf CSR from path")?;
 
         Ok((leaf_private_key, csr))
     }
 
-    /// Fetches initial certificates.
+    /// Generates a local EC P-256 key pair and an empty CSR in memory.
+    ///
+    /// # Returns
+    /// A tuple of `(leaf_private_key, csr_der)` where `leaf_private_key` is the generated
+    /// EC P-256 private key and `csr_der` is the DER-encoded Certificate Signing Request.
+    pub fn generate_key_and_csr() -> Result<(PKey<Private>, Vec<u8>)> {
+        let ec_group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1)
+            .context("Failed to get EC group for P-256")?;
+        let ec_key = EcKey::generate(&ec_group).context("Failed to generate EC P-256 key")?;
+        let pkey = PKey::from_ec_key(ec_key).context("Failed to create PKey from EC key")?;
+
+        let mut req_builder = X509Req::builder().context("Failed to create X509Req builder")?;
+        req_builder.set_pubkey(&pkey).context("Failed to set public key on CSR")?;
+        req_builder.sign(&pkey, MessageDigest::sha256()).context("Failed to sign CSR")?;
+        let req = req_builder.build();
+        let csr_der = req.to_der().context("Failed to serialize CSR to DER")?;
+
+        Ok((pkey, csr_der))
+    }
+
+    /// Fetches initial certificates from Setup Isolate if setup_isolate_client is set,
+    /// or from the EzToEz proxy otherwise.
     async fn fetch_certs(
-        client: &mut EzMtlsServiceClient<Channel>,
+        config: &EzMtlsManagerConfig,
         csr: &[u8],
     ) -> Result<(Vec<X509>, Vec<X509>)> {
+        if let Some(client) = &config.setup_isolate_client {
+            Self::fetch_certs_from_setup_isolate(client, csr).await
+        } else {
+            let proxy_address = config
+                .proxy_address
+                .as_ref()
+                .context("proxy_address must be provided when setup_isolate_client is not set")?;
+            Self::fetch_certs_from_proxy(proxy_address, csr).await
+        }
+    }
+
+    async fn fetch_certs_from_proxy(
+        proxy_address: &str,
+        csr: &[u8],
+    ) -> Result<(Vec<X509>, Vec<X509>)> {
+        let client_channel_pool = GrpcChannelPool::new_from_env(proxy_address)
+            .await
+            .map_err(|e| anyhow!("Failed to connect to EzToEz proxy: {}", e))?;
+        let mut client = EzMtlsServiceClient::new(client_channel_pool.next_channel());
+
         let req = GetCertificateRequest {
             csr: csr.to_vec(),
             evidence: None,
@@ -230,6 +305,38 @@ impl EzMtlsManager {
         }
 
         Ok((parsed_certs, trust_anchors))
+    }
+
+    async fn fetch_certs_from_setup_isolate(
+        setup_isolate_client: &SetupIsolateClient,
+        csr: &[u8],
+    ) -> Result<(Vec<X509>, Vec<X509>)> {
+        let req = FetchTlsCertificateRequest { signed_certificate_signing_request: csr.to_vec() };
+        let resp = setup_isolate_client.fetch_mtls_certificate(req).await.map_err(|e| {
+            anyhow::anyhow!("Failed to fetch certificate from Setup Isolate: {}", e)
+        })?;
+
+        let mut cert_chain = Vec::new();
+        for cert_bytes in resp.certificate_chain {
+            cert_chain.push(
+                X509::from_der(&cert_bytes)
+                    .context("Failed to parse certificate chain cert from DER")?,
+            );
+        }
+
+        let mut trust_anchors = Vec::new();
+        for anchor_bytes in resp.trust_anchors {
+            trust_anchors.push(
+                X509::from_der(&anchor_bytes).context("Failed to parse trust anchor from DER")?,
+            );
+        }
+
+        ensure!(
+            !trust_anchors.is_empty(),
+            "Trust anchors returned from Setup Isolate must not be empty"
+        );
+
+        Ok((cert_chain, trust_anchors))
     }
 
     /// Parses the SPIFFE ID from the leaf certificate.
@@ -449,5 +556,15 @@ impl SpiffeUri {
             publisher_id: publisher_id.to_string(),
             workload_name: workload_name.to_string(),
         })
+    }
+}
+
+impl std::fmt::Debug for EzMtlsManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EzMtlsManager")
+            .field("spiffe_identity", &self.spiffe_identity)
+            .field("cert_chain_len", &self.cert_chain.len())
+            .field("trust_anchors_len", &self.trust_anchors.len())
+            .finish()
     }
 }

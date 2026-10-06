@@ -97,7 +97,7 @@ pub struct ContainerManager<ContainerT: Container> {
     enable_syscall_filtering: bool,
     operator_role: String,
     isolate_arg_config: IsolateArgConfig,
-    setup_isolate_client: Option<Arc<SetupIsolateClient>>,
+    setup_isolate_client: Option<SetupIsolateClient>,
     is_manifest_v2: bool,
 }
 
@@ -192,13 +192,16 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             },
         };
 
-        let mut setup_isolate_target = None;
+        let setup_isolate_target;
         let is_manifest_v1 = matches!(args.manifest_source, ManifestSource::V1 { .. });
         let initial_isolates = match args.manifest_source {
             ManifestSource::V1 { manifest_path } => {
                 let ez_manifest =
                     parse_manifest(manifest_path).context("couldn't parse EzManifest")?;
-                flatten_manifest(ez_manifest).context("Failed to flatten EzManifest")?
+                let isolates =
+                    flatten_manifest(ez_manifest).context("Failed to flatten EzManifest")?;
+                setup_isolate_target = find_v1_setup_isolate_target(&isolates);
+                isolates
             }
             ManifestSource::V2 { setup_isolate_manifest_path } => {
                 let setup_manifest = SetupManifest::load_from_path(setup_isolate_manifest_path)
@@ -249,12 +252,12 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
         // Built after the Setup Isolate is registered so that the client can resolve its
         // BinaryServicesIndex.
         if let Some((publisher_id, isolate_name, service_name)) = setup_isolate_target {
-            isolate_mngr.setup_isolate_client = Some(Arc::new(SetupIsolateClient::new(
+            isolate_mngr.setup_isolate_client = Some(SetupIsolateClient::new(
                 isolate_mngr.isolate_junction.clone(),
                 publisher_id,
                 isolate_name,
                 service_name,
-            )));
+            ));
         }
 
         // Spawn to avoid blocking the constructor
@@ -757,7 +760,7 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
                 mounts.push(MountOptions {
                     source: source_path,
                     destination: PathBuf::from(destination),
-                    apply_restrictive_flags: false,
+                    apply_restrictive_flags: true,
                     optional: false,
                 });
             } else {
@@ -770,7 +773,7 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
                 mounts.push(MountOptions {
                     source: source_path,
                     destination: PathBuf::from(SHARING_DIR_NAME).join(OTEL_TRACES_UDS),
-                    apply_restrictive_flags: false,
+                    apply_restrictive_flags: true,
                     optional: true,
                 });
             }
@@ -1166,6 +1169,15 @@ fn extract_unix_path(endpoint: &str) -> Option<PathBuf> {
         }
         PathBuf::from(path)
     })
+}
+
+fn find_v1_setup_isolate_target(isolates: &[ParsedIsolate]) -> Option<(String, String, String)> {
+    let setup_isolate = isolates
+        .iter()
+        .find(|i| i.isolate_name == "setup_isolate" && i.publisher_id == RATIFIED_ISOLATE_DOMAIN)?;
+    let service_name =
+        setup_isolate.service_specs.first().map(|s| s.service_name.clone()).unwrap_or_default();
+    Some((setup_isolate.publisher_id.clone(), setup_isolate.isolate_name.clone(), service_name))
 }
 
 pub fn sanitize_path_component(component: &str) -> String {

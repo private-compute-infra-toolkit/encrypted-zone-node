@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## 0.27.0 (2026-10-06)
+
+
+### EZ Policy Enforcer
+
+* **enforcer:** Add data scope to share creation requests
+* **enforcer:** Add FetchIsolateStartupParameters RPC
+* **enforcer:** Add FetchOperatorInfo RPC
+* **enforcer:** Allow cross-replica calls with destination_ez_instance_id
+* **enforcer:** Fetch OperatorInfo at startup
+* **enforcer:** remove Arc SetupIsolateClient wrap
+* **enforcer:** restrictive mount flags on operator & telemetry mounts
+* **enforcer:** Use declared data scope when mounting shares
+* **enforcer:** Validate receiver data scope before mounting shares
+* **enforcer:** Validate wire-supplied ShmSlotReference in ShmSlabPool
+
+
+### mTLS
+
+* **mtls:** add in-memory EC P-256 key and CSR generation
+* **mtls:** add mTLS remote cert integration
+* **mtls:** await setup isolate on remote cert
+* **mtls:** refactor EZ2EZ handler
+* **mtls:** Refactor mTLS identity fetch process
+* **mtls:** set v1 setup_isolate_target
+* **mtls:** setup v2 manifest mtls
+
 ## 0.26.0 (2026-09-23)
 
 

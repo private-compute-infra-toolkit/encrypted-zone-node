@@ -38,7 +38,7 @@ use isolate_test_utils::{
     DefaultEchoIsolate, FakeIsolate, ScopeDragInstruction, TEST_ERROR_CODE, TEST_ERROR_MESSAGE,
     TEST_ERROR_SERVICE_NAME,
 };
-use junction::IsolateJunction;
+use junction::{IsolateJunction, IsolateJunctionArgs};
 use junction_trait::{Junction, JunctionChannels};
 use shared_memory_manager::SharedMemManager;
 use state_manager::IsolateStateManager;
@@ -168,6 +168,11 @@ pub struct TestHarness {
     pub isolate_service_info_map: HashMap<String, IsolateServiceInfo>,
     pub isolate_server_shutdown_tx: oneshot::Sender<()>,
     pub container_manager_request_rx: Option<Receiver<ContainerManagerRequest>>,
+    pub data_scope_requester: DataScopeRequester,
+    pub isolate_state_manager: IsolateStateManager,
+    pub echo_isolate_id: IsolateId,
+    pub shared_mem_manager: SharedMemManager,
+    pub fileshare_manager: FileshareManager,
 }
 
 impl TestHarness {
@@ -194,16 +199,16 @@ impl TestHarness {
             data_scope_requester.clone(),
             container_manager_requester.clone(),
         );
-        let isolate_junction = IsolateJunction::new(
-            data_scope_requester.clone(),
-            isolate_service_mapper.clone(),
-            shared_memory_manager.clone(),
-            fileshare_manager.clone(),
-            isolate_state_manager.clone(),
-            manifest_validator.clone(),
-            100 * 1024 * 1024, // 100 MiB to force inline
-            4 * 1024 * 1024,
-        );
+        let isolate_junction = IsolateJunction::new(IsolateJunctionArgs {
+            data_scope_requester: data_scope_requester.clone(),
+            isolate_service_mapper: isolate_service_mapper.clone(),
+            shared_mem_manager: shared_memory_manager.clone(),
+            fileshare_manager: fileshare_manager.clone(),
+            state_manager: isolate_state_manager.clone(),
+            manifest_validator: manifest_validator.clone(),
+            shm_payload_threshold: 100 * 1024 * 1024, // 100 MiB to force inline
+            max_decoding_message_size: 4 * 1024 * 1024,
+        });
 
         // Start fake Isolate server
         let isolate_service_info = IsolateServiceInfo {
@@ -289,6 +294,11 @@ impl TestHarness {
             isolate_service_info_map,
             isolate_server_shutdown_tx,
             container_manager_request_rx: Some(container_manager_request_rx),
+            data_scope_requester,
+            isolate_state_manager,
+            echo_isolate_id: isolate_id,
+            shared_mem_manager: shared_memory_manager,
+            fileshare_manager,
         }
     }
 

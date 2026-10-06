@@ -98,7 +98,7 @@ rust_library(
 rust_library(
     name = "junction_test_utils",
     testonly = True,
-    srcs = ["test_utils.rs"],
+    srcs = ["test/test_utils.rs"],
     proc_macro_deps = ["@crates//:derivative"],
     visibility = ["//visibility:public"],
     deps = [

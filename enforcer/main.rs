@@ -31,11 +31,13 @@ use inbound_ez_to_ez_handler::InboundEzToEzHandler;
 use interceptor::Interceptor;
 use isolate_ez_service_manager::{IsolateEzServiceManager, IsolateEzServiceManagerDependencies};
 use isolate_service_mapper::IsolateServiceMapper;
-use junction::IsolateJunction;
+use junction::{IsolateJunction, IsolateJunctionArgs};
 use logging::logger;
 use manifest_parser::v1::parse_isolate_runtime_configs;
 use metrics::setup_otel_metrics;
-use node_bootstrap::{NodeBootstrap, NodeBootstrapConfig};
+use node_bootstrap::{
+    NodeBootstrapV1, NodeBootstrapV1Config, NodeBootstrapV2, NodeBootstrapV2Config,
+};
 use outbound_ez_to_ez_client::OutboundEzToEzClient;
 use outbound_ez_to_ez_handler::OutboundEzToEzHandler;
 use public_api::EzPublicApiService;
@@ -49,6 +51,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 #[cfg(feature = "debug")]
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::UnixListener;
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server;
@@ -222,7 +225,7 @@ struct EnforcerInputs {
     #[arg(
         long,
         default_value = "",
-        help = "Operator role to be provided to all isolates as EZ_OPERATOR_ROLE. Note: This argument will be deprecated soon."
+        help = "Manifest v1 only: operator role to be provided to all isolates as EZ_OPERATOR_ROLE. With --use-manifest-v2 it is fetched from EzManagementService instead."
     )]
     operator_role: String,
     #[arg(
@@ -308,16 +311,16 @@ fn main() -> anyhow::Result<()> {
             enforcer_inputs.shm_slot_size,
         );
         let fileshare_manager = FileshareManager::new(container_manager_requester.clone());
-        let isolate_junction = IsolateJunction::new(
-            data_scope_requester.clone(),
-            isolate_service_mapper.clone(),
-            shared_memory_manager.clone(),
-            fileshare_manager.clone(),
-            isolate_state_manager.clone(),
-            manifest_validator.clone(),
-            enforcer_inputs.shm_payload_threshold,
-            enforcer_inputs.max_decoding_message_size,
-        );
+        let isolate_junction = IsolateJunction::new(IsolateJunctionArgs {
+            data_scope_requester: data_scope_requester.clone(),
+            isolate_service_mapper: isolate_service_mapper.clone(),
+            shared_mem_manager: shared_memory_manager.clone(),
+            fileshare_manager: fileshare_manager.clone(),
+            state_manager: isolate_state_manager.clone(),
+            manifest_validator: manifest_validator.clone(),
+            shm_payload_threshold: enforcer_inputs.shm_payload_threshold,
+            max_decoding_message_size: enforcer_inputs.max_decoding_message_size,
+        });
 
         let health_manager = HealthManager::new(
             isolate_state_manager.clone(),
@@ -371,53 +374,6 @@ fn main() -> anyhow::Result<()> {
             .await;
         });
 
-        let mut inbound_tls_config = None;
-        let mut outbound_tls_config = None;
-        if enforcer_inputs.enable_mtls {
-            let proxy_address = enforcer_inputs.mtls_control_plane_uds_path.as_ref().context(
-                "mTLS enabled but mtls_control_plane_uds_path is missing. mTLS must be properly fetched.",
-            )?;
-            let key_path = enforcer_inputs.mtls_key_path.as_ref().context(
-                "mTLS enabled but mtls_key_path is missing.",
-            )?;
-            let csr_path = enforcer_inputs.mtls_leaf_csr_path.as_ref().context(
-                "mTLS enabled but mtls_leaf_csr_path is missing.",
-            )?;
-            let config = mtls::mtls::EzMtlsManagerConfig {
-                mtls_key_path: key_path.clone(),
-                csr_path: csr_path.clone(),
-                proxy_address: proxy_address.clone(),
-            };
-            let mtls_manager = mtls::mtls::EzMtlsManager::build(config).await.context("Failed to bootstrap EzMtlsManager. mTLS connection must be successful.")?;
-            let acceptor = mtls_manager.create_tls_acceptor().await.context("Failed to create TLS acceptor")?;
-            inbound_tls_config = Some(inbound_ez_to_ez_handler::InboundTlsConfig {
-                acceptor,
-                handshake_timeout: std::time::Duration::from_secs(enforcer_inputs.ez_to_ez_handshake_timeout_secs),
-                max_concurrent_handshakes: enforcer_inputs.ez_to_ez_max_concurrent_handshakes,
-            });
-
-            outbound_tls_config = Some(outbound_ez_to_ez_handler::OutboundTlsConfig {
-                factory: mtls_manager.get_connector_factory(),
-                trust_domain: mtls_manager.spiffe_identity().trust_domain.clone(),
-            });
-            log::info!("Successfully bootstrapped EzMtlsManager.");
-        }
-
-        // Start the inbound EZ-to-EZ gRPC server in the background.
-        let inbound_ez_to_ez_handler =
-            InboundEzToEzHandler::new(Box::new(isolate_junction.clone()));
-        let inbound_ez_to_ez_api_handle = enforcer_inputs.ez_to_ez_inbound_address.map(|address| {
-            tokio::spawn(async move {
-                inbound_ez_to_ez_handler::launch_server(
-                    inbound_ez_to_ez_handler,
-                    &address,
-                    max_decoding_message_size,
-                    inbound_tls_config,
-                )
-                .await;
-            })
-        });
-
         let external_proxy_connector: Option<Box<dyn ExternalProxyChannel>> =
             if let Some(proxy_address) = enforcer_inputs.ez_to_external_address {
                 Some(Box::new(
@@ -433,8 +389,10 @@ fn main() -> anyhow::Result<()> {
                     OutboundEzToEzHandler::new(
                         ez_to_ez_outbound_address,
                         metrics::ez_to_ez_outbound::EzToEzOutboundMetrics::default(),
-                        outbound_tls_config,
-                        enforcer_inputs.enable_mtls,
+                        // TODO: remove this default once TLS cert loading is moved to
+                        // setup_isolate.
+                        /* tls_config= */ None,
+                        /* expect_tls_config= */ enforcer_inputs.enable_mtls,
                         max_decoding_message_size,
                     )
                     .await?,
@@ -463,7 +421,7 @@ fn main() -> anyhow::Result<()> {
             isolate_service_mapper: isolate_service_mapper.clone(),
             manifest_validator: manifest_validator.clone(),
             data_scope_requester: data_scope_requester.clone(),
-            ez_to_ez_outbound_handler,
+            ez_to_ez_outbound_handler: ez_to_ez_outbound_handler.clone(),
             max_decoding_message_size,
             interceptor: interceptor.clone(),
             otel_endpoint: enforcer_inputs.otel_safe_endpoint.clone(),
@@ -485,6 +443,49 @@ fn main() -> anyhow::Result<()> {
                 .manifest_path
                 .context("manifest_path is required when use_manifest_v2 is false")?;
             ManifestSource::V1 { manifest_path }
+        };
+
+        let mut ez_to_ez_inbound = enforcer_inputs.ez_to_ez_inbound_address.map(|address| {
+            (InboundEzToEzHandler::new(Box::new(isolate_junction.clone())), address)
+        });
+
+        let node_bootstrap = if enforcer_inputs.use_manifest_v2 {
+            let ez_management_address = enforcer_inputs
+                .ez_management_address
+                .clone()
+                .context("ez_management_address is required when use_manifest_v2 is true")?;
+            anyhow::ensure!(
+                enforcer_inputs.operator_role.is_empty(),
+                "--operator-role must not be set with --use-manifest-v2; it is fetched via \
+                 EzManagementService.FetchOperatorInfo"
+            );
+            Some(
+                NodeBootstrapV2::new(
+                    isolate_state_manager.clone(),
+                    container_manager_requester.clone(),
+                    ez_to_ez_outbound_handler.clone(),
+                    ez_to_ez_inbound.take(),
+                    NodeBootstrapV2Config {
+                        ez_management_address,
+                        max_decoding_message_size,
+                        enable_mtls: enforcer_inputs.enable_mtls,
+                        ez_to_ez_handshake_timeout: Duration::from_secs(
+                            enforcer_inputs.ez_to_ez_handshake_timeout_secs,
+                        ),
+                        ez_to_ez_max_concurrent_handshakes: enforcer_inputs
+                            .ez_to_ez_max_concurrent_handshakes,
+                    },
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+
+        // operator_role is used by the Setup Isolate to request the EZ Node mTLS certificate.
+        let operator_role = match &node_bootstrap {
+            Some(node_bootstrap) => node_bootstrap.fetch_operator_info().await?.operator_role,
+            None => enforcer_inputs.operator_role.clone(),
         };
 
         let container_manager_args = ContainerManagerArgs {
@@ -510,7 +511,7 @@ fn main() -> anyhow::Result<()> {
             shm_num_slots: enforcer_inputs.shm_num_slots,
             shm_slot_size: enforcer_inputs.shm_slot_size,
             shm_payload_threshold: enforcer_inputs.shm_payload_threshold,
-            operator_role: enforcer_inputs.operator_role.clone(),
+            operator_role,
         };
 
         let mut container_manager =
@@ -520,21 +521,35 @@ fn main() -> anyhow::Result<()> {
 
         // With v2 manifests only the Setup Isolate is booted at startup, the rest of the Isolates are
         // loaded after the EZ Node has bootstrapped.
-        if enforcer_inputs.use_manifest_v2 {
-            let ez_management_address = enforcer_inputs
-                .ez_management_address
-                .clone()
-                .context("ez_management_address is required when use_manifest_v2 is true")?;
-            let node_bootstrap = NodeBootstrap::new(
-                isolate_state_manager.clone(),
-                container_manager_requester.clone(),
-                NodeBootstrapConfig { ez_management_address, max_decoding_message_size },
-            );
+        if let Some(node_bootstrap) = node_bootstrap {
             tokio::spawn(async move {
                 if let Err(e) = node_bootstrap.run().await {
                     log::error!("FATAL: EZ Node bootstrap failed: {:?}", e);
                 }
             });
+        } else {
+            let node_bootstrap = NodeBootstrapV1::new(
+                isolate_state_manager.clone(),
+                container_manager_requester.clone(),
+                ez_to_ez_outbound_handler.clone(),
+                ez_to_ez_inbound,
+                NodeBootstrapV1Config {
+                    enable_mtls: enforcer_inputs.enable_mtls,
+                    enable_tls_cert_remote_fetch: enforcer_inputs.enable_tls_cert_remote_fetch,
+                    mtls_control_plane_uds_path: enforcer_inputs
+                        .mtls_control_plane_uds_path
+                        .clone(),
+                    mtls_key_path: enforcer_inputs.mtls_key_path.clone(),
+                    mtls_leaf_csr_path: enforcer_inputs.mtls_leaf_csr_path.clone(),
+                    ez_to_ez_handshake_timeout: Duration::from_secs(
+                        enforcer_inputs.ez_to_ez_handshake_timeout_secs,
+                    ),
+                    ez_to_ez_max_concurrent_handshakes: enforcer_inputs
+                        .ez_to_ez_max_concurrent_handshakes,
+                    max_decoding_message_size,
+                },
+            );
+            node_bootstrap.run().await.context("EZ Node bootstrap failed")?;
         }
 
         if enforcer_inputs.health_manager_interval_secs > 0 {
@@ -552,9 +567,6 @@ fn main() -> anyhow::Result<()> {
         });
 
         let _ = public_api_handle.await;
-        if let Some(handle) = inbound_ez_to_ez_api_handle {
-            let _ = handle.await;
-        }
         let _ = _otel_traces.shutdown();
         Ok::<_, anyhow::Error>(())
     })?;

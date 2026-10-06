@@ -79,6 +79,8 @@ pub const JSON_MANIFEST_PATH_INTERCEPTOR: &str =
 pub const LOCALHOST_OTLP_ENDPOINT: &str = "http://localhost:4317";
 pub const JSON_MANIFEST_PATH_OTEL: &str =
     "enforcer/container/manager/test/testdata/test_manifest_otel.json";
+pub const JSON_MANIFEST_PATH_SETUP_ISOLATE: &str =
+    "enforcer/container/manager/test/testdata/test_manifest_setup_isolate.json";
 
 // The following constants are from the test manifests.
 // From v2_setup.json

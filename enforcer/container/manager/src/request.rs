@@ -17,7 +17,6 @@ use isolate_info::{BinaryServicesIndex, IsolateId};
 use manifest_parser::v2::WorkloadManifests;
 use setup_isolate_client::SetupIsolateClient;
 use std::collections::HashMap;
-use std::sync::Arc;
 use tokio::sync::oneshot;
 
 /// A response callback type for the sender of a [ContainerManagerRequest]
@@ -66,7 +65,7 @@ pub enum ContainerManagerRequest {
 
 #[derive(Debug, Clone)]
 pub struct GetSetupIsolateClientResponse {
-    pub client: Option<Arc<SetupIsolateClient>>,
+    pub client: Option<SetupIsolateClient>,
 }
 
 #[derive(Debug)]

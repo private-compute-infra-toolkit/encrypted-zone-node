@@ -22,6 +22,7 @@ package enforcer.v1;
 
 import "enforcer/v1/ez_payload.proto";
 import "enforcer/v1/isolate_bridge.proto";
+import "enforcer/v1/isolate_data_scope.proto";
 import "enforcer/v1/isolate_state.proto";
 
 // This is a mirror image of the EzIsolateBridge service (see comments there).
@@ -88,6 +89,9 @@ message InvokeEzResponse {
 
 message CreateMemshareRequest {
   int64 region_size = 1;
+  // DataScope for the data shared across the mem-share.
+  // This is a required field for Ratified Isolates.
+  IsolateDataScope data_scope = 2;
 }
 
 message CreateMemshareResponse {
@@ -115,7 +119,11 @@ message PollIsolateStateResponse {
 }
 
 // Request to create a new fileshare.
-message CreateFileshareRequest {}
+message CreateFileshareRequest {
+  // DataScope for the data shared across the fileshare.
+  // This is a required field for Ratified Isolates.
+  IsolateDataScope data_scope = 1;
+}
 
 // Response containing the handle to the newly created fileshare.
 message CreateFileshareResponse {

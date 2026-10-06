@@ -15,7 +15,7 @@
 use common_proto::enforcer::v2::IsolateType;
 use isolate_info::{
     get_binary_services_index, get_isolate_name, get_isolate_type, register_isolate_type,
-    BinaryServicesIndex,
+    BinaryServicesIndex, IsolateId, IsolateServiceIndex, Route,
 };
 
 #[test]
@@ -35,10 +35,29 @@ fn test_get_isolate_name_registered() {
 #[test]
 fn test_get_isolate_name_unregistered() {
     let index = BinaryServicesIndex::new(false);
+    assert_eq!(get_isolate_type(&index), None);
     assert_eq!(get_isolate_name(&index), format!("{:?}", index));
     let unregistered_type = IsolateType {
         publisher_id: "nonexistent_pub".to_string(),
         isolate_name: "nonexistent_isolate".to_string(),
     };
     assert_eq!(get_binary_services_index(&unregistered_type), None);
+}
+
+#[test]
+fn test_binary_services_index() {
+    let ratified_index = BinaryServicesIndex::new(true);
+    assert!(ratified_index.is_ratified_binary());
+
+    let opaque_index = BinaryServicesIndex::new(false);
+    assert!(!opaque_index.is_ratified_binary());
+
+    let ratified_isolate_id = IsolateId::new(ratified_index);
+    assert!(ratified_isolate_id.is_ratified_isolate());
+    assert_eq!(ratified_isolate_id.get_binary_services_index(), ratified_index);
+
+    let service_index =
+        IsolateServiceIndex::new(Some(ratified_index), "example.com", false).unwrap();
+    assert_eq!(service_index.get_binary_services_index(), Some(ratified_index));
+    assert_eq!(service_index.get_request_route(), Route::Internal);
 }

@@ -12,24 +12,92 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use enforcer_proto::enforcer::v1::{
+    ControlPlaneMetadata, InvokeIsolateRequest, InvokeIsolateResponse,
+};
+use ez_error::EzError;
 use ez_mtls_proto::enforcer::v1::ez_mtls_service_server::{EzMtlsService, EzMtlsServiceServer};
 use ez_mtls_proto::enforcer::v1::{
     GetCertificateRequest, GetCertificateResponse, ReportSniRequest, ReportSniResponse,
 };
+use isolate_info::IsolateId;
+use junction_trait::Junction;
 use manifest_parser::v1::parse_manifest;
-use mtls::mtls::{extract_sni_params, sni, EzMtlsManager, IsolateIdentity, SpiffeUri};
-use tokio::net::TcpListener;
-use tokio::sync::oneshot;
-use tokio_stream::wrappers::TcpListenerStream;
-use tonic::{Request, Response, Status};
-
-use enforcer_proto::enforcer::v1::ControlPlaneMetadata;
 use metrics_test_utils::TestMetrics;
+use mtls::mtls::{
+    extract_sni_params, sni, EzMtlsManager, EzMtlsManagerConfig, IsolateIdentity, SpiffeUri,
+};
 use outbound_ez_to_ez_client::OutboundEzToEzClient;
 use outbound_ez_to_ez_handler::{OutboundEzToEzHandler, OutboundTlsConfig};
 use payload_proto::enforcer::v1::{
     ez_hybrid_payload::DeliveryMethod, EzHybridPayload, EzPayloadData,
 };
+use prost::Message;
+use setup_isolate_client::SetupIsolateClient;
+use setup_isolate_proto::enforcer::v2::{FetchTlsCertificateRequest, FetchTlsCertificateResponse};
+use std::sync::Arc;
+use std::time::Instant;
+use tokio::net::TcpListener;
+use tokio::sync::oneshot;
+use tokio_stream::wrappers::TcpListenerStream;
+use tonic::{Request, Response, Status};
+
+#[derive(Clone)]
+struct MockJunction {
+    response: Result<InvokeIsolateResponse, String>,
+    last_request: Arc<std::sync::Mutex<Option<InvokeIsolateRequest>>>,
+}
+
+impl MockJunction {
+    fn new(response: Result<InvokeIsolateResponse, String>) -> Self {
+        Self { response, last_request: Arc::new(std::sync::Mutex::new(None)) }
+    }
+}
+
+#[tonic::async_trait]
+impl Junction for MockJunction {
+    async fn invoke_isolate(
+        &self,
+        _client_isolate_id_option: Option<IsolateId>,
+        invoke_isolate_request: InvokeIsolateRequest,
+        _is_from_public_api: bool,
+        _deadline: Option<Instant>,
+    ) -> Result<InvokeIsolateResponse, EzError> {
+        *self.last_request.lock().unwrap() = Some(invoke_isolate_request);
+        match &self.response {
+            Ok(res) => Ok(res.clone()),
+            Err(e) => Err(EzError::Status(tonic::Status::internal(e.to_string()))),
+        }
+    }
+
+    async fn stream_invoke_isolate(
+        &self,
+        _client_isolate_id_option: Option<IsolateId>,
+        _is_from_public_api: bool,
+        _timeout: Option<std::time::Duration>,
+    ) -> junction_trait::JunctionChannels {
+        unimplemented!()
+    }
+
+    async fn connect_isolate(
+        &self,
+        _isolate_id: IsolateId,
+        _isolate_address: String,
+    ) -> anyhow::Result<()> {
+        unimplemented!()
+    }
+}
+
+fn create_valid_invoke_response(payload: Vec<u8>) -> InvokeIsolateResponse {
+    InvokeIsolateResponse {
+        isolate_output: Some(EzHybridPayload {
+            delivery_method: Some(DeliveryMethod::InlineData(EzPayloadData {
+                datagrams: vec![payload],
+            })),
+        }),
+        ..Default::default()
+    }
+}
 
 #[test]
 fn test_sni() {
@@ -118,11 +186,7 @@ async fn test_connect_ez_mtls() {
     let key_path = "enforcer/ez_to_ez/test/testdata/leaf.key".to_string();
     let csr_path = "enforcer/ez_to_ez/test/testdata/leaf.csr".to_string();
 
-    let config = mtls::mtls::EzMtlsManagerConfig {
-        mtls_key_path: key_path,
-        csr_path,
-        proxy_address: server_addr,
-    };
+    let config = EzMtlsManagerConfig::new_with_proxy(key_path, csr_path, server_addr);
     let manager_result = EzMtlsManager::build(config).await;
     assert!(
         manager_result.is_ok(),
@@ -195,11 +259,7 @@ async fn test_tls_acceptor_connector() {
     });
     let key_path = "enforcer/ez_to_ez/test/testdata/leaf.key".to_string();
     let csr_path = "enforcer/ez_to_ez/test/testdata/leaf.csr".to_string();
-    let config = mtls::mtls::EzMtlsManagerConfig {
-        mtls_key_path: key_path.clone(),
-        csr_path: csr_path.clone(),
-        proxy_address: server_addr.clone(),
-    };
+    let config = EzMtlsManagerConfig::new_with_proxy(key_path, csr_path, server_addr);
     let server_manager =
         EzMtlsManager::build(config.clone()).await.expect("Failed to initialize server manager");
     let client_manager =
@@ -263,11 +323,7 @@ async fn test_boring_tls_stream_duplex() {
             .unwrap();
     });
 
-    let config = mtls::mtls::EzMtlsManagerConfig {
-        mtls_key_path: key_path.clone(),
-        csr_path: csr_path.clone(),
-        proxy_address: server_addr.clone(),
-    };
+    let config = EzMtlsManagerConfig::new_with_proxy(key_path, csr_path, server_addr);
     // Create a mTLS manager to fetch the certificates from the mock server and load certificates from testdata.
     let server_manager =
         EzMtlsManager::build(config.clone()).await.expect("Failed to initialize server manager");
@@ -364,11 +420,7 @@ async fn create_test_context() -> TestContext {
             .unwrap();
     });
 
-    let config = mtls::mtls::EzMtlsManagerConfig {
-        mtls_key_path: key_path.clone(),
-        csr_path: csr_path.clone(),
-        proxy_address: server_addr.clone(),
-    };
+    let config = EzMtlsManagerConfig::new_with_proxy(key_path, csr_path, server_addr);
 
     let server_manager = EzMtlsManager::build(config.clone()).await.unwrap();
     let client_manager = EzMtlsManager::build(config).await.unwrap();
@@ -662,4 +714,137 @@ async fn test_outbound_pending_then_set_tls_config_works() {
 
     let _ = ctx.mock_service_tx.send(());
     ctx.server_task.abort();
+}
+
+#[test]
+fn test_generate_key_and_csr() {
+    let (pkey, csr_der) =
+        EzMtlsManager::generate_key_and_csr().expect("Failed to generate key and CSR");
+
+    let ec_key = pkey.ec_key().expect("Generated private key should be an EC key");
+    assert_eq!(
+        ec_key.group().curve_name(),
+        Some(boring::nid::Nid::X9_62_PRIME256V1),
+        "Generated key must be on the P-256 curve"
+    );
+
+    let csr =
+        boring::x509::X509Req::from_der(&csr_der).expect("CSR bytes should be valid DER X509Req");
+    let csr_pubkey = csr.public_key().expect("CSR should contain a public key");
+    assert!(csr_pubkey.public_eq(&pkey), "CSR public key must match the generated private key");
+    assert!(
+        csr.verify(&pkey).expect("CSR signature verification should not error"),
+        "CSR signature must be valid for the generated key"
+    );
+
+    let (pkey2, _) =
+        EzMtlsManager::generate_key_and_csr().expect("Failed to generate second key and CSR");
+    assert!(
+        !pkey.public_eq(&pkey2),
+        "Subsequent calls to generate_key_and_csr must produce distinct key pairs"
+    );
+}
+
+#[tokio::test]
+async fn test_ez_mtls_manager_build_with_setup_isolate() {
+    let expected_res = FetchTlsCertificateResponse {
+        certificate_chain: vec![include_bytes!("testdata/leaf.der").to_vec()],
+        trust_anchors: vec![include_bytes!("testdata/root.der").to_vec()],
+    };
+    let junction =
+        MockJunction::new(Ok(create_valid_invoke_response(expected_res.encode_to_vec())));
+    let last_request = junction.last_request.clone();
+    let setup_client = SetupIsolateClient::new(
+        Box::new(junction),
+        "test-publisher".to_string(),
+        "setup-isolate".to_string(),
+        "SetupService".to_string(),
+    );
+
+    let config = EzMtlsManagerConfig::new_with_setup_isolate(setup_client);
+
+    let manager = EzMtlsManager::build(config).await.expect("Failed to build EzMtlsManager");
+    assert_eq!(manager.spiffe_identity().trust_domain, "avs.tca.fakeca");
+
+    let invoked_req = last_request.lock().unwrap().clone().expect("No request invoked");
+    let cpm = invoked_req.control_plane_metadata.expect("Missing metadata");
+    assert_eq!(cpm.destination_service_name, "SetupService");
+    assert_eq!(cpm.destination_method_name, "FetchMtlsCertificate");
+
+    // Verify the CSR generated in memory was passed in the request datagram.
+    let payload = invoked_req.isolate_input.unwrap().delivery_method.unwrap();
+    let req_bytes = match payload {
+        DeliveryMethod::InlineData(data) => data.datagrams[0].clone(),
+        _ => panic!("Expected InlineData delivery method"),
+    };
+    let parsed_req = FetchTlsCertificateRequest::decode(&*req_bytes).unwrap();
+    assert!(!parsed_req.signed_certificate_signing_request.is_empty());
+}
+
+#[tokio::test]
+async fn test_ez_mtls_manager_build_missing_key_file() {
+    let config = EzMtlsManagerConfig::new_with_proxy(
+        "nonexistent/leaf.key".to_string(),
+        "enforcer/ez_to_ez/test/testdata/leaf.csr".to_string(),
+        "http://127.0.0.1:1".to_string(),
+    );
+    let err = EzMtlsManager::build(config).await.unwrap_err();
+    assert!(err.to_string().contains("Failed to read leaf private key from path"));
+}
+
+#[tokio::test]
+async fn test_ez_mtls_manager_build_missing_csr_file() {
+    let config = EzMtlsManagerConfig::new_with_proxy(
+        "enforcer/ez_to_ez/test/testdata/leaf.key".to_string(),
+        "nonexistent/leaf.csr".to_string(),
+        "http://127.0.0.1:1".to_string(),
+    );
+    let err = EzMtlsManager::build(config).await.unwrap_err();
+    assert!(err.to_string().contains("Failed to read leaf CSR from path"));
+}
+
+#[tokio::test]
+async fn test_ez_mtls_manager_build_setup_isolate_rpc_failure() {
+    let junction = MockJunction::new(Err("RPC transport error".to_string()));
+    let setup_client = SetupIsolateClient::new(
+        Box::new(junction),
+        "test-publisher".to_string(),
+        "setup-isolate".to_string(),
+        "SetupService".to_string(),
+    );
+
+    let config = EzMtlsManagerConfig::new_with_setup_isolate(setup_client);
+    let err = EzMtlsManager::build(config).await.unwrap_err();
+    assert!(err.to_string().contains("Failed to fetch certificate from Setup Isolate"));
+}
+
+#[tokio::test]
+async fn test_ez_mtls_manager_build_with_setup_isolate_empty_trust_anchors_err() {
+    let expected_res = FetchTlsCertificateResponse {
+        certificate_chain: vec![include_bytes!("testdata/leaf.der").to_vec()],
+        trust_anchors: vec![],
+    };
+    let junction =
+        MockJunction::new(Ok(create_valid_invoke_response(expected_res.encode_to_vec())));
+    let setup_client = SetupIsolateClient::new(
+        Box::new(junction),
+        "test-publisher".to_string(),
+        "setup-isolate".to_string(),
+        "SetupService".to_string(),
+    );
+
+    let config = EzMtlsManagerConfig::new_with_setup_isolate(setup_client);
+    let err = EzMtlsManager::build(config).await.unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("Trust anchors returned from Setup Isolate must not be empty"));
+}
+
+#[tokio::test]
+async fn test_ez_mtls_manager_build_missing_config_fields() {
+    let config = EzMtlsManagerConfig::default();
+    let err = EzMtlsManager::build(config).await.unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("mtls_key_path must be provided when setup_isolate_client is not set"));
 }

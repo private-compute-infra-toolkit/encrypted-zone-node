@@ -18,6 +18,7 @@ package enforcer.v2;
 
 import "enforcer/v1/isolate_endorsement.proto";
 import "enforcer/v2/common.proto";
+import "enforcer/v2/isolate_startup_parameters.proto";
 import "enforcer/v2/opaque_isolate_manifest.proto";
 import "enforcer/v2/ratified_isolate_manifest.proto";
 
@@ -29,6 +30,17 @@ import "enforcer/v2/ratified_isolate_manifest.proto";
 // sidecar running outside the Trusted Execution Environment (TEE) boundary
 // acts as the gRPC server, providing the necessary resources.
 service EzManagementService {
+  // Fetches the EZ Node-level OperatorInfo (operator_domain and operator_role)
+  // from the host proxy. Called once at Enforcer startup, before any Isolates
+  // are booted. The OperatorInfo will be attached to the EZ Node Identity
+  // (certificate) created via the Setup Isolate.
+  rpc FetchOperatorInfo(FetchOperatorInfoRequest) returns (FetchOperatorInfoResponse) {}
+
+  // Fetches the IsolateStartupParameters of every Isolate this EZ Node may
+  // run, including the Setup Isolate. Called once at Enforcer startup, after
+  // FetchOperatorInfo and before any Isolates are booted.
+  rpc FetchIsolateStartupParameters(FetchIsolateStartupParametersRequest) returns (FetchIsolateStartupParametersResponse) {}
+
   // Loads isolate manifests and packages.
   // The contract is as follows:
   // 1. The Enforcer starts the stream by sending a ReadyToLoadPackagesRequest.
@@ -40,6 +52,40 @@ service EzManagementService {
   // 4. The proxy sends an AllPackagesLoadedResponse to signal that all packages
   // have been loaded.
   rpc LoadIsolates(stream LoadIsolatesRequest) returns (stream LoadIsolatesResponse) {}
+}
+
+// Request message for fetching the EZ Node-level OperatorInfo.
+message FetchOperatorInfoRequest {
+  // Empty for now, but fields can be added safely later.
+}
+
+// Response message containing the EZ Node-level OperatorInfo.
+message FetchOperatorInfoResponse {
+  // The operator identity for the EZ Node.
+  OperatorInfo operator_info = 1;
+}
+
+// EZ Node-level operator identity shared across all Isolates running in the
+// EZ Node.
+message OperatorInfo {
+  // Globally unique domain of the service provider operating this EZ Node
+  // (e.g. "prod.google.com").
+  string operator_domain = 1;
+  // Role of the operator running this EZ Node. Determines which Ratified
+  // Isolates are allowed to run in this EZ Node. It is exposed to Isolates as
+  // an environment variable, EZ_OPERATOR_ROLE.
+  string operator_role = 2;
+}
+
+// Request message for fetching IsolateStartupParameters.
+message FetchIsolateStartupParametersRequest {
+  // Empty for now, but fields can be added safely later.
+}
+
+// Response message containing the IsolateStartupParameters of each Isolate.
+message FetchIsolateStartupParametersResponse {
+  // At most one entry per IsolateType (IsolateStartupParameters.identifier).
+  repeated IsolateStartupParameters startup_parameters = 1;
 }
 
 // Request message indicating the Enforcer is ready to load packages.

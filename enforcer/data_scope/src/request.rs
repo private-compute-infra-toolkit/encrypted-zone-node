@@ -71,6 +71,13 @@ pub struct ValidateIsolateRequest {
     pub requested_scope: DataScopeType,
 }
 
+/// A response for a data transfer validation between two Isolates.
+#[derive(Debug, Default)]
+pub struct ValidateDataTransferResponse {
+    /// Indicates whether the destination Isolate should be retired after this transfer.
+    pub is_retiring: bool,
+}
+
 /// A request to freeze the data scope of an Isolate, preventing it from being changed further.
 #[derive(Debug)]
 pub struct FreezeIsolateScopeRequest {

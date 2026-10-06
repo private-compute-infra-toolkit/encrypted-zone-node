@@ -21,24 +21,38 @@ use container_manager_requester::ContainerManagerRequester;
 use data_scope::request::AddIsolateRequest;
 use data_scope::requester::DataScopeRequester;
 use data_scope_proto::enforcer::v1::DataScopeType;
-use enforcer_proto::enforcer::v1::IsolateState;
+use enforcer_proto::enforcer::v1::{
+    ControlPlaneMetadata, InvokeEzRequest, InvokeEzResponse, InvokeIsolateRequest,
+    InvokeIsolateResponse, IsolateState,
+};
+use ez_error::EzError;
 use ez_management_proto::enforcer::v2::ez_management_service_server::{
     EzManagementService, EzManagementServiceServer,
 };
 use ez_management_proto::enforcer::v2::{
-    load_isolates_response, AllPackagesLoadedResponse, LoadIsolatesRequest, LoadIsolatesResponse,
-    RatifiedIsolateManifestPayload,
+    load_isolates_response, AllPackagesLoadedResponse, FetchIsolateStartupParametersRequest,
+    FetchIsolateStartupParametersResponse, FetchOperatorInfoRequest, FetchOperatorInfoResponse,
+    LoadIsolatesRequest, LoadIsolatesResponse, OperatorInfo, RatifiedIsolateManifestPayload,
 };
+use inbound_ez_to_ez_handler::InboundEzToEzHandler;
 use isolate_info::{register_isolate_type, BinaryServicesIndex, IsolateId};
 use junction_test_utils::FakeJunction;
-use node_bootstrap::{NodeBootstrap, NodeBootstrapConfig};
+use junction_trait::Junction;
+use node_bootstrap::{NodeBootstrapV2, NodeBootstrapV2Config};
 use opaque_isolate_manifest_proto::enforcer::v2::OpaqueIsolateManifest;
+use outbound_ez_to_ez_client::{OutboundEzToEzClient, OutboundTlsConfig};
+use payload_proto::enforcer::v1::{
+    ez_hybrid_payload::DeliveryMethod, EzHybridPayload, EzPayloadData,
+};
+use prost::Message;
 use ratified_isolate_manifest_proto::enforcer::v2::RatifiedIsolateManifest;
 use setup_isolate_client::SetupIsolateClient;
+use setup_isolate_proto::enforcer::v2::FetchTlsCertificateResponse;
 use state_manager::IsolateStateManager;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Instant;
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::{timeout, Duration};
@@ -50,6 +64,8 @@ use tonic::{Request, Response, Status, Streaming};
 const MAX_DECODING_SIZE: usize = 4 * 1024 * 1024;
 const CHANNEL_SIZE: usize = 128;
 const SETUP_PUBLISHER_ID: &str = "EZ_Trusted";
+const OPERATOR_DOMAIN: &str = "operator.example.com";
+const OPERATOR_ROLE: &str = "PRIMARY";
 // Long enough for an erroneously ungated bootstrap to reach the service, short enough to keep
 // the test fast.
 const NOT_CONTACTED_WINDOW: Duration = Duration::from_millis(500);
@@ -59,19 +75,89 @@ const CONTACTED_TIMEOUT: Duration = Duration::from_secs(10);
 // Isolate name to keep tests independent of one another.
 static SETUP_ISOLATE_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// Minimal EzManagementService that reports when `LoadIsolates` is invoked and then replies
-/// with two empty manifests followed by `AllPackagesLoaded`.
+#[derive(Clone, Default)]
+struct FakeOutboundEzToEzClient {
+    tls_config: Arc<StdMutex<Option<OutboundTlsConfig>>>,
+}
+
+#[tonic::async_trait]
+impl OutboundEzToEzClient for FakeOutboundEzToEzClient {
+    async fn remote_invoke(
+        &self,
+        _request: InvokeEzRequest,
+        _deadline: Option<Instant>,
+    ) -> anyhow::Result<InvokeEzResponse> {
+        unimplemented!()
+    }
+
+    async fn remote_streaming_connect(
+        &self,
+        _first_request_metadata: Option<&ControlPlaneMetadata>,
+        _from_local_rx: mpsc::Receiver<InvokeEzRequest>,
+        _timeout: Option<Duration>,
+    ) -> anyhow::Result<mpsc::Receiver<anyhow::Result<InvokeEzResponse>>> {
+        unimplemented!()
+    }
+
+    fn set_tls_config(&self, tls_config: OutboundTlsConfig) -> anyhow::Result<()> {
+        *self.tls_config.lock().unwrap() = Some(tls_config);
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct FakeSetupJunction {
+    response: Result<InvokeIsolateResponse, String>,
+}
+
+#[tonic::async_trait]
+impl Junction for FakeSetupJunction {
+    async fn invoke_isolate(
+        &self,
+        _client_isolate_id_option: Option<IsolateId>,
+        _invoke_isolate_request: InvokeIsolateRequest,
+        _is_from_public_api: bool,
+        _deadline: Option<Instant>,
+    ) -> Result<InvokeIsolateResponse, EzError> {
+        match &self.response {
+            Ok(res) => Ok(res.clone()),
+            Err(msg) => Err(EzError::Status(Status::internal(msg.clone()))),
+        }
+    }
+
+    async fn stream_invoke_isolate(
+        &self,
+        _client_isolate_id_option: Option<IsolateId>,
+        _is_from_public_api: bool,
+        _timeout: Option<Duration>,
+    ) -> junction_trait::JunctionChannels {
+        unimplemented!()
+    }
+
+    async fn connect_isolate(
+        &self,
+        _isolate_id: IsolateId,
+        _isolate_address: String,
+    ) -> anyhow::Result<()> {
+        unimplemented!()
+    }
+}
+
+/// Minimal EzManagementService that serves a fixed `OperatorInfo`, reports when `LoadIsolates` is
+/// invoked, and then replies with two empty manifests followed by `AllPackagesLoaded`.
 struct FakeManagementService {
     contacted_tx: mpsc::Sender<()>,
 }
 
 struct TestHarness {
-    bootstrap: NodeBootstrap,
+    bootstrap: NodeBootstrapV2,
     state_manager: IsolateStateManager,
+    container_manager_requester: ContainerManagerRequester,
+    ez_management_address: String,
     setup_isolate_id: IsolateId,
     contacted_rx: Arc<Mutex<mpsc::Receiver<()>>>,
     _package_dir: tempfile::TempDir,
-    _server_dir: tempfile::TempDir,
+    server_dir: tempfile::TempDir,
     _server_handle: tokio::task::JoinHandle<()>,
 }
 
@@ -106,12 +192,143 @@ async fn test_bootstrap_runs_when_setup_isolate_is_already_ready() {
     let harness = TestHarness::new().await;
     harness.mark_setup_isolate_ready().await;
 
-    let loaded_indices = timeout(CONTACTED_TIMEOUT, harness.bootstrap.run())
+    timeout(CONTACTED_TIMEOUT, harness.bootstrap.run())
         .await
         .expect("Bootstrap should not block when the Setup Isolate is already Ready")
         .expect("Bootstrap should succeed");
+}
 
-    assert!(loaded_indices.is_empty(), "No workload packages were served by the fake service");
+#[tokio::test]
+async fn test_fetch_operator_info_before_setup_isolate_is_ready() {
+    let harness = TestHarness::new().await;
+
+    let operator_info = timeout(CONTACTED_TIMEOUT, harness.bootstrap.fetch_operator_info())
+        .await
+        .expect("fetch_operator_info must not wait for the Setup Isolate")
+        .expect("fetch_operator_info should succeed");
+
+    assert_eq!(operator_info.operator_domain, OPERATOR_DOMAIN);
+    assert_eq!(operator_info.operator_role, OPERATOR_ROLE);
+    assert!(
+        !harness.management_service_contacted_within(NOT_CONTACTED_WINDOW).await,
+        "LoadIsolates must not start before the Setup Isolate is Ready"
+    );
+}
+
+#[tokio::test]
+async fn test_bootstrap_launches_inbound_ez_to_ez_server() {
+    let harness = TestHarness::new().await;
+    harness.mark_setup_isolate_ready().await;
+
+    let inbound_uds_path = harness.server_dir.path().join("inbound_ez_to_ez.sock");
+    let inbound_address = format!("unix:{}", inbound_uds_path.display());
+    let inbound_handler = InboundEzToEzHandler::new(Box::new(FakeJunction::default()));
+
+    let bootstrap = NodeBootstrapV2::new(
+        harness.state_manager.clone(),
+        harness.container_manager_requester.clone(),
+        None,
+        Some((inbound_handler, inbound_address)),
+        NodeBootstrapV2Config {
+            ez_management_address: harness.ez_management_address.clone(),
+            max_decoding_message_size: MAX_DECODING_SIZE,
+            enable_mtls: false,
+            ez_to_ez_handshake_timeout: Duration::from_secs(5),
+            ez_to_ez_max_concurrent_handshakes: 10,
+        },
+    )
+    .await
+    .expect("NodeBootstrapV2 should connect to the EzManagementService");
+
+    timeout(CONTACTED_TIMEOUT, bootstrap.run())
+        .await
+        .expect("Bootstrap should not block")
+        .expect("Bootstrap should succeed");
+
+    timeout(CONTACTED_TIMEOUT, async {
+        while !inbound_uds_path.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("Inbound EZ-to-EZ UDS socket should be created");
+}
+
+#[tokio::test]
+async fn test_bootstrap_with_mtls_configures_outbound_tls() {
+    let harness = TestHarness::new().await;
+    let fake_outbound = FakeOutboundEzToEzClient::default();
+    let bootstrap = NodeBootstrapV2::new(
+        harness.state_manager.clone(),
+        harness.container_manager_requester.clone(),
+        Some(Box::new(fake_outbound.clone())),
+        None,
+        NodeBootstrapV2Config {
+            ez_management_address: harness.ez_management_address.clone(),
+            max_decoding_message_size: MAX_DECODING_SIZE,
+            enable_mtls: true,
+            ez_to_ez_handshake_timeout: Duration::from_secs(5),
+            ez_to_ez_max_concurrent_handshakes: 10,
+        },
+    )
+    .await
+    .expect("NodeBootstrapV2 should connect to the EzManagementService");
+    let run_handle = tokio::spawn(async move { bootstrap.run().await });
+
+    assert!(
+        !harness.management_service_contacted_within(NOT_CONTACTED_WINDOW).await,
+        "EzManagementService must not be contacted before the Setup Isolate is Ready"
+    );
+    assert!(!run_handle.is_finished(), "Bootstrap should still be waiting on the Setup Isolate");
+
+    harness.mark_setup_isolate_ready().await;
+
+    timeout(CONTACTED_TIMEOUT, run_handle)
+        .await
+        .expect("Bootstrap should finish once the Setup Isolate is Ready")
+        .expect("Bootstrap task should not panic")
+        .expect("Bootstrap with mTLS should succeed");
+
+    let configured_outbound = fake_outbound
+        .tls_config
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("set_tls_config should be called on outbound handler");
+    assert_eq!(configured_outbound.trust_domain, "avs.tca.fakeca");
+}
+
+#[tokio::test]
+async fn test_bootstrap_does_not_contact_management_service_when_mtls_fetch_fails() {
+    let harness =
+        TestHarness::new_with_setup_response(Err("setup isolate cert fetch failed".to_string()))
+            .await;
+    harness.mark_setup_isolate_ready().await;
+
+    let bootstrap = NodeBootstrapV2::new(
+        harness.state_manager.clone(),
+        harness.container_manager_requester.clone(),
+        None,
+        None,
+        NodeBootstrapV2Config {
+            ez_management_address: harness.ez_management_address.clone(),
+            max_decoding_message_size: MAX_DECODING_SIZE,
+            enable_mtls: true,
+            ez_to_ez_handshake_timeout: Duration::from_secs(5),
+            ez_to_ez_max_concurrent_handshakes: 10,
+        },
+    )
+    .await
+    .expect("NodeBootstrapV2 should connect to the EzManagementService");
+
+    let result = timeout(CONTACTED_TIMEOUT, bootstrap.run())
+        .await
+        .expect("Bootstrap should fail fast when mTLS cert fetch fails");
+    assert!(result.is_err(), "Bootstrap must fail when mTLS cert fetch fails");
+    assert!(
+        !harness.management_service_contacted_within(NOT_CONTACTED_WINDOW).await,
+        "EzManagementService must not be contacted when mTLS identity acquisition fails"
+    );
 }
 
 #[tokio::test]
@@ -128,14 +345,21 @@ async fn test_bootstrap_fails_without_a_setup_isolate() {
         }
     });
 
-    let bootstrap = NodeBootstrap::new(
+    let bootstrap = NodeBootstrapV2::new(
         harness.state_manager.clone(),
         ContainerManagerRequester::new(request_tx),
-        NodeBootstrapConfig {
-            ez_management_address: "unix:/nonexistent.sock".to_string(),
+        None,
+        None,
+        NodeBootstrapV2Config {
+            ez_management_address: harness.ez_management_address.clone(),
             max_decoding_message_size: MAX_DECODING_SIZE,
+            enable_mtls: false,
+            ez_to_ez_handshake_timeout: Duration::from_secs(5),
+            ez_to_ez_max_concurrent_handshakes: 10,
         },
-    );
+    )
+    .await
+    .expect("NodeBootstrapV2 should connect to the EzManagementService");
 
     let result = timeout(CONTACTED_TIMEOUT, bootstrap.run())
         .await
@@ -149,6 +373,25 @@ async fn test_bootstrap_fails_without_a_setup_isolate() {
 
 #[tonic::async_trait]
 impl EzManagementService for FakeManagementService {
+    async fn fetch_operator_info(
+        &self,
+        _request: Request<FetchOperatorInfoRequest>,
+    ) -> Result<Response<FetchOperatorInfoResponse>, Status> {
+        Ok(Response::new(FetchOperatorInfoResponse {
+            operator_info: Some(OperatorInfo {
+                operator_domain: OPERATOR_DOMAIN.to_string(),
+                operator_role: OPERATOR_ROLE.to_string(),
+            }),
+        }))
+    }
+
+    async fn fetch_isolate_startup_parameters(
+        &self,
+        _request: Request<FetchIsolateStartupParametersRequest>,
+    ) -> Result<Response<FetchIsolateStartupParametersResponse>, Status> {
+        Ok(Response::new(FetchIsolateStartupParametersResponse::default()))
+    }
+
     type LoadIsolatesStream =
         Pin<Box<dyn Stream<Item = Result<LoadIsolatesResponse, Status>> + Send + 'static>>;
 
@@ -193,6 +436,26 @@ impl EzManagementService for FakeManagementService {
 
 impl TestHarness {
     async fn new() -> Self {
+        let leaf_der =
+            std::fs::read("enforcer/ez_to_ez/test/testdata/leaf.der").expect("read test leaf.der");
+        let root_der =
+            std::fs::read("enforcer/ez_to_ez/test/testdata/root.der").expect("read test root.der");
+        let cert_res = FetchTlsCertificateResponse {
+            certificate_chain: vec![leaf_der],
+            trust_anchors: vec![root_der],
+        };
+        let response = InvokeIsolateResponse {
+            isolate_output: Some(EzHybridPayload {
+                delivery_method: Some(DeliveryMethod::InlineData(EzPayloadData {
+                    datagrams: vec![cert_res.encode_to_vec()],
+                })),
+            }),
+            ..Default::default()
+        };
+        Self::new_with_setup_response(Ok(response)).await
+    }
+
+    async fn new_with_setup_response(response: Result<InvokeIsolateResponse, String>) -> Self {
         let package_dir = tempfile::tempdir().expect("package dir");
         std::env::set_var("EZ_PACKAGE_OUTPUT_DIR", package_dir.path());
 
@@ -220,12 +483,13 @@ impl TestHarness {
                 isolate_name: isolate_name.clone(),
             },
         );
-        let setup_isolate_client = Arc::new(SetupIsolateClient::new(
-            Box::new(FakeJunction::default()),
+        let setup_junction = FakeSetupJunction { response };
+        let setup_isolate_client = SetupIsolateClient::new(
+            Box::new(setup_junction),
             SETUP_PUBLISHER_ID.to_string(),
             isolate_name,
             "SetupService".to_string(),
-        ));
+        );
 
         let (request_tx, request_rx) = mpsc::channel(CHANNEL_SIZE);
         let container_manager_requester = ContainerManagerRequester::new(request_tx);
@@ -247,22 +511,32 @@ impl TestHarness {
             .await;
         state_manager.mark_channel_connected(setup_isolate_id).await.expect("channel connected");
 
-        let bootstrap = NodeBootstrap::new(
+        let ez_management_address = format!("unix:{}", uds_path.display());
+        let bootstrap = NodeBootstrapV2::new(
             state_manager.clone(),
-            container_manager_requester,
-            NodeBootstrapConfig {
-                ez_management_address: format!("unix:{}", uds_path.display()),
+            container_manager_requester.clone(),
+            None,
+            None,
+            NodeBootstrapV2Config {
+                ez_management_address: ez_management_address.clone(),
                 max_decoding_message_size: MAX_DECODING_SIZE,
+                enable_mtls: false,
+                ez_to_ez_handshake_timeout: Duration::from_secs(5),
+                ez_to_ez_max_concurrent_handshakes: 10,
             },
-        );
+        )
+        .await
+        .expect("NodeBootstrapV2 should connect to the EzManagementService");
 
         Self {
             bootstrap,
             state_manager,
+            container_manager_requester,
+            ez_management_address,
             setup_isolate_id,
             contacted_rx: Arc::new(Mutex::new(contacted_rx)),
             _package_dir: package_dir,
-            _server_dir: server_dir,
+            server_dir,
             _server_handle: server_handle,
         }
     }
@@ -285,7 +559,7 @@ impl TestHarness {
 /// without a real ContainerManager.
 fn spawn_fake_container_manager(
     mut request_rx: mpsc::Receiver<ContainerManagerRequest>,
-    setup_isolate_client: Arc<SetupIsolateClient>,
+    setup_isolate_client: SetupIsolateClient,
 ) {
     tokio::spawn(async move {
         while let Some(request) = request_rx.recv().await {

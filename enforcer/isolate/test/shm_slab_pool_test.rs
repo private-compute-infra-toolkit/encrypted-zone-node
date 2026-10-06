@@ -213,3 +213,254 @@ async fn test_shm_slab_pool_reader_cannot_write() {
     assert!(res.is_err());
     assert!(matches!(res.unwrap_err(), ShmSlabPoolError::InvalidWritePermission));
 }
+
+// The tests below cover b/556034613: `ShmSlotReference` arrives from the peer over the wire, so
+// `read_from_pool` must reject hostile indices and lengths with an error rather than performing
+// out-of-bounds address arithmetic (historically a wild atomic read-modify-write in `free_slots`)
+// or panicking. Every case must leave the process alive and the pool usable.
+
+const MALICIOUS_POOL_SLOTS: u64 = 64;
+const MALICIOUS_POOL_SLOT_SIZE: u64 = 4;
+
+// Builds a writable pool with a known geometry for the hostile input tests.
+fn new_test_pool(dir: &tempfile::TempDir, number_of_slots: u64, slot_size: u64) -> ShmSlabPool {
+    let path = dir.path().join("shm_slab").to_string_lossy().to_string();
+    ShmSlabPool::new(ShmSlabPoolOptions {
+        file_name: path,
+        number_of_slots,
+        slot_size,
+        writer: true,
+    })
+    .expect("Failed to initialize ShmSlabPool")
+}
+
+// Reads a single hostile slot reference out of a standard 64 x 4 pool.
+fn read_one(pool: &ShmSlabPool, slot_index: i64, length: i64) -> ShmSlabPoolError {
+    pool.read_from_pool(&[ShmSlotReference { slot_index, length }])
+        .expect_err("read_from_pool must reject an out-of-bounds slot reference")
+}
+
+// The reproducer index from b/556034613: slot_index = 2^44, which nothing bounded before the fix.
+// On this geometry the byte offset (2^46) fell outside the data mapping and panicked while
+// slicing it; the wrapping and zero-geometry tests below cover the variants that instead reached
+// free_slots. Every one of them killed the enforcer.
+#[tokio::test]
+async fn test_read_from_pool_rejects_wild_atomic_write_slot_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = new_test_pool(&dir, MALICIOUS_POOL_SLOTS, MALICIOUS_POOL_SLOT_SIZE);
+
+    // length = 0 leaves the requested data range empty, so the index bound is the only thing that
+    // can reject this: validation must never rely on the copy itself failing.
+    let err = read_one(&pool, 1 << 44, 0);
+    assert!(
+        matches!(err, ShmSlabPoolError::InvalidSlotIndex { slot_index, .. } if slot_index == 1 << 44),
+        "expected InvalidSlotIndex, got {err:?}"
+    );
+
+    // The pool must still work afterwards.
+    let slot_refs = pool.write_to_pool(TEST_PAYLOAD).await.expect("Pool should still be usable");
+    assert_eq!(pool.read_from_pool(&slot_refs).expect("Read should succeed"), TEST_PAYLOAD);
+}
+
+#[tokio::test]
+async fn test_read_from_pool_rejects_out_of_range_slot_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = new_test_pool(&dir, MALICIOUS_POOL_SLOTS, MALICIOUS_POOL_SLOT_SIZE);
+
+    // The first index past the end of the pool, and the largest index representable on the wire.
+    for slot_index in [MALICIOUS_POOL_SLOTS as i64, i64::MAX] {
+        let err = read_one(&pool, slot_index, 0);
+        assert!(
+            matches!(err, ShmSlabPoolError::InvalidSlotIndex { .. }),
+            "slot_index {slot_index} should be rejected, got {err:?}"
+        );
+    }
+}
+
+// A slot_index chosen so that `slot_index * slot_size` wraps back into the mapping. This is the
+// "release-mode wrapping" variant: the read looks in bounds, which previously let the caller fall
+// through into the unbounded free_slots arithmetic.
+#[tokio::test]
+async fn test_read_from_pool_rejects_wrapping_slot_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = new_test_pool(&dir, 64, 4096);
+
+    // 2^52 * 2^12 == 2^64, which wraps to a data offset of 0.
+    let err = read_one(&pool, 1 << 52, 0);
+    assert!(
+        matches!(err, ShmSlabPoolError::InvalidSlotIndex { .. }),
+        "a wrapping slot_index should be rejected, got {err:?}"
+    );
+}
+
+// slot_index is an int64 on the wire, so a peer can send a negative value which becomes an
+// enormous offset when cast to u64.
+#[tokio::test]
+async fn test_read_from_pool_rejects_negative_slot_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = new_test_pool(&dir, MALICIOUS_POOL_SLOTS, MALICIOUS_POOL_SLOT_SIZE);
+
+    for slot_index in [-1, i64::MIN] {
+        let err = read_one(&pool, slot_index, 0);
+        assert!(
+            matches!(err, ShmSlabPoolError::InvalidSlotIndex { .. }),
+            "slot_index {slot_index} should be rejected, got {err:?}"
+        );
+    }
+}
+
+// length is also wire-supplied: negative values wrap when cast, and an oversized length would read
+// past the end of the slot into neighbouring slots.
+#[tokio::test]
+async fn test_read_from_pool_rejects_invalid_length() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = new_test_pool(&dir, MALICIOUS_POOL_SLOTS, MALICIOUS_POOL_SLOT_SIZE);
+
+    for length in [-1, i64::MIN, MALICIOUS_POOL_SLOT_SIZE as i64 + 1, i64::MAX] {
+        let err = read_one(&pool, 0, length);
+        assert!(
+            matches!(err, ShmSlabPoolError::InvalidSlotLength { .. }),
+            "length {length} should be rejected, got {err:?}"
+        );
+    }
+
+    // A length exactly equal to the slot size is legitimate and must still be accepted.
+    let slot_refs = pool.write_to_pool(TEST_PAYLOAD).await.expect("Failed to write to pool");
+    assert_eq!(slot_refs[0].length, MALICIOUS_POOL_SLOT_SIZE as i64);
+    assert_eq!(pool.read_from_pool(&slot_refs).expect("Read should succeed"), TEST_PAYLOAD);
+}
+
+// Without a cap on the batch size a peer can force an unbounded allocation in the enforcer by
+// sending far more slot references than the pool could ever contain.
+#[tokio::test]
+async fn test_read_from_pool_rejects_too_many_slot_references() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = new_test_pool(&dir, MALICIOUS_POOL_SLOTS, MALICIOUS_POOL_SLOT_SIZE);
+
+    let slot_refs = vec![
+        ShmSlotReference { slot_index: 0, length: MALICIOUS_POOL_SLOT_SIZE as i64 };
+        MALICIOUS_POOL_SLOTS as usize + 1
+    ];
+    let err = pool.read_from_pool(&slot_refs).expect_err("Oversized batch should be rejected");
+    assert!(
+        matches!(err, ShmSlabPoolError::TooManySlotReferences { requested, .. } if requested == 65),
+        "expected TooManySlotReferences, got {err:?}"
+    );
+}
+
+// Validation happens up front for the whole batch, so a request mixing valid and hostile
+// references must be rejected without freeing anything.
+#[tokio::test]
+async fn test_read_from_pool_rejects_invalid_batch_without_freeing_slots() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("shm_slab").to_string_lossy().to_string();
+    let pool = ShmSlabPool::new(ShmSlabPoolOptions {
+        file_name: path.clone(),
+        number_of_slots: MALICIOUS_POOL_SLOTS,
+        slot_size: MALICIOUS_POOL_SLOT_SIZE,
+        writer: true,
+    })
+    .expect("Failed to initialize ShmSlabPool");
+
+    // 22 bytes over 4-byte slots claims slots 0..=5, i.e. bits 0-5 of the first bitmask.
+    let slot_refs = pool.write_to_pool(TEST_PAYLOAD).await.expect("Failed to write to pool");
+    let header_file = std::fs::File::open(format!("{path}-atomic-hdr"))
+        .expect("Failed to open raw header backing file");
+    let mut mask_bytes = [0u8; 8];
+    header_file.read_exact_at(&mut mask_bytes, 0).expect("Failed to read bitmask");
+    assert_eq!(u64::from_ne_bytes(mask_bytes), 0b111111);
+
+    // Append a hostile reference to an otherwise valid batch.
+    let mut hostile_refs = slot_refs.clone();
+    hostile_refs.push(ShmSlotReference { slot_index: 1 << 44, length: 0 });
+    let err = pool.read_from_pool(&hostile_refs).expect_err("Hostile batch should be rejected");
+    assert!(matches!(err, ShmSlabPoolError::InvalidSlotIndex { .. }), "got {err:?}");
+
+    // The bitmask must be untouched: the valid slots in the rejected batch were not freed.
+    header_file.read_exact_at(&mut mask_bytes, 0).expect("Failed to re-read bitmask");
+    assert_eq!(
+        u64::from_ne_bytes(mask_bytes),
+        0b111111,
+        "a rejected batch must not mutate the allocation bitmask"
+    );
+
+    // And the original, valid batch still reads back correctly and frees its slots.
+    assert_eq!(pool.read_from_pool(&slot_refs).expect("Read should succeed"), TEST_PAYLOAD);
+    header_file.read_exact_at(&mut mask_bytes, 0).expect("Failed to re-read bitmask");
+    assert_eq!(u64::from_ne_bytes(mask_bytes), 0);
+}
+
+// Both --shm_num_slots and --shm_slot_size default to 0, which yields an empty mapping. With
+// slot_size = 0 every index used to produce a data offset of 0, so the empty-slice read succeeded
+// and handed any index straight to free_slots.
+#[tokio::test]
+async fn test_zero_geometry_pool_rejects_all_slot_references() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = new_test_pool(&dir, 0, 0);
+
+    // The pool holds no slots at all, so even a single reference exceeds its capacity.
+    let err = read_one(&pool, 1 << 44, 0);
+    assert!(
+        matches!(err, ShmSlabPoolError::TooManySlotReferences { .. }),
+        "expected TooManySlotReferences, got {err:?}"
+    );
+
+    // An empty batch remains a well-defined no-op.
+    assert!(pool.read_from_pool(&[]).expect("Empty batch should succeed").is_empty());
+}
+
+// The mirror image of the hostile-input tests: the largest legitimate reference sits exactly on
+// the upper bound of the data mapping, and a batch of number_of_slots references sits exactly on
+// the TooManySlotReferences cap, so an off-by-one in either check would reject real traffic.
+#[tokio::test]
+async fn test_read_from_pool_accepts_maximum_legitimate_slot_references() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = new_test_pool(&dir, MALICIOUS_POOL_SLOTS, MALICIOUS_POOL_SLOT_SIZE);
+
+    // A payload that exactly fills the pool: 64 slots x 4 bytes = 256 bytes.
+    let pool_capacity = (MALICIOUS_POOL_SLOTS * MALICIOUS_POOL_SLOT_SIZE) as usize;
+    let payload: Vec<u8> = (0..pool_capacity).map(|byte| byte as u8).collect();
+
+    let slot_refs = pool.write_to_pool(&payload).await.expect("Failed to fill the pool");
+
+    // Exactly number_of_slots references, which is the largest batch the cap must still accept.
+    assert_eq!(slot_refs.len() as u64, MALICIOUS_POOL_SLOTS);
+
+    // The final slot spans the last byte of the mapping: start = 63 * 4 = 252, end = 256 = len.
+    assert!(
+        slot_refs.contains(&ShmSlotReference {
+            slot_index: MALICIOUS_POOL_SLOTS as i64 - 1,
+            length: MALICIOUS_POOL_SLOT_SIZE as i64,
+        }),
+        "expected a reference to the last slot, got {slot_refs:?}"
+    );
+
+    assert_eq!(pool.read_from_pool(&slot_refs).expect("Maximal batch must be accepted"), payload);
+}
+
+// A peer can reference the same written slot many times to inflate one slot into a pool-sized
+// payload and to clear the same allocation bit repeatedly. See b/556034775.
+#[tokio::test]
+async fn test_read_from_pool_rejects_duplicate_slot_references() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = new_test_pool(&dir, MALICIOUS_POOL_SLOTS, MALICIOUS_POOL_SLOT_SIZE);
+
+    let slot_refs = pool.write_to_pool(TEST_PAYLOAD).await.expect("Failed to write to pool");
+    let hostile_refs = vec![slot_refs[0]; MALICIOUS_POOL_SLOTS as usize];
+
+    let err = pool.read_from_pool(&hostile_refs).expect_err("Duplicates should be rejected");
+    assert!(matches!(err, ShmSlabPoolError::DuplicateSlotReference { .. }), "got {err:?}");
+
+    // The rejected batch had no side effects, so the original batch still reads back.
+    assert_eq!(pool.read_from_pool(&slot_refs).expect("Read should succeed"), TEST_PAYLOAD);
+}
+
+#[tokio::test]
+async fn test_write_to_pool_empty_payload_is_noop() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = new_test_pool(&dir, MALICIOUS_POOL_SLOTS, MALICIOUS_POOL_SLOT_SIZE);
+
+    let slot_refs = pool.write_to_pool(&[]).await.expect("Empty payload write should succeed");
+    assert!(slot_refs.is_empty());
+    assert_eq!(pool.get_cas_failures(), 0);
+}

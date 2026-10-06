@@ -16,7 +16,8 @@ use anyhow::{Context, Result};
 use container_manager_request::{MountReadOnlyFile, MountWritableFile};
 use container_manager_requester::ContainerManagerRequester;
 use dashmap::DashMap;
-use enforcer_proto::enforcer::v1::{CreateMemshareRequest, CreateMemshareResponse};
+use data_scope_proto::enforcer::v1::DataScopeType;
+use enforcer_proto::enforcer::v1::CreateMemshareResponse;
 use isolate_info::IsolateId;
 use payload_proto::enforcer::v1::ShmSlotReference;
 use shm_slab_pool::{ShmSlabPool, ShmSlabPoolOptions};
@@ -41,6 +42,13 @@ pub struct BridgeCommunicationBuffers {
     pub enforcer_writes_buffer: ShmSlabPool,
     pub isolate_writes_buffer: ShmSlabPool,
 }
+/// Owner and data scope of a shared memory region.
+#[derive(Clone, Copy, Debug)]
+struct SharedMemFile {
+    owner_isolate_id: IsolateId,
+    data_scope: DataScopeType,
+}
+
 /// Central place to maintain state for all the SharedMemory b/w Isolates. It calls
 /// ContainerManager to perform the file mounting for shared memory.
 #[derive(Clone, Debug)]
@@ -49,8 +57,8 @@ pub struct SharedMemManager {
     // Map: {IsolateId, {Isolate recognized FileHandle, Enforcer recognized FileHandle}}
     isolate_enforcer_file_handle_index: Arc<DashMap<IsolateId, HashMap<FileHandle, FileHandle>>>,
     // The Isolate which creates the shared memory is the owner of the file
-    // Map: {Isolate recognized FileHandle, IsolateId of owner of the File}
-    file_owner_index: Arc<DashMap<FileHandle, IsolateId>>,
+    // Map: {Isolate recognized FileHandle, SharedMemFile}
+    file_owner_index: Arc<DashMap<FileHandle, SharedMemFile>>,
     container_mngr_requester: ContainerManagerRequester,
     // Map: {IsolateId, BridgeCommunicationBuffers}.
     // BridgeCommunicationBuffers contain the ShmSlabPool(s) for IPC communication
@@ -90,7 +98,8 @@ impl SharedMemManager {
     pub async fn create_shared_mem_file(
         &self,
         isolate_id: IsolateId,
-        create_shared_mem_request: CreateMemshareRequest,
+        region_size: i64,
+        data_scope: DataScopeType,
     ) -> Result<CreateMemshareResponse, Status> {
         let enforcer_file_handle: FileHandle = rand::random();
         let container_file_handle: FileHandle = rand::random();
@@ -98,7 +107,7 @@ impl SharedMemManager {
             .container_mngr_requester
             .mount_writable_file(MountWritableFile {
                 isolate_id,
-                region_size: create_shared_mem_request.region_size,
+                region_size,
                 enforcer_file_name: enforcer_file_handle.to_string(),
                 container_file_name: container_file_handle.to_string(),
             })
@@ -109,7 +118,10 @@ impl SharedMemManager {
                     .entry(isolate_id)
                     .or_default()
                     .insert(container_file_handle, enforcer_file_handle);
-                self.file_owner_index.insert(container_file_handle, isolate_id);
+                self.file_owner_index.insert(
+                    container_file_handle,
+                    SharedMemFile { owner_isolate_id: isolate_id, data_scope },
+                );
 
                 Ok(CreateMemshareResponse {
                     shared_memory_handle: container_file_handle.to_string(),
@@ -117,6 +129,29 @@ impl SharedMemManager {
             }
             Err(e) => Err(Status::internal(e.to_string())),
         }
+    }
+
+    /// Validates that `source_isolate_id` may share every region with `destination_isolate_id`
+    /// and returns the strictest scope recorded across them.
+    pub fn share_scope(
+        &self,
+        source_isolate_id: IsolateId,
+        destination_isolate_id: IsolateId,
+        file_handles: &[String],
+    ) -> Result<DataScopeType> {
+        file_handles.iter().try_fold(DataScopeType::Unspecified, |strictest, file_handle| {
+            let file_handle_u64 =
+                file_handle.parse::<u64>().context("Provided file handle is invalid")?;
+            let shared_mem_file =
+                self.file_owner_index.get(&file_handle_u64).context("Unrecognized FileHandle")?;
+            if shared_mem_file.owner_isolate_id != source_isolate_id {
+                return Err(SharedMemManagerError::ReadOnlyFileCannotBeShared.into());
+            }
+            if shared_mem_file.owner_isolate_id == destination_isolate_id {
+                return Err(SharedMemManagerError::DestinationSameAsOwner.into());
+            }
+            Ok(strictest.max(shared_mem_file.data_scope))
+        })
     }
 
     /// Shares the file that is writable in source Isolate as a read-only file into
@@ -130,11 +165,11 @@ impl SharedMemManager {
         let file_handle_u64 =
             file_handle.parse::<u64>().context("Provided file handle is invalid")?;
 
-        let owner_of_file_isolate_id = *self
+        let owner_of_file_isolate_id = self
             .file_owner_index
             .get(&file_handle_u64)
             .context("Unrecognized FileHandle")?
-            .value();
+            .owner_isolate_id;
 
         if owner_of_file_isolate_id != source_isolate_id {
             return Err(SharedMemManagerError::ReadOnlyFileCannotBeShared.into());
