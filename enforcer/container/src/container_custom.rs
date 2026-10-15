@@ -670,11 +670,17 @@ impl Container for ContainerCustom {
                 })?;
                 let pid = self.pid.ok_or_else(|| anyhow::anyhow!("PID missing"))?;
                 let checkpoint_dir = self.root_dir.path().join(FSR_STATE_DIR);
-                fs::create_dir_all(&checkpoint_dir)?;
+                let root = self.root.clone();
 
-                let mut session =
-                    engine.create_session(pid.as_raw(), checkpoint_dir, Some(self.root.clone()))?;
-                session.checkpoint()?;
+                let session = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+                    let mut session =
+                        engine.create_session(pid.as_raw(), checkpoint_dir, Some(root))?;
+                    session.checkpoint()?;
+                    Ok(session)
+                })
+                .await
+                .context("Failed to join blocking task for container checkpoint")??;
+
                 self.state_reset_session = Some(session);
                 Ok(())
             }

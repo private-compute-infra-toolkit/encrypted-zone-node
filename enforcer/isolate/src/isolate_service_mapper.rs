@@ -88,6 +88,18 @@ impl IsolateServiceMapper {
                     return Some(*idx);
                 }
             }
+            // TODO: Populate and validate operator_domain on inbound EzToEzApi.
+            if !isolate_service_info.service_name.is_empty()
+                && isolate_service_info.operator_domain.is_empty()
+            {
+                for (key, idx) in index.iter() {
+                    if key.service_name == isolate_service_info.service_name
+                        && idx.get_binary_services_index().is_some()
+                    {
+                        return Some(*idx);
+                    }
+                }
+            }
         }
         None
     }

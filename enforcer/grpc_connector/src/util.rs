@@ -276,9 +276,12 @@ async fn connect_uds_tls(
         let ssl_connector = ssl_connector.clone();
         let sni = sni.clone();
         async move {
+            let origin_uri = Uri::try_from(format!("http://{sni}"))
+                .with_context(|| format!("Invalid SNI for HTTP/2 authority: {sni}"))?;
             // The endpoint URI is unused because we use a custom connector.
             // However, it still expects a valid HTTP URI.
             create_uds_endpoint(DEFAULT_MAX_HEADER_LIST_SIZE, /*is_proxied_tunnel=*/ true)?
+                .origin(origin_uri)
                 .connect_with_connector(service_fn(move |_uri: Uri| {
                     let socket_path = socket_path.clone();
                     let ssl_connector = ssl_connector.clone();

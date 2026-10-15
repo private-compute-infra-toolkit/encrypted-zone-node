@@ -18,7 +18,7 @@ pub use container_manager_request::{
     GetSetupIsolateClientResponse, LoadWorkloadIsolatesRequest, LoadWorkloadIsolatesResponse,
     LoadWorkloadManifestsRequest, LoadWorkloadManifestsResponse, MountDirectoryResponse,
     MountFileResponse, MountReadOnlyDirectory, MountReadOnlyFile, MountWritableDirectory,
-    MountWritableFile, ResetIsolateRequest, ResetIsolateResponse,
+    MountWritableFile, ResetIsolateRequest, ResetIsolateResponse, ResetType,
 };
 use setup_isolate_client::SetupIsolateClient;
 use tokio::sync::{mpsc, oneshot};

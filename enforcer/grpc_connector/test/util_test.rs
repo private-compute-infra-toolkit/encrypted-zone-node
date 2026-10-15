@@ -131,6 +131,26 @@ async fn test_new_tls_fails_with_non_tls_server() {
 }
 
 #[tokio::test]
+async fn test_new_tls_fails_with_invalid_sni() {
+    let connector =
+        boring::ssl::SslConnector::builder(boring::ssl::SslMethod::tls()).unwrap().build();
+    let result = GrpcChannelPool::new_tls(
+        "unix:/tmp/nonexistent-socket-for-test.sock".to_string(),
+        /*pool_size=*/ 1,
+        /*retry_count=*/ 1,
+        /*retry_delay_ms=*/ 1,
+        /*retry_scaling=*/ 1,
+        connector,
+        /*sni=*/ "invalid sni".to_string(),
+    )
+    .await;
+    let Err(err) = result else {
+        panic!("Expected invalid SNI to fail");
+    };
+    assert!(err.to_string().contains("Invalid SNI for HTTP/2 authority"));
+}
+
+#[tokio::test]
 async fn test_connect_tcp_retry_and_succeed() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

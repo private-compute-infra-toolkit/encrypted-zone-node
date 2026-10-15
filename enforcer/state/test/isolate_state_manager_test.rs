@@ -39,7 +39,11 @@ struct TestHarness {
 
 impl TestHarness {
     async fn new() -> Self {
-        let data_scope_requester = DataScopeRequester::new(u64::MAX);
+        Self::new_with_threshold(u64::MAX).await
+    }
+
+    async fn new_with_threshold(sensitive_session_threshold: u64) -> Self {
+        let data_scope_requester = DataScopeRequester::new(sensitive_session_threshold);
         let (container_manager_request_tx, container_manager_request_rx) =
             tokio::sync::mpsc::channel(128);
         let container_manager_requester =
@@ -63,15 +67,30 @@ impl TestHarness {
             || state == IsolateState::Idle
         {
             self.state_manager.update_state(self.isolate_id, IsolateState::Ready).await.unwrap();
-            self.data_scope_requester.get_isolate(create_get_isolate_request()).await.ok();
+            let req_scope = if state == IsolateState::Idle {
+                DataScopeType::UserPrivate
+            } else {
+                DataScopeType::Public
+            };
+            self.data_scope_requester
+                .get_isolate(GetIsolateRequest {
+                    binary_services_index: *TEST_BINARY_SERVICES_INDEX,
+                    data_scope_type: req_scope,
+                })
+                .await
+                .ok();
         }
         if state == IsolateState::Retiring || state == IsolateState::Idle {
             if state == IsolateState::Idle {
                 let mut rx = self.container_manager_request_rx.take().unwrap();
                 let listener = tokio::spawn(async move {
-                    if let Some(ContainerManagerRequest::ResetIsolateRequest { resp, .. }) =
+                    if let Some(ContainerManagerRequest::ResetIsolateRequest { req, resp }) =
                         rx.recv().await
                     {
+                        assert_eq!(
+                            req.reset_type,
+                            container_manager_request::ResetType::FastStateReset
+                        );
                         let _ = resp.send(Ok(ResetIsolateResponse {}));
                     }
                 });
@@ -439,6 +458,7 @@ async fn test_update_to_idle_triggers_container_reset() -> Result<(), Box<dyn st
             Some(ContainerManagerRequest::ResetIsolateRequest { req, resp }) => {
                 assert_eq!(req.isolate_id, isolate_id);
                 assert_eq!(req.isolate_id.get_binary_services_index(), *TEST_BINARY_SERVICES_INDEX);
+                assert_eq!(req.reset_type, container_manager_request::ResetType::Full);
                 let _ = resp.send(Ok(ResetIsolateResponse {}));
             }
             Some(_) => panic!("Expected ResetIsolateRequest, but got a different request."),
@@ -671,13 +691,62 @@ fn test_inflight_guard_drop_outside_tokio_runtime_does_not_panic() {
     drop(guard);
     assert_eq!(harness.state_manager.get_inflight_count(harness.isolate_id), 0);
 }
+
+#[tokio::test]
+async fn test_invalid_transition_idle_to_ready() -> Result<(), Box<dyn std::error::Error>> {
+    let mut harness = TestHarness::new().await;
+    harness.advance_to_state(IsolateState::Idle).await;
+    assert_eq!(
+        harness.state_manager.get_isolate_state(harness.isolate_id),
+        Some(IsolateState::Idle)
+    );
+
+    let result = harness.state_manager.update_state(harness.isolate_id, IsolateState::Ready).await;
+    assert!(result.is_err(), "Direct transition Idle -> Ready should be invalid");
+    assert_eq!(
+        result.unwrap_err().downcast_ref::<IsolateStateManagerError>(),
+        Some(&IsolateStateManagerError::InvalidStateTransition)
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_unretire_isolate_restores_starting_and_promotes_on_ready(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut harness = TestHarness::new_with_threshold(1).await;
+    harness.advance_to_state(IsolateState::Idle).await;
+    assert_eq!(
+        harness.state_manager.get_isolate_state(harness.isolate_id),
+        Some(IsolateState::Idle)
+    );
+
+    harness.state_manager.unretire_isolate(harness.isolate_id).await?;
+    assert_eq!(
+        harness.state_manager.get_isolate_state(harness.isolate_id),
+        Some(IsolateState::Starting)
+    );
+    assert!(!harness.state_manager.is_isolate_ready(*TEST_BINARY_SERVICES_INDEX));
+
+    // Channel connects and SDK signals ready
+    harness.state_manager.mark_channel_connected(harness.isolate_id).await?;
+    harness.state_manager.update_state(harness.isolate_id, IsolateState::Ready).await?;
+    assert_eq!(
+        harness.state_manager.get_isolate_state(harness.isolate_id),
+        Some(IsolateState::Ready)
+    );
+    assert!(harness.state_manager.is_isolate_ready(*TEST_BINARY_SERVICES_INDEX));
+
+    Ok(())
+}
+
 // --- Helper Functions ---
 
 fn create_add_isolate_request(isolate_id: IsolateId) -> AddIsolateRequest {
     AddIsolateRequest {
         isolate_id,
         current_data_scope_type: DataScopeType::Public,
-        allowed_data_scope_type: DataScopeType::Public,
+        allowed_data_scope_type: DataScopeType::UserPrivate,
     }
 }
 

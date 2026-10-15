@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use anyhow::{Context, Result};
-use container_manager_request::ResetIsolateRequest;
+use container_manager_request::{ResetIsolateRequest, ResetType};
 use container_manager_requester::ContainerManagerRequester;
 use dashmap::DashMap;
 use data_scope::error::DataScopeError;
@@ -50,7 +50,7 @@ pub struct IsolateStateManager {
     // TODO: Add another map here to store the Isolates that are in MULTI-USER scope.
 }
 
-#[derive(Copy, Clone, Debug, Error)]
+#[derive(Copy, Clone, Debug, Error, PartialEq, Eq)]
 pub enum IsolateStateManagerError {
     #[error("Same State was already received by the Enforcer")]
     DuplicateStateUpdate,
@@ -227,6 +227,19 @@ impl IsolateStateManager {
         }
     }
 
+    /// Unretires an Isolate in DataScopeManager and restores its state to Starting after Fast State Reset (FSR).
+    pub async fn unretire_isolate(&self, isolate_id: IsolateId) -> Result<()> {
+        self.data_scope_requester
+            .unretire_isolate(data_scope::request::UnretireIsolateRequest { isolate_id })
+            .await?;
+        self.sdk_ready_map.insert(isolate_id, false);
+        self.in_flight_request_counts.insert(isolate_id, AtomicUsize::new(0));
+        if let Some(mut state_ref) = self.isolate_state_map.get_mut(&isolate_id) {
+            *state_ref.value_mut() = IsolateState::Starting;
+        }
+        Ok(())
+    }
+
     /// Marks the gRPC channel connection to the Isolate as established.
     pub async fn mark_channel_connected(&self, isolate_id: IsolateId) -> Result<()> {
         self.channel_ready_map.insert(isolate_id, true);
@@ -299,9 +312,14 @@ impl IsolateStateManager {
             IsolateState::Idle => {
                 self.sdk_ready_map.insert(isolate_id, false);
                 self.channel_ready_map.insert(isolate_id, false);
+                let reset_type = if old_state == IsolateState::Retiring {
+                    ResetType::FastStateReset
+                } else {
+                    ResetType::Full
+                };
                 let _ = self
                     .container_manager_requester
-                    .reset_container(ResetIsolateRequest { isolate_id })
+                    .reset_container(ResetIsolateRequest { isolate_id, reset_type })
                     .await
                     .context(format!("Failed to reset container for isolate {:?} ", isolate_id))?;
                 Ok(())

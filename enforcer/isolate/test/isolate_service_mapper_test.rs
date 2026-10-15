@@ -444,3 +444,44 @@ async fn test_add_backend_dependency_service_passes_if_service_in_binary_index_w
     );
     assert!(backend_dependency_index.get_binary_services_index().is_some())
 }
+
+#[tokio::test]
+async fn test_get_binary_index_with_empty_operator_domain_fallback() {
+    let mapper = IsolateServiceMapper::default();
+    let local_service_info = IsolateServiceInfo {
+        operator_domain: TEST_OPERATOR_DOMAIN.to_string(),
+        service_name: TEST_SERVICE_NAME.to_string(),
+        isolate_name: "local_iso".to_string(),
+        publisher_id: "local_pub".to_string(),
+    };
+    let remote_dependency_info = IsolateServiceInfo {
+        operator_domain: "remote.domain".to_string(),
+        service_name: TEST_SERVICE_NAME.to_string(),
+        isolate_name: "remote_iso".to_string(),
+        publisher_id: "remote_pub".to_string(),
+    };
+
+    let binary_index = mapper
+        .new_binary_index(
+            vec![local_service_info.clone()],
+            false,
+            local_service_info.publisher_id.clone(),
+            local_service_info.isolate_name.clone(),
+        )
+        .await
+        .expect("new_binary_index should succeed");
+    mapper
+        .add_backend_dependency_service(&remote_dependency_info, RouteType::Remote)
+        .await
+        .expect("add_backend_dependency_service should succeed");
+
+    let service_only_query =
+        IsolateServiceInfo { service_name: TEST_SERVICE_NAME.to_string(), ..Default::default() };
+    assert_eq!(
+        mapper
+            .get_binary_index(&service_only_query)
+            .await
+            .expect("get_binary_index should resolve local binary by service_name"),
+        binary_index
+    );
+}

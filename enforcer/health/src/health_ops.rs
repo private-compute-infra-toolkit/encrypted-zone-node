@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use container::ContainerRunStatus as ContainerRunStatusEnum;
-use container_manager_request::{GetRunStatusRequest, ResetIsolateRequest};
+use container_manager_request::{GetRunStatusRequest, ResetIsolateRequest, ResetType};
 use container_manager_requester::ContainerManagerRequester;
 use enforcer_proto::enforcer::v1::ez_isolate_health::container_run_status::Status as RunStatus;
 use enforcer_proto::enforcer::v1::ez_isolate_health::ContainerRunStatus;
@@ -65,7 +65,12 @@ impl HealthOp {
                         isolate_id,
                         run_status
                     );
-                    let _ = requester.reset_container(ResetIsolateRequest { isolate_id }).await;
+                    let _ = requester
+                        .reset_container(ResetIsolateRequest {
+                            isolate_id,
+                            reset_type: ResetType::Full,
+                        })
+                        .await;
                     health.container_reset_requested = true;
                     let pre_ready_state_str =
                         match health.state.and_then(|s| IsolateState::try_from(s).ok()) {

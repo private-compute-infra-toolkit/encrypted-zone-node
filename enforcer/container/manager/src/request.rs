@@ -68,9 +68,19 @@ pub struct GetSetupIsolateClientResponse {
     pub client: Option<SetupIsolateClient>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ResetType {
+    /// Full reset: stops and tears down the container, launching a fresh replacement.
+    #[default]
+    Full,
+    /// Fast State Reset: in-place memory/state restore without restarting the container process.
+    FastStateReset,
+}
+
 #[derive(Debug)]
 pub struct ResetIsolateRequest {
     pub isolate_id: IsolateId,
+    pub reset_type: ResetType,
 }
 
 #[derive(Debug)]

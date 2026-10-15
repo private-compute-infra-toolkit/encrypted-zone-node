@@ -279,21 +279,22 @@ async fn test_tls_acceptor_connector() {
 
     let server_task = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        let _tls_stream =
+        let tls_stream =
             tokio_boring::accept(&acceptor, stream).await.expect("Server failed to accept TLS");
-        // Handshake succeeded
+        assert_eq!(tls_stream.ssl().selected_alpn_protocol(), Some(&b"h2"[..]));
     });
 
     let client_task = tokio::spawn(async move {
         let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
         // Domain verification is disabled by configuration (replaced with SPIFFE policy matching)
-        let _tls_stream = tokio_boring::connect(
+        let tls_stream = tokio_boring::connect(
             connector.configure().unwrap().verify_hostname(false),
             "localhost",
             stream,
         )
         .await
         .expect("Client failed to connect TLS");
+        assert_eq!(tls_stream.ssl().selected_alpn_protocol(), Some(&b"h2"[..]));
     });
 
     let (server_result, client_result) = tokio::join!(server_task, client_task);

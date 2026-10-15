@@ -32,7 +32,7 @@ import "enforcer/v2/ratified_isolate_manifest.proto";
 service EzManagementService {
   // Fetches the EZ Node-level OperatorInfo (operator_domain and operator_role)
   // from the host proxy. Called once at Enforcer startup, before any Isolates
-  // are booted. The OperatorInfo will be attached to the EZ Node Identity
+  // are booted. The operator_role will be attached to the EZ Node Identity
   // (certificate) created via the Setup Isolate.
   rpc FetchOperatorInfo(FetchOperatorInfoRequest) returns (FetchOperatorInfoResponse) {}
 

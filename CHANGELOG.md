@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## 0.28.0 (2026-10-15)
+
+
+### EZ Policy Enforcer
+
+* **enforcer:** Add ResetType to ResetIsolateRequest
+* **enforcer:** Isolate unretiring in IsolateStateManager
+* **enforcer:** resolve local service when operator_domain is empty
+* **enforcer:** Run container checkpoint in blocking thread
+
+
+### mTLS
+
+* **mtls:** set ALPN h2 on TLS connector/acceptor
+
+
+### Bug Fixes
+
+* **grpc_connector:** set HTTP/2 origin authority to SNI on UDS TLS
+
+
+### Documentation
+
+* **enforcer:** Fix OperatorInfo comments
+
 ## 0.27.0 (2026-10-06)
 
 

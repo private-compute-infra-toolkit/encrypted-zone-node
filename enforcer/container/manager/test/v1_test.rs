@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use container_manager::sanitize_path_component;
-use container_manager_request::{MountReadOnlyFile, MountWritableFile, ResetIsolateRequest};
+use container_manager_request::{
+    MountReadOnlyFile, MountWritableFile, ResetIsolateRequest, ResetType,
+};
 use container_manager_test_utils::*;
 use container_test_utils::{FakeContainer, Status};
 use data_scope::error::DataScopeError;
@@ -294,7 +296,10 @@ async fn test_isolate_reset() {
 
     assert!(harness
         .container_manager_requester
-        .reset_container(ResetIsolateRequest { isolate_id: get_isolate_response.isolate_id })
+        .reset_container(ResetIsolateRequest {
+            isolate_id: get_isolate_response.isolate_id,
+            reset_type: ResetType::Full,
+        })
         .await
         .is_ok());
 

@@ -17,7 +17,9 @@ use boring::ec::{EcGroup, EcKey};
 use boring::hash::MessageDigest;
 use boring::nid::Nid;
 use boring::pkey::{PKey, Private};
-use boring::ssl::{SslAcceptor, SslConnector, SslMethod, SslVerifyMode};
+use boring::ssl::{
+    select_next_proto, AlpnError, SslAcceptor, SslConnector, SslMethod, SslVerifyMode,
+};
 use boring::x509::store::X509StoreBuilder;
 use boring::x509::{X509Req, X509};
 use ez_mtls_proto::enforcer::v1::ez_mtls_service_client::EzMtlsServiceClient;
@@ -29,6 +31,7 @@ use setup_isolate_proto::enforcer::v2::FetchTlsCertificateRequest;
 use sha2::Digest;
 
 const HASH_VERSION: &str = "a";
+const ALPN_H2_WIRE: &[u8] = b"\x02h2";
 
 pub use manifest_parser::v2::IsolateIdentity;
 
@@ -447,6 +450,10 @@ impl EzMtlsManager {
             verify_mode,
             self.build_verify_spiffe_uri_callback(self.spiffe_identity.clone()),
         );
+        acceptor.set_alpn_protos(ALPN_H2_WIRE)?;
+        acceptor.set_alpn_select_callback(|_ssl, client_protos| {
+            select_next_proto(ALPN_H2_WIRE, client_protos).ok_or(AlpnError::NOACK)
+        });
         Ok(acceptor.build())
     }
 
@@ -475,6 +482,7 @@ impl EzMtlsManager {
             self.build_verify_spiffe_uri_callback(expected_identity),
         );
         connector.set_verify_depth(2);
+        connector.set_alpn_protos(ALPN_H2_WIRE)?;
         Ok(connector.build())
     }
 
