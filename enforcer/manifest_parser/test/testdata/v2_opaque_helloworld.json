@@ -1,0 +1,30 @@
+{
+  "isolate_type": {
+    "isolate_name": "helloworld",
+    "publisher_id": "helloworld_domain"
+  },
+  "package_digest_sha256": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+  "binary_filename": "/usr/local/bin/main",
+  "service_specs": [
+    {
+      "service_name": "Greeter",
+      "method_specs": [
+        {
+          "method_name": "SayHello",
+          "input_scope_types": ["DATA_SCOPE_TYPE_PUBLIC"],
+          "output_scope_types": ["DATA_SCOPE_TYPE_PUBLIC"]
+        }
+      ]
+    }
+  ],
+  "opaque": {
+    "metrics_policy": {
+      "allowed_metrics": [
+        {
+          "name": "test_metric",
+          "type": "METRIC_TYPE_GAUGE"
+        }
+      ]
+    }
+  }
+}

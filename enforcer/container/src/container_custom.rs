@@ -283,7 +283,7 @@ impl ContainerCustom {
 
     /// Mounts the /sys filesystem from the old root into the new root.
     /// This is intended to be called after pivot_root.
-    /// TODO: only mount the minimum required info
+    /// TODO(b/433073722): only mount the minimum required info
     fn mount_sys(&self) -> anyhow::Result<()> {
         const SYS_PATH: &str = "/sys";
         self.mount_safe(
@@ -509,7 +509,7 @@ impl Container for ContainerCustom {
                     Ok(ForkResult::Parent { child: _ }) => {
                         drop(pid_writer);
                         drop(status_writer);
-                        // TODO.
+                        // TODO(b/434355837).
                         // Read the grandchild PID from the pipe. This is necessary since the child process
                         // from the fork here will also fork after it creates the new namespaces.
                         let mut buffer = [0; 4];

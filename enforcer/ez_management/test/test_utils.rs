@@ -23,7 +23,9 @@ use data_scope::manifest_validator::ManifestValidator;
 use data_scope::requester::DataScopeRequester;
 use enforcer_proto::enforcer::v1::{InvokeIsolateRequest, InvokeIsolateResponse};
 use ez_error::EzError;
-use ez_management::{EzManagementClient, EzManagementError, LoadIsolatesError};
+use ez_management::{
+    EzManagementClient, EzManagementError, IsolateStartupParameters, LoadIsolatesError,
+};
 use ez_management_proto::enforcer::v2::ez_management_service_server::{
     EzManagementService, EzManagementServiceServer,
 };
@@ -57,6 +59,7 @@ use setup_isolate_proto::enforcer::v2::{
 use setup_isolate_proto::timestamp_proto::google::protobuf::Timestamp;
 use shared_memory_manager::SharedMemManager;
 use state_manager::IsolateStateManager;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -79,6 +82,7 @@ pub struct TestContext {
     pub client: EzManagementClient,
     pub received_requests: Arc<Mutex<Vec<LoadIsolatesRequest>>>,
     pub operator_info: Arc<Mutex<Result<Option<OperatorInfo>, Status>>>,
+    pub isolate_startup_parameters: Arc<Mutex<Result<Vec<IsolateStartupParameters>, Status>>>,
     pub server_handle: tokio::task::JoinHandle<()>,
     pub _server_temp_dir: tempfile::TempDir,
     pub _cm_temp_dir: tempfile::TempDir,
@@ -177,6 +181,7 @@ pub struct MockManagementService {
     pub responses_to_send: Arc<Mutex<Vec<LoadIsolatesResponse>>>,
     pub received_requests: Arc<Mutex<Vec<LoadIsolatesRequest>>>,
     pub operator_info: Arc<Mutex<Result<Option<OperatorInfo>, Status>>>,
+    pub isolate_startup_parameters: Arc<Mutex<Result<Vec<IsolateStartupParameters>, Status>>>,
 }
 
 impl Default for MockManagementService {
@@ -188,6 +193,7 @@ impl Default for MockManagementService {
                 operator_domain: "test_operator_domain".to_string(),
                 operator_role: "PRIMARY".to_string(),
             })))),
+            isolate_startup_parameters: Arc::new(Mutex::new(Ok(Vec::new()))),
         }
     }
 }
@@ -206,8 +212,8 @@ impl EzManagementService for MockManagementService {
         &self,
         _request: Request<FetchIsolateStartupParametersRequest>,
     ) -> Result<Response<FetchIsolateStartupParametersResponse>, Status> {
-        // TODO: Implement once the Enforcer client for this RPC lands.
-        Ok(Response::new(FetchIsolateStartupParametersResponse::default()))
+        let startup_parameters = self.isolate_startup_parameters.lock().unwrap().clone()?;
+        Ok(Response::new(FetchIsolateStartupParametersResponse { startup_parameters }))
     }
 
     type LoadIsolatesStream =
@@ -419,6 +425,7 @@ pub async fn create_fake_container_manager(
         shm_slot_size: SHM_SLOT_SIZE,
         shm_payload_threshold: SHM_PAYLOAD_THRESHOLD,
         operator_role: "PRIMARY".to_string(),
+        isolate_startup_parameters: HashMap::new(),
     };
     let _cm = ContainerManager::<FakeContainer>::start(container_manager_args)
         .await
@@ -443,6 +450,7 @@ pub async fn setup_test_context_with_requester(
         ..Default::default()
     };
     let operator_info = service.operator_info.clone();
+    let isolate_startup_parameters = service.isolate_startup_parameters.clone();
 
     let server_handle = tokio::spawn(async move {
         let _ = Server::builder()
@@ -459,6 +467,7 @@ pub async fn setup_test_context_with_requester(
         client,
         received_requests,
         operator_info,
+        isolate_startup_parameters,
         server_handle,
         _server_temp_dir: server_temp_dir,
         _cm_temp_dir: tempdir().unwrap(),

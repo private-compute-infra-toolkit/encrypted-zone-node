@@ -1,0 +1,77 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package enforcer.v2;
+
+import "enforcer/v2/common.proto";
+import "enforcer/v2/ez_backend_dependencies.proto";
+import "enforcer/v2/ez_service_spec.proto";
+import "enforcer/v2/intercepting_services.proto";
+import "enforcer/v2/isolate_metrics_policy.proto";
+
+// Describes a single Isolate and the package it runs from.
+message BinaryManifest {
+  // Unique identification of the isolate by name and publisher.
+  IsolateType isolate_type = 1;
+  // Lowercase hex SHA-256 of the package file. Unused for the Setup Isolate.
+  string package_digest_sha256 = 2;
+  // Filename of this executable binary file
+  string binary_filename = 3;
+  // Specifications for any services this binary implements (not all services
+  // may be active at runtime)
+  repeated EzServiceSpec service_specs = 4;
+  // Specifications for backend services or endpoints outside or inside EZ
+  // that this isolate depends on and is permitted to communicate with.
+  repeated EzBackendDependency ez_backend_dependencies = 5;
+
+  // Kind-specific settings. Exactly one must be set.
+  oneof isolate_kind {
+    // The Setup Isolate.
+    SetupControls setup = 6;
+    // A Ratified Isolate.
+    RatifiedControls ratified = 7;
+    // An Opaque Isolate.
+    OpaqueControls opaque = 8;
+  }
+}
+
+// Settings specific to the Setup Isolate.
+message SetupControls {
+  // Path to the Setup Isolate's package on the Enforcer's filesystem.
+  string package_filename = 1;
+}
+
+// Settings specific to Ratified Isolates.
+message RatifiedControls {
+  // List of services for which this Ratified Isolate will intercept all
+  // requests. Only one Interceptor is allowed to be configured for each
+  // service. Requests originating from Ratified Isolates cannot be
+  // intercepted.
+  repeated InterceptingServices services_to_intercept = 1;
+  // Policy that defines which metrics are allowed to be exported by the isolate.
+  // If unset, no metrics are exported.
+  IsolateMetricsPolicy metrics_policy = 2;
+}
+
+// Settings specific to Opaque Isolates.
+message OpaqueControls {
+  // Flags (starting with "-") and environment variable names that
+  // IsolateStartupParameters may set.
+  repeated string allowed_overrides = 1;
+  // Policy that defines which metrics are allowed to be exported by the isolate.
+  // If unset, no metrics are exported.
+  IsolateMetricsPolicy metrics_policy = 2;
+}

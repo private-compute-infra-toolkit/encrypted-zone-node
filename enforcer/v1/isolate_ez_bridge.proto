@@ -41,13 +41,13 @@ service IsolateEzBridge {
   // Used by an Isolate to ask the enforcer to create a shared memory region
   // (writable only by the caller) that can be passed to other Isolates (for
   // read-only access).
-  // TODO: Convert CreateMemshare to a unary RPC in the proto
+  // TODO(b/32456789): Convert CreateMemshare to a unary RPC in the proto
   // definition.
   rpc CreateMemshare(stream CreateMemshareRequest) returns (stream CreateMemshareResponse);
 
   // Communicates the Isolate's new state to the enforcer after a self-driven
   // state transition.
-  // TODO: Convert NotifyIsolateState to a unary RPC.
+  // TODO(b/32456789): Convert NotifyIsolateState to a unary RPC.
   rpc NotifyIsolateState(stream NotifyIsolateStateRequest) returns (stream NotifyIsolateStateResponse);
 
   // Used by an Isolate to poll for its current IsolateState.

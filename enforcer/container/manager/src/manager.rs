@@ -14,7 +14,7 @@
 
 pub mod dependency_graph;
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use common_proto::enforcer::v2::IsolateType;
 use container::{Container, ContainerOptions, ContainerRoot, MountOptions, NetworkOptions};
 use container_manager_request::{
@@ -37,10 +37,11 @@ use isolate_info::{
     get_isolate_name, BinaryServicesIndex, InstanceIdGenerator, IsolateId, IsolateServiceInfo,
 };
 use isolate_service_mapper::IsolateServiceMapper;
+use isolate_startup_parameters_proto::enforcer::v2::IsolateStartupParameters;
 use junction_trait::Junction;
 use manifest_parser::v1::{flatten_manifest, parse_manifest, serialize_backend_dependencies};
 use manifest_parser::v2::{SetupManifest, WorkloadManifests};
-use manifest_parser::{get_strictest_scope, ParsedIsolate};
+use manifest_parser::{get_strictest_scope, IsolateKind, ParsedIsolate};
 use manifest_proto::enforcer::v1::ez_backend_dependency::RouteType;
 use manifest_proto::enforcer::v1::{
     EzBackendDependency, EzServiceSpec, IsolateMetricsPolicy, IsolateRuntimeConfigs,
@@ -115,7 +116,10 @@ pub struct ContainerManagerArgs {
     pub manifest_source: ManifestSource,
     pub common_bind_mounts: Vec<String>,
     pub max_decoding_message_size: usize,
+    /// Manifest V1 only.
     pub isolate_runtime_configs: IsolateRuntimeConfigs,
+    /// Manifest V2 only.
+    pub isolate_startup_parameters: HashMap<IsolateType, IsolateStartupParameters>,
     pub otel_traces_endpoint: Option<String>,
     pub run_isolate_as_unprivileged: bool,
     pub enable_syscall_filtering: bool,
@@ -139,7 +143,10 @@ struct ShmIPCArgs {
 struct IsolateArgConfig {
     common_bind_mounts: Vec<String>,
     max_decoding_message_size: usize,
+    /// Manifest V1 only.
     isolate_runtime_configs: IsolateRuntimeConfigs,
+    /// Manifest V2 only.
+    isolate_startup_parameters: HashMap<IsolateType, IsolateStartupParameters>,
     shm_ipc_args: ShmIPCArgs,
 }
 
@@ -190,6 +197,7 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
                 shm_slot_size: args.shm_slot_size,
                 shm_payload_threshold: args.shm_payload_threshold,
             },
+            isolate_startup_parameters: args.isolate_startup_parameters,
         };
 
         let setup_isolate_target;
@@ -204,11 +212,22 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
                 isolates
             }
             ManifestSource::V2 { setup_isolate_manifest_path } => {
+                // IsolateRuntimeConfigs take precedence over the arguments and environment that
+                // apply_startup_parameters sets, so they must not be used with Manifest V2.
+                ensure!(
+                    isolate_arg_config.isolate_runtime_configs.configs.is_empty(),
+                    "IsolateRuntimeConfigs are not supported with Manifest V2; \
+                     use IsolateStartupParameters instead"
+                );
                 let setup_manifest = SetupManifest::load_from_path(setup_isolate_manifest_path)
                     .context("Failed to load v2 setup isolate manifest")?;
-                let parsed_isolate = setup_manifest
+                let mut parsed_isolate = setup_manifest
                     .into_parsed_isolate()
-                    .context("Failed to parse setup isolate descriptor")?;
+                    .context("Failed to parse setup isolate manifest")?;
+                apply_startup_parameters(
+                    &mut parsed_isolate,
+                    &isolate_arg_config.isolate_startup_parameters,
+                )?;
                 let service_name = parsed_isolate
                     .service_specs
                     .first()
@@ -275,14 +294,40 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
         &self,
         workload_manifests: WorkloadManifests,
     ) -> Result<Vec<BinaryServicesIndex>> {
-        let workload_isolates = workload_manifests
+        let mut workload_isolates = workload_manifests
             .into_parsed_isolates()
             .context("Failed to parse workload isolates")?;
         ensure!(!workload_isolates.is_empty(), "workload isolates cannot be empty");
+        if self.is_manifest_v2 {
+            self.apply_workload_startup_parameters(&mut workload_isolates)?;
+        }
         let indices = self.process_and_register_isolates(workload_isolates).await?;
         self.build_and_validate_dependency_graph().await?;
         self.state_manager.set_isolates_registered();
         Ok(indices)
+    }
+
+    /// Applies startup parameters to the workload isolates; fails on entries matching no Isolate.
+    fn apply_workload_startup_parameters(&self, isolates: &mut [ParsedIsolate]) -> Result<()> {
+        let startup_parameters = &self.isolate_arg_config.isolate_startup_parameters;
+        for isolate in isolates.iter_mut() {
+            apply_startup_parameters(isolate, startup_parameters)?;
+        }
+        // Only the Setup Isolate is registered before the workload isolates.
+        let expected_count = self.container_startup_args_map.len() + isolates.len();
+        if startup_parameters.len() > expected_count {
+            let known_isolates: HashSet<IsolateType> = self
+                .container_startup_args_map
+                .iter()
+                .map(|entry| isolate_type(&entry.publisher_id, &entry.isolate_name))
+                .chain(isolates.iter().map(|i| isolate_type(&i.publisher_id, &i.isolate_name)))
+                .collect();
+            if let Some(unknown) = startup_parameters.keys().find(|t| !known_isolates.contains(*t))
+            {
+                bail!("IsolateStartupParameters provided for unknown Isolate {unknown:?}");
+            }
+        }
+        Ok(())
     }
 
     /// Starts workload isolates given a mapping of BinaryServicesIndex to updated package paths.
@@ -427,31 +472,31 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
                 c.isolate_name.is_empty() || c.isolate_name == isolate.isolate_name;
             isolate_name_matches
                 && c.publisher_id == isolate.publisher_id
-                && c.binary_filename == isolate.binary_filename()
+                && c.binary_filename == isolate.binary_filename
         });
         let command_line_args = if let Some(c) = runtime_config {
             c.command_line_arguments.as_slice()
         } else {
-            isolate.command_line_arguments()
+            isolate.command_line_arguments.as_slice()
         };
         let base_env_vars = if let Some(c) = runtime_config {
             c.environment_variables.as_slice()
         } else {
-            isolate.environment_variables()
+            isolate.environment_variables.as_slice()
         };
 
         let etc_hosts = if let Some(c) = runtime_config { &c.etc_hosts } else { "" };
         let mut bind_mounts = config.common_bind_mounts.clone();
         if !etc_hosts.is_empty() {
             let etc_hosts_path =
-                get_etc_hosts_path(&isolate.publisher_id, isolate.binary_filename());
+                get_etc_hosts_path(&isolate.publisher_id, &isolate.binary_filename);
             let etc_hosts_parent_dir =
                 etc_hosts_path.parent().context("etc_hosts_path has no parent")?;
             tokio::fs::create_dir_all(etc_hosts_parent_dir)
                 .await
                 .context(format!("Failed to create directory {etc_hosts_parent_dir:?}"))?;
 
-            let key = (isolate.publisher_id.clone(), isolate.binary_filename().to_string());
+            let key = (isolate.publisher_id.clone(), isolate.binary_filename.clone());
             if self.etc_hosts_written.insert(key, ()).is_none() {
                 match tokio::fs::OpenOptions::new()
                     .write(true)
@@ -497,7 +542,7 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
         env_vars.push(format!("EZ_OPERATOR_ROLE={}", self.operator_role));
 
         let container_startup_args = ContainerStartupArgs {
-            binary_filename: isolate.binary_filename().to_string(),
+            binary_filename: isolate.binary_filename.clone(),
             // Copy is required because command_line_args is now owned by container_startup_args.
             command_line_args: command_line_args.to_vec(),
             strictest_scope,
@@ -612,7 +657,7 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
         for backend_dependency in backend_dependencies.iter() {
             let route_type = RouteType::try_from(backend_dependency.route_type)
                 .unwrap_or(RouteType::Unspecified);
-            // TODO: Service indexing will eventually be based on
+            // TODO(b/325466997): Service indexing will eventually be based on
             // (publisher_id, operator_domain, workload_id).
             let backend_isolate_services_index = self
                 .isolate_service_mapper
@@ -733,9 +778,9 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
         if !std::path::Path::new(DEV_SHM_PATH).is_dir() {
             anyhow::bail!("directory not found: {}", DEV_SHM_PATH);
         }
-        let sharing_dir = tempfile::Builder::new()
-            .prefix(&container_startup_args.publisher_id)
-            .tempdir_in(DEV_SHM_PATH)?;
+        let sanitized_publisher_id = sanitize_path_component(&container_startup_args.publisher_id);
+        let sharing_dir =
+            tempfile::Builder::new().prefix(&sanitized_publisher_id).tempdir_in(DEV_SHM_PATH)?;
         log::info!("sharing_dir: {sharing_dir:?}");
         let mut container = ContainerT::new(ContainerRoot::ReadOnlyRoot(root), None)?;
 
@@ -768,15 +813,32 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             }
         }
 
-        if let Some(ref endpoint) = self.otel_traces_endpoint {
-            if let Some(source_path) = extract_unix_path(endpoint) {
-                mounts.push(MountOptions {
-                    source: source_path,
-                    destination: PathBuf::from(SHARING_DIR_NAME).join(OTEL_TRACES_UDS),
-                    apply_restrictive_flags: true,
-                    optional: true,
-                });
+        // The OTel traces UDS is the collector's own socket, bind-mounted straight through to
+        // the Isolate. Traffic on it goes Isolate -> collector *without passing through the
+        // Enforcer*, so none of the Enforcer's data-flow policy applies to it (unlike metrics,
+        // which terminate on a per-Isolate `IsolateMetricsReceiver` inside the Enforcer).
+        //
+        // Until traces are mediated by the Enforcer the same way metrics are, only Ratified
+        // (trusted, audited) Isolates may export traces. Opaque Isolates are untrusted and must
+        // not be handed an unfiltered egress channel out of the TEE.
+        // TODO: Remove this restriction once an Enforcer-side trace receiver with a manifest
+        // trace policy (mirroring `IsolateMetricsPolicy`) is in place.
+        if isolate_id.is_ratified_isolate() {
+            if let Some(ref endpoint) = self.otel_traces_endpoint {
+                if let Some(source_path) = extract_unix_path(endpoint) {
+                    mounts.push(MountOptions {
+                        source: source_path,
+                        destination: PathBuf::from(SHARING_DIR_NAME).join(OTEL_TRACES_UDS),
+                        apply_restrictive_flags: true,
+                        optional: true,
+                    });
+                }
             }
+        } else if self.otel_traces_endpoint.is_some() {
+            log::info!(
+                "Not mounting OTel traces UDS for opaque isolate {isolate_id:?}: trace export is \
+                 restricted to Ratified Isolates."
+            );
         }
 
         // Create a fifo that the Isolate will block on until the EZ server is ready.
@@ -1169,6 +1231,54 @@ fn extract_unix_path(endpoint: &str) -> Option<PathBuf> {
         }
         PathBuf::from(path)
     })
+}
+
+fn isolate_type(publisher_id: &str, isolate_name: &str) -> IsolateType {
+    IsolateType { isolate_name: isolate_name.to_string(), publisher_id: publisher_id.to_string() }
+}
+
+fn apply_startup_parameters(
+    isolate: &mut ParsedIsolate,
+    startup_parameters: &HashMap<IsolateType, IsolateStartupParameters>,
+) -> Result<()> {
+    let key = isolate_type(&isolate.publisher_id, &isolate.isolate_name);
+    let parameters = startup_parameters
+        .get(&key)
+        .with_context(|| format!("No IsolateStartupParameters for Isolate {key:?}"))?;
+    match &isolate.kind {
+        // Setup and Ratified Isolates take their arguments and environment from the startup
+        // script in their package.
+        IsolateKind::Ratified { .. } => {
+            ensure!(
+                parameters.command_line_arguments.is_empty(),
+                "Setup and Ratified Isolate {key:?} cannot have command-line arguments: {:?}",
+                parameters.command_line_arguments
+            );
+            ensure!(
+                parameters.environment_variables.is_empty(),
+                "Setup and Ratified Isolate {key:?} cannot have environment variables: {:?}",
+                parameters.environment_variables
+            );
+            ensure!(
+                parameters.number_of_isolates >= 1,
+                "number_of_isolates must be >= 1 for Setup and Ratified Isolate {key:?}"
+            );
+        }
+        IsolateKind::Opaque => {
+            ensure!(
+                parameters.number_of_isolates >= 0,
+                "number_of_isolates cannot be negative for Opaque Isolate {key:?}"
+            );
+            ensure!(
+                !parameters.environment_variables.iter().any(|e| e.starts_with("EZ_")),
+                "IsolateStartupParameters cannot set reserved 'EZ_' environment variables for {key:?}"
+            );
+            isolate.command_line_arguments.clone_from(&parameters.command_line_arguments);
+            isolate.environment_variables.clone_from(&parameters.environment_variables);
+        }
+    }
+    isolate.number_of_isolates = parameters.number_of_isolates;
+    Ok(())
 }
 
 fn find_v1_setup_isolate_target(isolates: &[ParsedIsolate]) -> Option<(String, String, String)> {

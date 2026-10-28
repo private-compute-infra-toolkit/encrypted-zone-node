@@ -151,4 +151,4 @@ The `GetDiagnostic` RPC supports other profile types:
     session is active at a time.
 -   The `duration_seconds` field is currently used instead of `google.protobuf.Duration` to avoid
     type resolution issues in certain environments.
-    -   TODO: Find a better way of expressing Duration.
+    -   TODO(andrzejgorski): Find a better way of expressing Duration.

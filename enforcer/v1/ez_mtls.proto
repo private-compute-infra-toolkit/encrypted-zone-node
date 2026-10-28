@@ -123,7 +123,7 @@ message GetCertificateRequest {
 
 // Response containing the signed certificate.
 message GetCertificateResponse {
-  // TODO: Remove this field in favor of certs.
+  // TODO(sidachen): Remove this field in favor of certs.
   bytes cert_chain = 1;
   // The signed X.509 certificate chain, encoded in DER format.
   //

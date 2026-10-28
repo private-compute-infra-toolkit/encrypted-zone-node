@@ -18,6 +18,7 @@ load("@rules_rust//rust:defs.bzl", "rust_binary")
 # independent test See: https://github.com/bazelbuild/rules_rust/discussions/913
 rust_binary(
     name = "container_integration_test",
+    testonly = True,
     srcs = ["container_integration_test.rs"],
     data = ["//enforcer/container/test_data:test_bundle"],
     deps = [

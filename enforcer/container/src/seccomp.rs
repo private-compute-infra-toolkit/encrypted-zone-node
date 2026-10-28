@@ -19,7 +19,7 @@
 //! Rather than depending on an external C library (like libseccomp), we manually
 //! compile the BPF bytecode using the standard Linux `sock_filter` structures.
 //!
-//! TODO: Transition this manually-compiled Classical BPF to `seccompiler` library.
+//! TODO(b/540463564): Transition this manually-compiled Classical BPF to `seccompiler` library.
 //! Using a library will resolve x32 ABI bypasses natively and optimize the rules to
 //! compile into a Binary Search Tree (BST) using BPF_JGT/BPF_JGE (rather than a linear scan).
 

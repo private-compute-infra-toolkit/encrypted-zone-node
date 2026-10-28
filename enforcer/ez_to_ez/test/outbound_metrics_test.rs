@@ -83,7 +83,8 @@ async fn test_outbound_stream_metrics() {
     let exported = collector.exported_metrics(5, Duration::from_secs(2)).await;
 
     let verifier = metrics_test_utils::MetricsVerifier::new(exported);
-    let points = verifier.get_histogram_points("enforcer.ez_to_ez.outbound.message_size");
+    let points =
+        verifier.get_histogram_points("encrypted_zone.enforcer.ez_to_ez.outbound.message_size");
 
     let mut request_message_count: u64 = 0;
     let mut response_message_count: u64 = 0;

@@ -1,26 +1,22 @@
 {
-  "setup_isolate_descriptor": {
-    "isolate_type": {
-      "isolate_name": "ezpkg://setup.example.com",
-      "publisher_id": "EZ_Trusted"
-    },
-    "package_filename": "enforcer/container/test_data/test_binary.tar",
-    "binary_filename": "/usr/local/bin/setup",
-    "command_line_arguments": ["--init"],
-    "service_specs": [
-      {
-        "service_name": "SetupService",
-        "method_specs": [
-          {
-            "method_name": "Initialize",
-            "input_scope_types": ["DATA_SCOPE_TYPE_PUBLIC"],
-            "output_scope_types": ["DATA_SCOPE_TYPE_PUBLIC"]
-          }
-        ]
-      }
-    ],
-    "startup_parameters": {
-      "number_of_isolates": 1
+  "isolate_type": {
+    "isolate_name": "setup_isolate",
+    "publisher_id": "pcit-release-bot@google.com"
+  },
+  "binary_filename": "/usr/local/bin/setup",
+  "service_specs": [
+    {
+      "service_name": "SetupService",
+      "method_specs": [
+        {
+          "method_name": "Initialize",
+          "input_scope_types": ["DATA_SCOPE_TYPE_PUBLIC"],
+          "output_scope_types": ["DATA_SCOPE_TYPE_PUBLIC"]
+        }
+      ]
     }
+  ],
+  "setup": {
+    "package_filename": "enforcer/container/test_data/test_binary.tar"
   }
 }

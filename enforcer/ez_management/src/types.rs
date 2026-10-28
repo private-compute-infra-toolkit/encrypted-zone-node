@@ -22,6 +22,10 @@ pub enum EzManagementError {
     FetchOperatorInfoFailed(String),
     #[error("Invalid OperatorInfo from EzManagementService: {0}")]
     InvalidOperatorInfo(String),
+    #[error("Failed to fetch isolate startup parameters from EzManagementService: {0}")]
+    FetchIsolateStartupParametersFailed(String),
+    #[error("Invalid IsolateStartupParameters from EzManagementService: {0}")]
+    InvalidIsolateStartupParameters(String),
     #[error("gRPC stream error: {0}")]
     StreamError(String),
     #[error("Unexpected message received: {0}")]

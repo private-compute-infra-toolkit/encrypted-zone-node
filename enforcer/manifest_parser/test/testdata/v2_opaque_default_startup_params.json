@@ -2,7 +2,7 @@
   "opaque_isolate_descriptors": [
     {
       "isolate_type": {
-        "isolate_name": "ezpkg://default.opaque.com",
+        "isolate_name": "default_opaque",
         "publisher_id": "default_domain"
       },
       "package_filename": "enforcer/container/test_data/test_binary.tar",

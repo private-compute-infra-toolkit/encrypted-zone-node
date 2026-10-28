@@ -407,7 +407,7 @@ fn create_invoke_isolate_request(
             // ipc_message_id will not be sent to the Isolates, since it is only attached to
             // the caller's side of the IPC junction.
             ipc_message_id: session_id,
-            // TODO The CallRequest should have this field
+            // TODO(shabsi) The CallRequest should have this field
             requester_spiffe: String::new(),
             requester_is_local: false,
             responder_is_local: true,

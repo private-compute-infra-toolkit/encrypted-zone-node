@@ -31,6 +31,7 @@ rust_library(
         "//enforcer/v1:isolate_endorsement_rust",
         "//enforcer/v2:common_rust_proto",
         "//enforcer/v2:ez_management_rust",
+        "//enforcer/v2:isolate_startup_parameters_rust_proto",
         "//enforcer/v2:opaque_isolate_manifest_rust_proto",
         "//enforcer/v2:ratified_isolate_manifest_rust_proto",
         "//enforcer/v2:setup_isolate_rust_proto",

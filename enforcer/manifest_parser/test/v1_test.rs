@@ -14,10 +14,11 @@
 
 use anyhow::{Context, Result};
 use data_scope_proto::enforcer::v1::DataScopeType;
-use manifest_parser::get_strictest_scope;
 use manifest_parser::v1::{flatten_manifest, parse_isolate_runtime_configs, parse_manifest};
+use manifest_parser::{get_strictest_scope, IsolateKind};
 use manifest_proto::enforcer::v1::{
     ez_manifest::ManifestType, BinaryManifest, BundleManifest, EzManifest, EzMethodSpec,
+    InterceptingServices,
 };
 use prost_reflect::{DescriptorPool, DynamicMessage};
 use std::collections::HashMap;
@@ -244,11 +245,29 @@ fn test_flatten_manifest() {
     assert_eq!(isolates[0].isolate_name, "ezpkg://playground.example.com");
     assert_eq!(isolates[0].publisher_id, "playground_example");
     assert_eq!(
-        isolates[0].binary_filename(),
+        isolates[0].binary_filename,
         "/usr/local/bin/summation_by_lookup_table_with_backend"
     );
+    assert_eq!(isolates[0].kind, IsolateKind::Opaque);
     assert_eq!(isolates[1].publisher_id, "playground_example");
-    assert_eq!(isolates[1].binary_filename(), "/usr/local/bin/summation_precomputed_backend");
+    assert_eq!(isolates[1].binary_filename, "/usr/local/bin/summation_precomputed_backend");
+    assert_eq!(isolates[1].kind, IsolateKind::Ratified { services_to_intercept: vec![] });
+}
+
+#[test]
+fn test_flatten_manifest_rejects_services_to_intercept_for_opaque_isolate() {
+    let manifest = EzManifest {
+        isolate_name: "test".to_string(),
+        publisher_id: "test_pub".to_string(),
+        package_filename: "pkg.tar".to_string(),
+        manifest_type: Some(ManifestType::BinaryManifest(BinaryManifest {
+            is_ratified_isolate: false,
+            services_to_intercept: vec![InterceptingServices::default()],
+            ..Default::default()
+        })),
+    };
+    let err = flatten_manifest(manifest).unwrap_err();
+    assert!(err.to_string().contains("services_to_intercept cannot be set"), "{err}");
 }
 
 #[test]
@@ -281,4 +300,33 @@ fn test_flatten_manifest_zero_number_of_isolates_preserved() {
     let isolates = flatten_manifest(manifest).expect("Failed to flatten manifest");
     assert_eq!(isolates.len(), 1);
     assert_eq!(isolates[0].number_of_isolates, 0);
+}
+
+#[test]
+fn test_flatten_manifest_keeps_arguments_and_environment() {
+    for is_ratified_isolate in [true, false] {
+        let manifest = EzManifest {
+            isolate_name: "test".to_string(),
+            publisher_id: "test_pub".to_string(),
+            package_filename: "pkg.tar".to_string(),
+            manifest_type: Some(ManifestType::BinaryManifest(BinaryManifest {
+                is_ratified_isolate,
+                command_line_arguments: vec!["--arg".to_string()],
+                environment_variables: vec!["ENV=1".to_string()],
+                ..Default::default()
+            })),
+        };
+        let isolates = flatten_manifest(manifest).expect("Failed to flatten manifest");
+        assert_eq!(isolates.len(), 1);
+        assert_eq!(
+            isolates[0].command_line_arguments,
+            vec!["--arg"],
+            "is_ratified_isolate: {is_ratified_isolate}"
+        );
+        assert_eq!(
+            isolates[0].environment_variables,
+            vec!["ENV=1"],
+            "is_ratified_isolate: {is_ratified_isolate}"
+        );
+    }
 }

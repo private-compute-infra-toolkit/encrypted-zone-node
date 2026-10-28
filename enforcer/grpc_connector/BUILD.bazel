@@ -46,6 +46,7 @@ rust_test(
         "@crates//:boring",
         "@crates//:tempfile",
         "@crates//:tokio",
+        "@crates//:tokio-boring",
         "@crates//:tokio-stream",
         "@crates//:tonic",
         "@crates//:tower",

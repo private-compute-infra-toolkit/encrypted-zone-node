@@ -13,12 +13,8 @@
 // limitations under the License.
 
 use data_scope::error::DataScopeError;
+use error_detail_proto::enforcer::v1::ez_error_detail::{ErrorReason, ErrorSource};
 use ez_error_trait::ToEzError;
-
-// use error_detail_proto::enforcer::v1::ez_error_detail::Error as EzDetailError;
-use error_detail_proto::enforcer::v1::ez_error_detail::ErrorReason;
-use error_detail_proto::enforcer::v1::ez_error_detail::ErrorSource;
-
 use tonic::Code;
 
 #[test]
@@ -110,5 +106,42 @@ fn test_to_ez_error_conversion() {
         }
     } else {
         panic!("Expected EnforcerError");
+    }
+
+    if let ez_error::EzError::EnforcerError(ez_err) =
+        DataScopeError::InvalidIsolateServiceIndex.to_ez_error()
+    {
+        assert_eq!(ez_err.error_code, Code::InvalidArgument);
+        let bad_request = ez_err.bad_request.expect("Expected BadRequest details");
+        let fields: Vec<&str> =
+            bad_request.field_violations.iter().map(|v| v.field.as_str()).collect();
+        assert_eq!(fields, vec!["operator_domain", "service_name"]);
+    } else {
+        panic!("Expected EnforcerError");
+    }
+
+    for (err, expected_reason) in [
+        (DataScopeError::DisallowedByManifest, ErrorReason::DisallowedByManifest),
+        (DataScopeError::BackendDependencyNotAllowed, ErrorReason::CommunicationNotAllowed),
+        (
+            DataScopeError::PayloadExceedsCurrentDataScope {
+                emitted: "USER_PRIVATE".to_string(),
+                current: "PUBLIC".to_string(),
+            },
+            ErrorReason::RequestedPayloadDataScopeUnsafe,
+        ),
+        (
+            DataScopeError::PublicApiScopeViolation { emitted: "USER_PRIVATE".to_string() },
+            ErrorReason::DisallowedEgress,
+        ),
+    ] {
+        if let ez_error::EzError::EnforcerError(ez_err) = err.to_ez_error() {
+            assert_eq!(ez_err.error_code, Code::PermissionDenied);
+            assert_eq!(ez_err.source, ErrorSource::Enforcer);
+            assert_eq!(ez_err.error_reason, Some(expected_reason));
+            assert!(ez_err.bad_request.is_none());
+        } else {
+            panic!("Expected EnforcerError");
+        }
     }
 }

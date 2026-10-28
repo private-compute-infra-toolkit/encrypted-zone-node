@@ -14,13 +14,15 @@
 
 use crate::common::{await_setup_isolate, build_tls_configs, launch_ez_to_ez};
 use anyhow::{Context, Result};
+use common_proto::enforcer::v2::IsolateType;
 use container_manager_requester::ContainerManagerRequester;
-use ez_management::{EzManagementClient, OperatorInfo};
+use ez_management::{EzManagementClient, IsolateStartupParameters, OperatorInfo};
 use inbound_ez_to_ez_handler::InboundEzToEzHandler;
 use isolate_info::BinaryServicesIndex;
 use mtls::mtls::EzMtlsManagerConfig;
 use outbound_ez_to_ez_client::OutboundEzToEzClient;
 use state_manager::IsolateStateManager;
+use std::collections::HashMap;
 use std::time::Duration;
 
 /// Inputs required to run the EZ Node bootstrap sequence for Manifest V2.
@@ -81,6 +83,17 @@ impl NodeBootstrapV2 {
             .fetch_operator_info()
             .await
             .context("Failed to fetch OperatorInfo from EzManagementService")
+    }
+
+    /// Fetches the [`IsolateStartupParameters`] of every Isolate. Must complete before the Setup
+    /// Isolate is booted.
+    pub async fn fetch_isolate_startup_parameters(
+        &self,
+    ) -> Result<HashMap<IsolateType, IsolateStartupParameters>> {
+        self.ez_management_client
+            .fetch_isolate_startup_parameters()
+            .await
+            .context("Failed to fetch IsolateStartupParameters from EzManagementService")
     }
 
     /// Runs the bootstrap sequence to completion.

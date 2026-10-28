@@ -39,7 +39,7 @@ function run_analyzer() {
       printf "%s%s%s\n" "${PREFIX}" "${line}" "${SUFFIX}"
     done <<< "$(cat "${STD_ERR_DIR}"/stderr-*)"
   elif [[ ${RC} -ne ${BAZEL_SUCCESS_CODE} ]]; then
-    # TODO: update debug instructions when we can reproduce error and try bazel clean
+    # TODO(alexorozco): update debug instructions when we can reproduce error and try bazel clean
     printf "XXXXXX rust-analyzer is out of sync, please try 'rm -rf \"%s\"' and save again XXXXXX\n" "${OUTPUT_BASE}"
     exit ${RC}
   fi

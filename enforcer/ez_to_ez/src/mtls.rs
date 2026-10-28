@@ -161,7 +161,7 @@ pub struct EzMtlsManagerConfig {
 }
 
 impl EzMtlsManagerConfig {
-    // TODO: Deprecate this once static mTLS cert fetching via proxy is removed.
+    // TODO(b/535256367): Deprecate this once static mTLS cert fetching via proxy is removed.
     pub fn new_with_proxy(mtls_key_path: String, csr_path: String, proxy_address: String) -> Self {
         Self {
             mtls_key_path: Some(mtls_key_path),
@@ -375,7 +375,7 @@ impl EzMtlsManager {
                 if &parsed == expected_identity {
                     Ok(())
                 } else {
-                    // TODO: Define SPIFFE ID matching policy.
+                    // TODO(b/545145139): Define SPIFFE ID matching policy.
                     log::warn!("SPIFFE URI does not match expected identity");
                     Ok(())
                 }
@@ -444,7 +444,7 @@ impl EzMtlsManager {
         let store = self.build_x509_store()?;
         acceptor.set_verify_cert_store(store)?;
 
-        // TODO: In the future, we may have multiple acceptable peer roles for incoming request.
+        // TODO(b/439073817): In the future, we may have multiple acceptable peer roles for incoming request.
         let verify_mode = SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT;
         acceptor.set_verify_callback(
             verify_mode,
@@ -501,7 +501,7 @@ pub struct TlsConnectorFactory {
 impl TlsConnectorFactory {
     /// Creates a TLS connector for a specific target operator domain.
     ///
-    /// TODO: We may add different fields to construct the connector in the future.
+    /// TODO(b/439073817): We may add different fields to construct the connector in the future.
     pub async fn create_connector(&self, operator_domain: &str) -> anyhow::Result<SslConnector> {
         let expected_identity = SpiffeUri {
             trust_domain: self.manager.spiffe_identity.trust_domain.clone(),

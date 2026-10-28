@@ -16,7 +16,7 @@ syntax = "proto3";
 
 package enforcer.v1;
 
-// TODO: Document how these state transitions are intended to work, and
+// TODO(shabsi): Document how these state transitions are intended to work, and
 // link the doc here.
 enum IsolateState {
   reserved 2, 4, 6, 8, 10;

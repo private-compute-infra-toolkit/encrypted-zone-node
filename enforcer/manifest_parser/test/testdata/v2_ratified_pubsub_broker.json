@@ -1,0 +1,43 @@
+{
+  "isolate_type": {
+    "isolate_name": "pubsub_broker",
+    "publisher_id": "pcit-release-bot@google.com"
+  },
+  "package_digest_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "binary_filename": "/usr/local/bin/main",
+  "service_specs": [
+    {
+      "service_name": "PubSubBroker",
+      "method_specs": [
+        {
+          "method_name": "SubscribeParameters",
+          "input_scope_types": ["DATA_SCOPE_TYPE_PUBLIC"],
+          "output_scope_types": ["DATA_SCOPE_TYPE_PUBLIC"]
+        },
+        {
+          "method_name": "ReportValidation",
+          "input_scope_types": ["DATA_SCOPE_TYPE_PUBLIC"],
+          "output_scope_types": ["DATA_SCOPE_TYPE_PUBLIC"]
+        }
+      ]
+    }
+  ],
+  "ez_backend_dependencies": [
+    {
+      "operator_domain": "cdpush",
+      "service_name": "EzExternalProxyService",
+      "method_name": "StreamCall",
+      "route_type": "ROUTE_TYPE_EXTERNAL"
+    }
+  ],
+  "ratified": {
+    "metrics_policy": {
+      "allowed_metrics": [
+        {
+          "name": "encrypted_zone.ratified_isolate.init_heartbeat",
+          "type": "METRIC_TYPE_SUM"
+        }
+      ]
+    }
+  }
+}

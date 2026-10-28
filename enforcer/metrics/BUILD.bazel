@@ -64,6 +64,7 @@ rust_test(
     name = "metrics_test",
     size = "small",
     srcs = ["test/metrics_test.rs"],
+    args = ["--test-threads=1"],
     deps = [
         ":metrics",
         ":metrics_test_utils",

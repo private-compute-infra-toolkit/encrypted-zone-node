@@ -12,104 +12,90 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use ez_service_proto::enforcer::v1::CallRequest;
 use fake_opentelemetry_collector::{ExportedMetric, FakeCollectorServer};
 use futures::StreamExt;
 use metrics::common::{MetricAttributes, ServiceMetrics};
+use metrics::global::{
+    reset_global_providers, safe_meter, safe_meter_with_scope, unsafe_meter,
+    unsafe_meter_with_scope,
+};
 use metrics::public_api::PublicApiMetrics;
-use metrics::setup_otel_metrics;
+use metrics::{record_initialization_metric, setup_otel_metrics};
+use metrics_test_utils::TestMetrics;
 use opentelemetry::metrics::MeterProvider;
-use opentelemetry::KeyValue;
+use opentelemetry::{InstrumentationScope, KeyValue};
 use opentelemetry_sdk::metrics::SdkMeterProvider;
-use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tokio_stream::wrappers::ReceiverStream;
 
-use metrics_test_utils::TestMetrics;
+const SAFE_SCOPED_COUNTER: &str = "safe_scoped_counter";
+const UNSAFE_SCOPED_COUNTER: &str = "unsafe_scoped_counter";
+const AFTER_RESET_COUNTER: &str = "after_reset_counter";
 
-#[derive(Clone, Debug, PartialEq)]
-struct TestMessage {
-    id: String,
-    content: String,
-}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_setup_otel_metrics_init_and_global_scoped_meters() {
+    reset_global_providers();
+    let noop_providers =
+        setup_otel_metrics(None, None).await.expect("No-op metrics setup should succeed");
+    assert!(noop_providers.safe.is_none());
+    assert!(noop_providers.unsafe_metrics.is_none());
+    safe_meter("noop_safe").u64_counter("noop_safe_counter").build().add(1, &[]);
+    unsafe_meter("noop_unsafe").u64_counter("noop_unsafe_counter").build().add(1, &[]);
 
-impl prost::Message for TestMessage {
-    fn encode_raw(&self, _buf: &mut impl prost::bytes::BufMut) {}
-    fn merge_field(
-        &mut self,
-        _tag: u32,
-        _wire_type: prost::encoding::WireType,
-        _buf: &mut impl prost::bytes::Buf,
-        _ctx: prost::encoding::DecodeContext,
-    ) -> Result<(), prost::DecodeError> {
-        Ok(())
-    }
-    fn encoded_len(&self) -> usize {
-        self.content.len()
-    }
-    fn clear(&mut self) {}
-}
+    let mut safe_collector =
+        FakeCollectorServer::start().await.expect("Failed to start safe collector");
+    let mut unsafe_collector =
+        FakeCollectorServer::start().await.expect("Failed to start unsafe collector");
+    let providers =
+        setup_otel_metrics(Some(safe_collector.endpoint()), Some(unsafe_collector.endpoint()))
+            .await
+            .expect("Failed to setup dual OTel pipelines");
+    let safe_provider = providers.safe.expect("Safe provider should be initialized");
+    let unsafe_provider = providers.unsafe_metrics.expect("Unsafe provider should be initialized");
 
-#[derive(Clone, Debug, PartialEq)]
-struct TestResponse {
-    payload: String,
-}
+    record_initialization_metric(&safe_provider);
+    let init_exported = safe_collector.exported_metrics(1, Duration::from_secs(2)).await;
+    assert_eq!(init_exported.len(), 1);
+    assert!(
+        init_exported[0].metrics.iter().any(|m| m.name == "encrypted_zone.enforcer.init_metric"),
+        "Expected init_metric to flush immediately, got: {:?}",
+        init_exported[0].metrics
+    );
 
-impl prost::Message for TestResponse {
-    fn encode_raw(&self, _buf: &mut impl prost::bytes::BufMut) {}
-    fn merge_field(
-        &mut self,
-        _tag: u32,
-        _wire_type: prost::encoding::WireType,
-        _buf: &mut impl prost::bytes::Buf,
-        _ctx: prost::encoding::DecodeContext,
-    ) -> Result<(), prost::DecodeError> {
-        Ok(())
-    }
-    fn encoded_len(&self) -> usize {
-        self.payload.len()
-    }
-    fn clear(&mut self) {}
-}
+    let safe_scope = InstrumentationScope::builder("safe_scope").build();
+    let unsafe_scope = InstrumentationScope::builder("unsafe_scope").build();
+    safe_meter_with_scope(safe_scope).u64_counter(SAFE_SCOPED_COUNTER).build().add(1, &[]);
+    unsafe_meter_with_scope(unsafe_scope).u64_counter(UNSAFE_SCOPED_COUNTER).build().add(1, &[]);
 
-impl From<&TestMessage> for MetricAttributes {
-    fn from(_req: &TestMessage) -> Self {
-        MetricAttributes::new("test.domain", "TestService", "TestMethod")
-    }
-}
+    reset_global_providers();
+    safe_meter_with_scope(InstrumentationScope::builder("post_reset").build())
+        .u64_counter(AFTER_RESET_COUNTER)
+        .build()
+        .add(1, &[]);
 
-// Returns (Collector, Metrics, SafeProvider, UnsafeProvider)
-async fn setup_test() -> (FakeCollectorServer, PublicApiMetrics, SdkMeterProvider, SdkMeterProvider)
-{
-    let collector = FakeCollectorServer::start().await.expect("Failed to start fake collector");
-    // Point both safe and unsafe to the SAME fake collector for easier assertion
-    let providers = setup_otel_metrics(Some(collector.endpoint()), Some(collector.endpoint()))
-        .await
-        .expect("Failed to setup OTel metrics");
+    assert!(safe_provider.shutdown().is_ok());
+    assert!(unsafe_provider.shutdown().is_ok());
+    let safe_exported = safe_collector.exported_metrics(2, Duration::from_secs(2)).await;
+    let unsafe_exported = unsafe_collector.exported_metrics(1, Duration::from_secs(2)).await;
+    let safe_names: Vec<&str> =
+        safe_exported.iter().flat_map(|b| b.metrics.iter().map(|m| m.name.as_str())).collect();
+    let unsafe_names: Vec<&str> =
+        unsafe_exported.iter().flat_map(|b| b.metrics.iter().map(|m| m.name.as_str())).collect();
+    assert!(safe_names.contains(&SAFE_SCOPED_COUNTER), "safe_names={safe_names:?}");
+    assert!(!safe_names.contains(&UNSAFE_SCOPED_COUNTER), "unsafe leaked to safe!");
+    assert!(!safe_names.contains(&AFTER_RESET_COUNTER), "post-reset metric exported!");
+    assert!(unsafe_names.contains(&UNSAFE_SCOPED_COUNTER), "unsafe_names={unsafe_names:?}");
+    assert!(!unsafe_names.contains(&SAFE_SCOPED_COUNTER), "safe leaked to unsafe!");
 
-    let safe_provider = providers.safe.expect("Safe provider missing");
-    let unsafe_provider = providers.unsafe_metrics.expect("Unsafe provider missing");
-
-    let safe_meter = safe_provider.meter("encrypted_zone.enforcer");
-    let unsafe_meter = unsafe_provider.meter("encrypted_zone.enforcer");
-
-    let metrics = PublicApiMetrics::from_meters(safe_meter, unsafe_meter);
-
-    (collector, metrics, safe_provider, unsafe_provider)
-}
-
-async fn setup_common_test() -> (FakeCollectorServer, TestMetrics, SdkMeterProvider) {
-    let collector = FakeCollectorServer::start().await.expect("Failed to start fake collector");
-    let providers = setup_otel_metrics(Some(collector.endpoint()), None)
-        .await
-        .expect("Failed to setup OTel metrics");
-    let provider = providers.safe.expect("Safe provider missing");
-    let meter = provider.meter("test_meter");
-    let metrics = TestMetrics::new(&meter);
-    (collector, metrics, provider)
+    record_initialization_metric(&safe_provider);
+    let post_shutdown_exported =
+        safe_collector.exported_metrics(1, Duration::from_millis(150)).await;
+    assert!(post_shutdown_exported.is_empty());
 }
 
 #[tokio::test]
@@ -404,10 +390,6 @@ fn test_metric_attribute_caching() {
         .iter()
         .any(|kv| kv.key.as_str() == "direction" && kv.value.as_str() == "request"));
 }
-
-// ------------------------------------------------------------------------------------------------
-//  ObservedStream Linked Pair Tests
-// ------------------------------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_observed_stream_pair_lifecycle() {
@@ -771,10 +753,6 @@ async fn test_observed_stream_memory_cap() {
     drop(response_wrapper);
 }
 
-// ------------------------------------------------------------------------------------------------
-//  ObservedProxyChannel Linked Pair Tests
-// ------------------------------------------------------------------------------------------------
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_observed_channel_lifecycle() {
     let (mut collector, metrics, provider) = setup_common_test().await;
@@ -894,4 +872,86 @@ async fn test_observed_channel_unknown_attributes_fallback() {
         size_json.contains("unknown"),
         "Metrics should be tagged with 'unknown' when initializer is dropped early"
     );
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct TestMessage {
+    id: String,
+    content: String,
+}
+
+impl prost::Message for TestMessage {
+    fn encode_raw(&self, _buf: &mut impl prost::bytes::BufMut) {}
+    fn merge_field(
+        &mut self,
+        _tag: u32,
+        _wire_type: prost::encoding::WireType,
+        _buf: &mut impl prost::bytes::Buf,
+        _ctx: prost::encoding::DecodeContext,
+    ) -> Result<(), prost::DecodeError> {
+        Ok(())
+    }
+    fn encoded_len(&self) -> usize {
+        self.content.len()
+    }
+    fn clear(&mut self) {}
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct TestResponse {
+    payload: String,
+}
+
+impl prost::Message for TestResponse {
+    fn encode_raw(&self, _buf: &mut impl prost::bytes::BufMut) {}
+    fn merge_field(
+        &mut self,
+        _tag: u32,
+        _wire_type: prost::encoding::WireType,
+        _buf: &mut impl prost::bytes::Buf,
+        _ctx: prost::encoding::DecodeContext,
+    ) -> Result<(), prost::DecodeError> {
+        Ok(())
+    }
+    fn encoded_len(&self) -> usize {
+        self.payload.len()
+    }
+    fn clear(&mut self) {}
+}
+
+impl From<&TestMessage> for MetricAttributes {
+    fn from(_req: &TestMessage) -> Self {
+        MetricAttributes::new("test.domain", "TestService", "TestMethod")
+    }
+}
+
+// Returns (Collector, Metrics, SafeProvider, UnsafeProvider)
+async fn setup_test() -> (FakeCollectorServer, PublicApiMetrics, SdkMeterProvider, SdkMeterProvider)
+{
+    let collector = FakeCollectorServer::start().await.expect("Failed to start fake collector");
+    // Point both safe and unsafe to the SAME fake collector for easier assertion
+    let providers = setup_otel_metrics(Some(collector.endpoint()), Some(collector.endpoint()))
+        .await
+        .expect("Failed to setup OTel metrics");
+
+    let safe_provider = providers.safe.expect("Safe provider missing");
+    let unsafe_provider = providers.unsafe_metrics.expect("Unsafe provider missing");
+
+    let safe_meter = safe_provider.meter("encrypted_zone.enforcer");
+    let unsafe_meter = unsafe_provider.meter("encrypted_zone.enforcer");
+
+    let metrics = PublicApiMetrics::from_meters(safe_meter, unsafe_meter);
+
+    (collector, metrics, safe_provider, unsafe_provider)
+}
+
+async fn setup_common_test() -> (FakeCollectorServer, TestMetrics, SdkMeterProvider) {
+    let collector = FakeCollectorServer::start().await.expect("Failed to start fake collector");
+    let providers = setup_otel_metrics(Some(collector.endpoint()), None)
+        .await
+        .expect("Failed to setup OTel metrics");
+    let provider = providers.safe.expect("Safe provider missing");
+    let meter = provider.meter("test_meter");
+    let metrics = TestMetrics::new(&meter);
+    (collector, metrics, provider)
 }

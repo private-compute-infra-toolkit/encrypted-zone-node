@@ -27,6 +27,9 @@ WRAPPER_SCRIPT="$GIT_ROOT/tools/commit_wrapper_hook/commit_wrapper.sh"
 # Call the wrapper script with the 'hook-impl' command and forward all arguments
 "$WRAPPER_SCRIPT" hook-impl "$@"
 
+# Normalize whitespace and collapse any duplicate blank lines.
+git stripspace < "$1" > "$1.tmp" && mv "$1.tmp" "$1"
+
 # Optionally, also execute devkit/gitlint on the prepared message file.
 GITLINT_SCRIPT="$GIT_ROOT/devkit/gitlint"
 if [ -f "$GITLINT_SCRIPT" ]; then

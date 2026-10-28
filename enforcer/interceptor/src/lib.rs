@@ -28,7 +28,7 @@ use tokio::sync::RwLock;
 #[derive(Clone, Debug)]
 pub struct Interceptor {
     // Map from Opaque Service that should be intercepted to the Intercepting Ratified Service
-    // TODO Consider removing the RwLock on this map by doing a mutable borrow.
+    // TODO(berwani) Consider removing the RwLock on this map by doing a mutable borrow.
     interceptor_info: Arc<RwLock<HashMap<IsolateServiceInfo, RatifiedInterceptorServiceInfo>>>,
     isolate_service_mapper: IsolateServiceMapper,
 }
@@ -245,7 +245,7 @@ impl Interceptor {
         } else if target_service_info.isolate_name.is_empty()
             && target_service_info.publisher_id.is_empty()
         {
-            // TODO: Remove this fallback logic once all services are updated to include
+            // TODO(b/439073817): Remove this fallback logic once all services are updated to include
             // isolate_name and publisher_id. For now we match on service_name and
             // operator_domain.
             interceptor_info_reader.iter().find_map(|(key, value)| {

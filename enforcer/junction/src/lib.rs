@@ -125,7 +125,7 @@ pub struct IsolateJunction {
 
 #[tonic::async_trait]
 impl Junction for IsolateJunction {
-    // TODO Support session stickiness for each client based on their preference
+    // TODO(b/361685809) Support session stickiness for each client based on their preference
     // (either at channel level or at request level)
     #[tracing::instrument(
         name = "Enforcer.IsolateJunction/InvokeIsolate",
@@ -176,7 +176,7 @@ impl Junction for IsolateJunction {
                 let Some(isolate_channel_pool_ref) =
                     self.isolate_channel_pool_map.get(&destination_isolate_id)
                 else {
-                    // TODO Retry connecting to the Isolate or remove it from DSM.
+                    // TODO(b/481854426) Retry connecting to the Isolate or remove it from DSM.
                     self.metrics.record_error(&metric_attr.base(), "invalid_destination_target");
                     log_destination_unavailable_error(invoke_isolate_request);
                     return Err(IsolateStatusCode::DestinationChannelClosed.to_ez_error());
@@ -207,7 +207,7 @@ impl Junction for IsolateJunction {
                     .record(isolate_rpc_start_time.elapsed().as_secs_f64(), &metric_attr.base());
                 let Ok(invoke_isolate_response) = invoke_isolate_result else {
                     self.metrics.record_error(&metric_attr.base(), "invoke_isolate_error");
-                    // TODO add retry send and reset
+                    // TODO(b/430986767) add retry send and reset
                     return Err(EzError::Status(invoke_isolate_result.unwrap_err()));
                 };
                 let mut invoke_isolate_response = invoke_isolate_response.into_inner();
@@ -223,7 +223,7 @@ impl Junction for IsolateJunction {
                 else {
                     self.metrics.record_error(&metric_attr.base(), "invalid_request");
                     log::info!("InvokeIsolateResponse missing required ControlPlaneMetadata");
-                    // TODO Redact error code if error is from Opaque Isolate having private data.
+                    // TODO(b/479985671) Redact error code if error is from Opaque Isolate having private data.
                     return Err(IsolateStatusCode::MissingControlPlaneMetadata.to_ez_error());
                 };
                 control_plane_metadata.ipc_message_id = original_msg_id;
@@ -317,7 +317,7 @@ impl Junction for IsolateJunction {
         isolate_id: IsolateId,
         isolate_address: String,
     ) -> anyhow::Result<()> {
-        // TODO Make the overall delay configurable
+        // TODO(b/373927034) Make the overall delay configurable
         let channel_pool = GrpcChannelPool::new(
             format!("unix:{}", isolate_address),
             DEFAULT_POOL_SIZE,
@@ -703,7 +703,7 @@ impl IsolateJunction {
                     let _ = junction_to_client_tx
                         .send(Err(IsolateStatusCode::DestinationChannelClosed.to_ez_error()))
                         .await;
-                    // TODO add retry send and reset
+                    // TODO(b/430986767) add retry send and reset
                     return Err(());
                 };
                 Ok(())
@@ -864,7 +864,7 @@ impl IsolateJunction {
         let is_missing_scope = resp.isolate_output_iscope.is_none();
         let has_data = resp.isolate_output.is_some() || !resp.response_extensions.is_empty();
 
-        // TODO: use the `current_scope` instead.
+        // TODO(b/532169578): use the `current_scope` instead.
         if is_missing_scope && has_data {
             return Err(DataScopeError::InvalidDataScopeType.to_ez_error());
         }

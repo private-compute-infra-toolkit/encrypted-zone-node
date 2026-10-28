@@ -69,6 +69,12 @@ repos:
         entry: devkit/gitlinks --check
         always_run: true
         pass_filenames: false
+      - id: dirmd
+        name: Validate DIR_METADATA and agentic_review
+        language: script
+        entry: tools/validate_dirmd.sh
+        always_run: true
+        pass_filenames: false
       - id: addlicense
         name: addlicense
         language: golang

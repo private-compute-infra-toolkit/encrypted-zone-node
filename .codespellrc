@@ -1,3 +1,3 @@
 [codespell]
-ignore-words-list = Affinitized,AtLeast,CopyIn,assertIn,aks,crate
+ignore-words-list = Affinitized,AtLeast,CopyIn,assertIn,aks,crate,Statics
 skip = src/roma/benchmark/test_code.h,src/roma/roma_service/function_binding_test.cc

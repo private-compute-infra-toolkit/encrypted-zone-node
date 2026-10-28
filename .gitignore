@@ -30,3 +30,6 @@ manual_testing/**
 bep/enforcer_enforcer_rootfs.tar/bep.json
 # Licenses output
 licenses_output/**
+# Python bytecode
+__pycache__/
+*.py[cod]

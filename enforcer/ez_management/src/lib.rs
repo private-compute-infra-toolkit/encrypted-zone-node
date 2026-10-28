@@ -24,13 +24,14 @@ use ez_management_proto::enforcer::v2::ez_management_service_client::EzManagemen
 use ez_management_proto::enforcer::v2::load_isolates_request::Request as LoadIsolatesRequestType;
 use ez_management_proto::enforcer::v2::load_isolates_response::Response as LoadIsolatesResponseType;
 use ez_management_proto::enforcer::v2::{
-    FetchOperatorInfoRequest, LoadIsolatesRequest, LoadIsolatesResponse, LoadIsolatesResult,
-    ReadyToLoadPackagesRequest,
+    FetchIsolateStartupParametersRequest, FetchOperatorInfoRequest, LoadIsolatesRequest,
+    LoadIsolatesResponse, LoadIsolatesResult, ReadyToLoadPackagesRequest,
 };
 pub use ez_management_proto::enforcer::v2::{LoadIsolatesError, OperatorInfo};
 use grpc_connector::GrpcChannelPool;
 use isolate_endorsement_proto::enforcer::v1::{ValidateIsolateEndorsementResponse, Validity};
 use isolate_info::{get_binary_services_index, BinaryServicesIndex};
+pub use isolate_startup_parameters_proto::enforcer::v2::IsolateStartupParameters;
 use manifest_parser::v2::WorkloadManifests;
 use package_utils::{AssembledPackage, PackageAccumulator};
 use setup_isolate_proto::enforcer::v2::{ExpectedClaims, ValidateIsolateEndorsementRequest};
@@ -47,6 +48,8 @@ const DEFAULT_REQUEST_CHANNEL_BUFFER_SIZE: usize = 512;
 const ENV_PACKAGE_OUTPUT_DIR: &str = "EZ_PACKAGE_OUTPUT_DIR";
 const DEFAULT_PACKAGE_OUTPUT_DIR: &str = "/tmp";
 const FETCH_OPERATOR_INFO_TIMEOUT: Duration = Duration::from_secs(10);
+const FETCH_ISOLATE_STARTUP_PARAMETERS_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_ISOLATE_COUNT: i32 = 64;
 
 /// Client for communicating with the EzManagementService.
 #[derive(Clone)]
@@ -140,6 +143,51 @@ impl EzManagementClient {
         Ok(operator_info)
     }
 
+    /// Fetches and validates the [`IsolateStartupParameters`] of every Isolate.
+    pub async fn fetch_isolate_startup_parameters(
+        &self,
+    ) -> Result<HashMap<IsolateType, IsolateStartupParameters>, EzManagementError> {
+        let mut client = self.client.clone();
+        let response = tokio::time::timeout(
+            FETCH_ISOLATE_STARTUP_PARAMETERS_TIMEOUT,
+            client.fetch_isolate_startup_parameters(FetchIsolateStartupParametersRequest {}),
+        )
+        .await
+        .map_err(|_| {
+            EzManagementError::FetchIsolateStartupParametersFailed(format!(
+                "timed out after {FETCH_ISOLATE_STARTUP_PARAMETERS_TIMEOUT:?}"
+            ))
+        })?
+        .map_err(|e| EzManagementError::FetchIsolateStartupParametersFailed(e.to_string()))?;
+        let mut startup_parameters = HashMap::new();
+        for parameters in response.into_inner().startup_parameters {
+            let identifier = parameters.identifier.as_ref().ok_or_else(|| {
+                EzManagementError::InvalidIsolateStartupParameters(format!(
+                    "missing identifier in startup parameters: {parameters:?}"
+                ))
+            })?;
+            if identifier.publisher_id.is_empty() || identifier.isolate_name.is_empty() {
+                return Err(EzManagementError::InvalidIsolateStartupParameters(format!(
+                    "identifier must have non-empty publisher_id and isolate_name: {identifier:?}"
+                )));
+            }
+            if parameters.number_of_isolates <= 0
+                || parameters.number_of_isolates > MAX_ISOLATE_COUNT
+            {
+                return Err(EzManagementError::InvalidIsolateStartupParameters(format!(
+                    "number_of_isolates must be between 1 and {MAX_ISOLATE_COUNT}: {parameters:?}"
+                )));
+            }
+            if let Some(prev) = startup_parameters.insert(identifier.clone(), parameters) {
+                return Err(EzManagementError::InvalidIsolateStartupParameters(format!(
+                    "duplicate entries for Isolate {:?}",
+                    prev.identifier
+                )));
+            }
+        }
+        Ok(startup_parameters)
+    }
+
     /// Loads manifests and streams isolate packages from EzManagementService, launching
     /// workloads with the [`ContainerManagerRequester`]. This should be done after the EZ Node
     /// has acquired its Identity using the setup_isolate.
@@ -148,7 +196,7 @@ impl EzManagementClient {
             mpsc::channel::<LoadIsolatesRequest>(DEFAULT_REQUEST_CHANNEL_BUFFER_SIZE);
         self.req_tx = Some(req_tx);
 
-        // TODO: Send ready signal only after setup_isolate is done with EZ Node identity.
+        // TODO(b/553281475): Send ready signal only after setup_isolate is done with EZ Node identity.
         self.send_ready_signal().await?;
         let response = self
             .client
@@ -249,6 +297,11 @@ impl EzManagementClient {
                             .to_string(),
                     ));
                 }
+                Some(LoadIsolatesResponseType::BundleManifest(_)) => {
+                    return Err(EzManagementError::UnexpectedMessage(
+                        "Received BundleManifest, which is not supported yet".to_string(),
+                    ));
+                }
                 None => {
                     return Err(EzManagementError::UnexpectedMessage(
                         "Received empty LoadIsolatesResponse".to_string(),
@@ -297,7 +350,8 @@ impl EzManagementClient {
                     return Ok(());
                 }
                 Some(LoadIsolatesResponseType::RatifiedIsolateManifest(_))
-                | Some(LoadIsolatesResponseType::OpaqueIsolateManifest(_)) => {
+                | Some(LoadIsolatesResponseType::OpaqueIsolateManifest(_))
+                | Some(LoadIsolatesResponseType::BundleManifest(_)) => {
                     // TODO: Support loading manifests/packages dynamically after startup in the future.
                     return Err(EzManagementError::UnexpectedMessage(
                         "Received unexpected manifest after initialization phase".to_string(),

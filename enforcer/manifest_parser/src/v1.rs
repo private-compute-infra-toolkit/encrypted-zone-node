@@ -69,24 +69,23 @@ fn flatten_manifest_helper(ez_manifest: EzManifest, output: &mut Vec<ParsedIsola
                 );
             }
             let kind = if manifest.is_ratified_isolate {
-                IsolateKind::Ratified {
-                    binary_filename: manifest.binary_filename,
-                    command_line_arguments: manifest.command_line_arguments,
-                    environment_variables: manifest.environment_variables,
-                    services_to_intercept: manifest.services_to_intercept,
-                }
+                IsolateKind::Ratified { services_to_intercept: manifest.services_to_intercept }
             } else {
-                IsolateKind::Opaque {
-                    binary_filename: manifest.binary_filename,
-                    command_line_arguments: manifest.command_line_arguments,
-                    environment_variables: manifest.environment_variables,
-                }
+                anyhow::ensure!(
+                    manifest.services_to_intercept.is_empty(),
+                    "services_to_intercept cannot be set for Opaque Isolate {}",
+                    ez_manifest.isolate_name
+                );
+                IsolateKind::Opaque
             };
             output.push(ParsedIsolate {
                 isolate_name: ez_manifest.isolate_name,
                 publisher_id: ez_manifest.publisher_id,
                 package_filename: ez_manifest.package_filename,
                 number_of_isolates: manifest.number_of_isolates,
+                binary_filename: manifest.binary_filename,
+                command_line_arguments: manifest.command_line_arguments,
+                environment_variables: manifest.environment_variables,
                 service_specs: manifest.service_specs,
                 ez_backend_dependencies: manifest.ez_backend_dependencies,
                 metrics_policy: manifest.metrics_policy,

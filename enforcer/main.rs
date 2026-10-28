@@ -43,6 +43,7 @@ use outbound_ez_to_ez_handler::OutboundEzToEzHandler;
 use public_api::EzPublicApiService;
 use shared_memory_manager::SharedMemManager;
 use state_manager::IsolateStateManager;
+use std::collections::HashMap;
 use std::env;
 use std::ffi::CStr;
 use std::fs::OpenOptions;
@@ -191,6 +192,16 @@ struct EnforcerInputs {
     )]
     ez_to_ez_max_concurrent_handshakes: usize,
 
+    // SPIFFE ID follows the SPIFFE SPEC https://spiffe.io/docs/latest/spiffe-specs/spiffe-id/#2-spiffe-identity
+    // Example: spiffe://prod.google.com.tca.staging.aws.pcit.goog/operator/prod.google.com/prober-staging/publisher/google.com/pcit-release-bot/workload/attestation-verification-service-prober-staging
+    #[allow(dead_code)]
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Allowlist of peer node SPIFFE IDs permitted for EZ-to-EZ mTLS communication."
+    )]
+    allowlisted_peer_node_spiffe_id: Vec<String>,
+
     #[arg(
         long,
         default_value_t = false,
@@ -221,7 +232,7 @@ struct EnforcerInputs {
         help = "Payload threshold (bytes), below which messages will be sent via standard gRPC instead of SHM"
     )]
     shm_payload_threshold: u64,
-    // TODO: Remove this argument once it's completely deprecated.
+    // TODO(b/473069123): Remove this argument once it's completely deprecated.
     #[arg(
         long,
         default_value = "",
@@ -234,7 +245,7 @@ struct EnforcerInputs {
         help = "Enable parsing EZ Manifest v2 schemas. Note: This argument will be deprecated in the future when v2 manifests become the default."
     )]
     pub use_manifest_v2: bool,
-    #[arg(long, help = "Path to setup isolate manifest JSON file (v2)")]
+    #[arg(long, help = "Path to the Setup Isolate's BinaryManifest JSON file (v2)")]
     pub setup_isolate_manifest_path: Option<String>,
     #[arg(
         long,
@@ -256,7 +267,7 @@ fn main() -> anyhow::Result<()> {
         let enforcer_inputs = EnforcerInputs::parse();
         logger::setup_logging()?;
 
-        // TODO: This flag affects both Opaque and Ratified Isolates today.
+        // TODO(b/542198933): This flag affects both Opaque and Ratified Isolates today.
         // In the future, it may be applied to just Opaque Isolates.
         if enforcer_inputs.enable_syscall_filtering {
             container_custom::seccomp::pre_initialize_default_profile();
@@ -277,9 +288,31 @@ fn main() -> anyhow::Result<()> {
         #[cfg(feature = "debug")]
         let console_subscriber_port = enforcer_inputs.console_subscriber_port;
 
+        // Distributed traces are not mediated by the enforcer the way metrics
+        // are: isolates export OTLP spans straight to a launcher-owned
+        // collector that lives outside the attested boundary, and several span
+        // attributes can carry request-scoped data. Until an enforcer-side
+        // trace receiver with a per-isolate trace policy exists, production
+        // optimized builds ignore the endpoint entirely, so no span can leave
+        // the node regardless of how the launcher is configured. Debug builds
+        // keep tracing available for development.
+        #[cfg(not(feature = "debug"))]
+        let otel_traces_endpoint: Option<String> = {
+            if enforcer_inputs.otel_traces_endpoint.is_some() {
+                log::warn!(
+                    "--otel-traces-endpoint is ignored in production optimized builds. Tracing \
+                     remains disabled and no traces socket is mounted into isolates."
+                );
+            }
+            None
+        };
+
+        #[cfg(feature = "debug")]
+        let otel_traces_endpoint = enforcer_inputs.otel_traces_endpoint.clone();
+
         let _otel_traces = traces::setup_telemetry(
             traces::ENFORCER_SERVICE_NAME,
-            &enforcer_inputs.otel_traces_endpoint,
+            &otel_traces_endpoint,
             &console_subscriber_port,
             enforcer_inputs.sampler_probability,
         )
@@ -389,7 +422,7 @@ fn main() -> anyhow::Result<()> {
                     OutboundEzToEzHandler::new(
                         ez_to_ez_outbound_address,
                         metrics::ez_to_ez_outbound::EzToEzOutboundMetrics::default(),
-                        // TODO: remove this default once TLS cert loading is moved to
+                        // TODO(535256367): remove this default once TLS cert loading is moved to
                         // setup_isolate.
                         /* tls_config= */ None,
                         /* expect_tls_config= */ enforcer_inputs.enable_mtls,
@@ -487,6 +520,10 @@ fn main() -> anyhow::Result<()> {
             Some(node_bootstrap) => node_bootstrap.fetch_operator_info().await?.operator_role,
             None => enforcer_inputs.operator_role.clone(),
         };
+        let isolate_startup_parameters = match &node_bootstrap {
+            Some(node_bootstrap) => node_bootstrap.fetch_isolate_startup_parameters().await?,
+            None => HashMap::new(),
+        };
 
         let container_manager_args = ContainerManagerArgs {
             isolate_junction: Box::new(isolate_junction.clone()),
@@ -505,13 +542,14 @@ fn main() -> anyhow::Result<()> {
             )
             .context("failed to parse isolate config configs")?,
             interceptor,
-            otel_traces_endpoint: enforcer_inputs.otel_traces_endpoint.clone(),
+            otel_traces_endpoint: otel_traces_endpoint.clone(),
             run_isolate_as_unprivileged: enforcer_inputs.run_isolate_as_unprivileged,
             enable_syscall_filtering: enforcer_inputs.enable_syscall_filtering,
             shm_num_slots: enforcer_inputs.shm_num_slots,
             shm_slot_size: enforcer_inputs.shm_slot_size,
             shm_payload_threshold: enforcer_inputs.shm_payload_threshold,
             operator_role,
+            isolate_startup_parameters,
         };
 
         let mut container_manager =

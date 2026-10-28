@@ -21,23 +21,11 @@ pub(crate) mod parser_util;
 pub mod v1;
 pub mod v2;
 
-/// Type-specific arguments for an isolate.
+/// Kind-specific settings of an isolate.
 #[derive(Clone, Debug, PartialEq)]
 pub enum IsolateKind {
-    Ratified {
-        binary_filename: String,
-        command_line_arguments: Vec<String>,
-        environment_variables: Vec<String>,
-        services_to_intercept: Vec<InterceptingServices>,
-    },
-    Opaque {
-        binary_filename: String,
-        // The following fields are temporary for v1 manifest compatibility.
-        // In v2, command-line arguments and environment variables for opaque isolates
-        // are externalized out of the manifest into IsolateRuntimeConfig.
-        command_line_arguments: Vec<String>,
-        environment_variables: Vec<String>,
-    },
+    Ratified { services_to_intercept: Vec<InterceptingServices> },
+    Opaque,
 }
 
 /// A parsed isolate containing its identity, startup configuration, and security specifications.
@@ -47,6 +35,13 @@ pub struct ParsedIsolate {
     pub publisher_id: String,
     pub package_filename: String,
     pub number_of_isolates: i32,
+    pub binary_filename: String,
+    // Manifest V1: parsed from the EzManifest.
+    // Manifest V2: the manifest has no such fields, so the parser leaves these empty and
+    // ContainerManager fills them for Opaque Isolates from the IsolateStartupParameters fetched
+    // from EzManagementService.
+    pub command_line_arguments: Vec<String>,
+    pub environment_variables: Vec<String>,
     pub service_specs: Vec<EzServiceSpec>,
     pub ez_backend_dependencies: Vec<EzBackendDependency>,
     pub metrics_policy: Option<IsolateMetricsPolicy>,
@@ -54,35 +49,14 @@ pub struct ParsedIsolate {
 }
 
 impl ParsedIsolate {
-    pub fn binary_filename(&self) -> &str {
-        match &self.kind {
-            IsolateKind::Ratified { binary_filename, .. }
-            | IsolateKind::Opaque { binary_filename, .. } => binary_filename,
-        }
-    }
-
     pub fn is_ratified(&self) -> bool {
         matches!(&self.kind, IsolateKind::Ratified { .. })
     }
 
-    pub fn command_line_arguments(&self) -> &[String] {
-        match &self.kind {
-            IsolateKind::Ratified { command_line_arguments, .. }
-            | IsolateKind::Opaque { command_line_arguments, .. } => command_line_arguments,
-        }
-    }
-
-    pub fn environment_variables(&self) -> &[String] {
-        match &self.kind {
-            IsolateKind::Ratified { environment_variables, .. }
-            | IsolateKind::Opaque { environment_variables, .. } => environment_variables,
-        }
-    }
-
     pub fn services_to_intercept(&self) -> &[InterceptingServices] {
         match &self.kind {
-            IsolateKind::Ratified { services_to_intercept, .. } => services_to_intercept,
-            IsolateKind::Opaque { .. } => &[],
+            IsolateKind::Ratified { services_to_intercept } => services_to_intercept,
+            IsolateKind::Opaque => &[],
         }
     }
 }

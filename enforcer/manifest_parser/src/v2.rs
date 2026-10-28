@@ -13,17 +13,17 @@
 // limitations under the License.
 
 use anyhow::{ensure, Context, Result};
+use binary_manifest_proto::enforcer::v2::{binary_manifest, BinaryManifest};
 use opaque_isolate_manifest_proto::enforcer::v2::OpaqueIsolateManifest;
 use prost_reflect::DescriptorPool;
 use ratified_isolate_manifest_proto::enforcer::v2::RatifiedIsolateManifest;
-use setup_isolate_manifest_proto::enforcer::v2::SetupIsolateManifest;
 use std::fs::read_to_string;
 use std::path::Path;
 use std::sync::OnceLock;
 
 use super::parser_util::{
     convert_opaque_descriptor_to_parsed_isolate, convert_ratified_descriptor_to_parsed_isolate,
-    convert_setup_descriptor_to_parsed_isolate, parse_proto_message,
+    parse_proto_message,
 };
 use super::ParsedIsolate;
 
@@ -38,10 +38,10 @@ fn get_v2_descriptor_pool() -> &'static DescriptorPool {
     })
 }
 
-/// Container for a setup isolate manifest (v2 schema).
+/// Container for the Setup Isolate's BinaryManifest (v2 schema).
 #[derive(Clone, Debug, PartialEq)]
 pub struct SetupManifest {
-    pub setup_isolate_manifest: SetupIsolateManifest,
+    pub binary_manifest: BinaryManifest,
 }
 
 /// Container for workload isolate manifests (ratified and opaque isolates, v2 schema).
@@ -66,31 +66,34 @@ impl IsolateIdentity {
 
 impl SetupManifest {
     /// Creates a new [`SetupManifest`] from an in-memory manifest proto.
-    pub fn new(setup_isolate_manifest: SetupIsolateManifest) -> Self {
-        Self { setup_isolate_manifest }
+    pub fn new(binary_manifest: BinaryManifest) -> Self {
+        Self { binary_manifest }
     }
 
-    /// Loads and parses the setup isolate manifest from a JSON file path.
+    /// Loads and parses the Setup Isolate's BinaryManifest from a JSON file path.
     pub fn load_from_path(setup_path: impl AsRef<Path>) -> Result<Self> {
-        let setup_isolate_manifest = parse_setup_isolate_manifest(setup_path)?;
-        Ok(Self::new(setup_isolate_manifest))
+        Ok(Self::new(load_binary_manifest(setup_path)?))
     }
 
-    /// Converts the setup isolate manifest into a [`ParsedIsolate`].
+    /// Converts the Setup Isolate's BinaryManifest into a [`ParsedIsolate`].
     pub fn into_parsed_isolate(self) -> Result<ParsedIsolate> {
-        convert_setup_descriptor_to_parsed_isolate(
-            self.setup_isolate_manifest.setup_isolate_descriptor.unwrap_or_default(),
-        )
+        ensure!(
+            matches!(
+                self.binary_manifest.isolate_kind,
+                Some(binary_manifest::IsolateKind::Setup(_))
+            ),
+            "Setup isolate manifest must set isolate_kind to setup"
+        );
+        ParsedIsolate::try_from(self.binary_manifest)
     }
 
-    /// Extracts [`IsolateIdentity`] for the setup isolate descriptor.
+    /// Extracts [`IsolateIdentity`] for the Setup Isolate.
     pub fn extract_sni_params(&self) -> IsolateIdentity {
-        self.setup_isolate_manifest
-            .setup_isolate_descriptor
+        self.binary_manifest
+            .isolate_type
             .as_ref()
-            .and_then(|d| d.isolate_type.as_ref())
             .map(|it| IsolateIdentity::new(it.isolate_name.clone(), it.publisher_id.clone()))
-            .expect("setup_isolate_descriptor and isolate_type must be present in SetupManifest")
+            .expect("isolate_type must be present in SetupManifest")
     }
 }
 
@@ -139,24 +142,18 @@ impl WorkloadManifests {
     }
 }
 
-/// Parses a setup isolate manifest from a JSON file path.
-pub fn parse_setup_isolate_manifest(
-    manifest_path: impl AsRef<Path>,
-) -> Result<SetupIsolateManifest> {
+/// Parses a [`BinaryManifest`] from its JSON encoding.
+pub fn parse_binary_manifest(json_string: &str) -> Result<BinaryManifest> {
+    parse_proto_message(get_v2_descriptor_pool(), "enforcer.v2.BinaryManifest", json_string)
+}
+
+/// Loads and parses a [`BinaryManifest`] from a JSON file path.
+pub fn load_binary_manifest(manifest_path: impl AsRef<Path>) -> Result<BinaryManifest> {
     let path = manifest_path.as_ref();
     let json_string = read_to_string(path).with_context(|| {
-        format!("couldn't open setup manifest Json file at: {}", path.display())
+        format!("couldn't open BinaryManifest Json file at: {}", path.display())
     })?;
-    let manifest: SetupIsolateManifest = parse_proto_message(
-        get_v2_descriptor_pool(),
-        "enforcer.v2.SetupIsolateManifest",
-        &json_string,
-    )?;
-    ensure!(
-        manifest.setup_isolate_descriptor.is_some(),
-        "Setup isolate manifest must contain a setup_isolate_descriptor"
-    );
-    Ok(manifest)
+    parse_binary_manifest(&json_string)
 }
 
 /// Parses a ratified isolate manifest from a JSON file path.

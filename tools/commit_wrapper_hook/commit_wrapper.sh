@@ -41,9 +41,10 @@ install_hook() {
 wrap_commit_message() {
   COMMIT_MSG_FILE="$1"
 
-  # Read the first line (subject) and the rest of the message from the file.
+  # Read the first line (subject) and the rest of the message from the file,
+  # stripping leading blank lines so repeated runs do not accumulate newlines.
   first_line=$(head -n 1 "${COMMIT_MSG_FILE}")
-  rest_of_message=$(tail -n +2 "${COMMIT_MSG_FILE}")
+  rest_of_message=$(tail -n +2 "${COMMIT_MSG_FILE}" | sed '/./,$!d')
 
   # Check if the first line (subject) exceeds 50 characters.
   if [[ ${#first_line} -gt "${SUBJECT_CHAR_LIMIT}" ]]; then
@@ -94,12 +95,7 @@ wrap_commit_message() {
 
     # Append the footers without wrapping them.
     if [[ -n "${footers_to_keep}" ]]; then
-      # Add a newline before the footers to separate them from the body,
-      # but only if a body was present.
-      if [[ -n "${body_to_wrap}" ]]; then
-        printf "\n" >>"${COMMIT_MSG_FILE}.tmp"
-      fi
-      printf "%s\n" "${footers_to_keep}" >>"${COMMIT_MSG_FILE}.tmp"
+      printf "\n%s\n" "${footers_to_keep}" >>"${COMMIT_MSG_FILE}.tmp"
     fi
   fi
 

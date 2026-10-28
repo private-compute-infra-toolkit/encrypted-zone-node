@@ -27,7 +27,7 @@ use external_proxy_proto::enforcer::v1::{
 use grpc_connector::GrpcChannelPool;
 use isolate_info::{BinaryServicesIndex, IsolateId};
 use payload_proto::enforcer::v1::{
-    ez_hybrid_payload::DeliveryMethod, EzHybridPayload, EzPayloadData,
+    ez_hybrid_payload::DeliveryMethod, EzHybridPayload, EzPayloadData, ShmSlotData,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -136,6 +136,42 @@ impl EzExternalProxyService for FaultyProxyService {
         _request: tonic::Request<tonic::Streaming<EzExternalProxyRequest>>,
     ) -> Result<tonic::Response<Self::StreamCallStream>, tonic::Status> {
         Err(tonic::Status::internal("Stream Failure!"))
+    }
+}
+
+#[derive(Default)]
+struct MidStreamErrorProxyService;
+
+#[tonic::async_trait]
+impl EzExternalProxyService for MidStreamErrorProxyService {
+    type StreamCallStream = ReceiverStream<Result<EzExternalProxyResponse, tonic::Status>>;
+
+    async fn unary_call(
+        &self,
+        _request: tonic::Request<EzExternalProxyRequest>,
+    ) -> Result<tonic::Response<EzExternalProxyResponse>, tonic::Status> {
+        Err(tonic::Status::unavailable("unused"))
+    }
+
+    async fn stream_call(
+        &self,
+        request: tonic::Request<tonic::Streaming<EzExternalProxyRequest>>,
+    ) -> Result<tonic::Response<Self::StreamCallStream>, tonic::Status> {
+        let mut stream = request.into_inner();
+        let (tx, rx) = mpsc::channel(4);
+        tokio::spawn(async move {
+            if let Some(Ok(req)) = stream.message().await.transpose() {
+                let _ = tx
+                    .send(Ok(EzExternalProxyResponse {
+                        external_response_payload: req.external_request_payload,
+                        response_metadata: HashMap::new(),
+                        response_extensions: req.request_extensions,
+                    }))
+                    .await;
+                let _ = tx.send(Err(tonic::Status::unavailable("mid-stream disconnect"))).await;
+            }
+        });
+        Ok(tonic::Response::new(ReceiverStream::new(rx)))
     }
 }
 
@@ -262,7 +298,7 @@ async fn test_connect_retries_and_succeeds() {
     let uds_path = temp_dir.path().join("test-retry-proxy.sock");
     let connector_path = format!("unix:{}", uds_path.to_str().unwrap());
 
-    let connect_future = GrpcChannelPool::new(connector_path, 30, 1, 1000, 2);
+    let connect_future = GrpcChannelPool::new(connector_path, 1, 30, 1000, 2);
 
     tokio::time::sleep(Duration::from_millis(1500)).await;
     let (tx, rx) = oneshot::channel();
@@ -932,4 +968,109 @@ async fn stream_returns_transformed_metadata_in_response() {
     assert!(response_metadata.destination_service_name.is_empty());
 
     let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn test_external_proxy_rejects_shared_memory_payload() {
+    let isolate_id = IsolateId::new(BinaryServicesIndex::new(true));
+    let mock_proxy = MockProxyService::default();
+    let proxy_calls = mock_proxy.call_count.clone();
+    let (server_address, shutdown_tx, _temp_dir) = setup_uds_server(mock_proxy).await;
+    let connector = build_test_connector(server_address).await.unwrap();
+    let mut shm_request = create_generic_test_request(vec![]);
+    shm_request.isolate_request_payload = Some(EzHybridPayload {
+        delivery_method: Some(DeliveryMethod::ShmData(ShmSlotData::default())),
+    });
+    let translate_err = translate_to_proxy_request(shm_request.clone())
+        .expect_err("shared-memory payload must fail external translation");
+    assert!(translate_err.to_string().contains("Can't use shared-memory for external comms."));
+    let unary_err = connector
+        .proxy_external(isolate_id, shm_request.clone(), None)
+        .await
+        .expect_err("unary external proxy must reject SHM payload");
+    assert!(unary_err.to_string().contains("Can't use shared-memory for external comms."));
+    let (req_tx, req_rx) = mpsc::channel(1);
+    req_tx.send(shm_request).await.unwrap();
+    drop(req_tx);
+    let mut response_receiver =
+        connector.stream_proxy_external(isolate_id, req_rx, None).await.unwrap();
+    let stream_status = tokio::time::timeout(Duration::from_secs(5), response_receiver.recv())
+        .await
+        .expect("stream rejection should arrive within timeout")
+        .expect("stream should emit error status")
+        .expect_err("expected InvalidArgument status for SHM payload");
+    assert_eq!(stream_status.code(), tonic::Code::InvalidArgument);
+    assert!(stream_status.message().contains("Can't use shared-memory for external comms."));
+    assert_eq!(proxy_calls.load(Ordering::SeqCst), 0);
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn test_stream_proxy_external_fails_on_missing_metadata() {
+    let isolate_id = IsolateId::new(BinaryServicesIndex::new(true));
+    let mock_proxy = MockProxyService::default();
+    let proxy_calls = mock_proxy.call_count.clone();
+    let (server_address, shutdown_tx, _temp_dir) = setup_uds_server(mock_proxy).await;
+    let connector = build_test_connector(server_address).await.unwrap();
+    let (req_tx, req_rx) = mpsc::channel(1);
+    let mut missing_meta_req = create_generic_test_request(vec![vec![1, 2, 3]]);
+    missing_meta_req.control_plane_metadata = None;
+    req_tx.send(missing_meta_req).await.unwrap();
+    drop(req_tx);
+    let mut response_receiver =
+        connector.stream_proxy_external(isolate_id, req_rx, None).await.unwrap();
+    let status = tokio::time::timeout(Duration::from_secs(5), response_receiver.recv())
+        .await
+        .expect("missing metadata error should arrive within timeout")
+        .expect("should receive error item")
+        .expect_err("expected InvalidArgument status");
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(status
+        .message()
+        .contains("SDK is always expected to populate control_plane_metadata, but it was None"));
+    assert_eq!(proxy_calls.load(Ordering::SeqCst), 0);
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn test_stream_proxy_external_propagates_initial_and_midstream_errors() {
+    let isolate_id = IsolateId::new(BinaryServicesIndex::new(true));
+    // 1. Initial stream establishment failure from FaultyProxyService.
+    let (faulty_addr, faulty_shutdown_tx, _faulty_dir) = setup_uds_server(FaultyProxyService).await;
+    let faulty_connector = build_test_connector(faulty_addr).await.unwrap();
+    let (tx1, rx1) = mpsc::channel(1);
+    tx1.send(create_generic_test_request(vec![vec![9, 9]])).await.unwrap();
+    drop(tx1);
+    let mut faulty_rx =
+        faulty_connector.stream_proxy_external(isolate_id, rx1, None).await.unwrap();
+    let init_err = tokio::time::timeout(Duration::from_secs(5), faulty_rx.recv())
+        .await
+        .expect("initial stream error should arrive within timeout")
+        .expect("should receive initial error item")
+        .expect_err("expected Internal status");
+    assert_eq!(init_err.code(), tonic::Code::Internal);
+    assert!(init_err.message().contains("Stream Failure!"));
+    let _ = faulty_shutdown_tx.send(());
+    // 2. Mid-stream error after a valid echoed response.
+    let (mid_addr, mid_shutdown_tx, _mid_dir) = setup_uds_server(MidStreamErrorProxyService).await;
+    let mid_connector = build_test_connector(mid_addr).await.unwrap();
+    let (tx2, rx2) = mpsc::channel(2);
+    let req = create_generic_test_request(vec![vec![4, 5, 6]]);
+    tx2.send(req.clone()).await.unwrap();
+    let mut mid_rx = mid_connector.stream_proxy_external(isolate_id, rx2, None).await.unwrap();
+    let first_ok = tokio::time::timeout(Duration::from_secs(5), mid_rx.recv())
+        .await
+        .expect("first response should arrive within timeout")
+        .expect("should receive first response")
+        .expect("first response should be Ok");
+    assert_eq!(first_ok.ez_response_payload, req.isolate_request_payload);
+    let mid_err = tokio::time::timeout(Duration::from_secs(5), mid_rx.recv())
+        .await
+        .expect("mid-stream error should arrive within timeout")
+        .expect("should receive mid-stream error item")
+        .expect_err("expected Unavailable status");
+    assert_eq!(mid_err.code(), tonic::Code::Unavailable);
+    assert!(mid_err.message().contains("mid-stream disconnect"));
+    drop(tx2);
+    let _ = mid_shutdown_tx.send(());
 }

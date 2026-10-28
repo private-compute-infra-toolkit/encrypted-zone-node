@@ -22,7 +22,7 @@ use tokio::sync::RwLock;
 
 /// Mapper which maps [IsolateServiceInfo] to [IsolateServiceIndex]. Clients are
 /// encouraged to clone [IsolateServiceMapper].
-/// TODO: move all to ConcurrentMap
+/// TODO(b/443747091): move all to ConcurrentMap
 #[derive(Debug, Default, Clone)]
 pub struct IsolateServiceMapper {
     isolate_service_info_index: Arc<RwLock<HashMap<IsolateServiceInfo, IsolateServiceIndex>>>,
@@ -75,7 +75,7 @@ impl IsolateServiceMapper {
         index: &HashMap<IsolateServiceInfo, IsolateServiceIndex>,
         isolate_service_info: &IsolateServiceInfo,
     ) -> Option<IsolateServiceIndex> {
-        // TODO: Remove this fallback logic once all services are updated to include
+        // TODO(b/439073817): Remove this fallback logic once all services are updated to include
         // isolate_name and publisher_id. For now we match on service_name and
         // operator_domain.
         if isolate_service_info.isolate_name.is_empty()
@@ -88,7 +88,7 @@ impl IsolateServiceMapper {
                     return Some(*idx);
                 }
             }
-            // TODO: Populate and validate operator_domain on inbound EzToEzApi.
+            // TODO(b/573055689): Populate and validate operator_domain on inbound EzToEzApi.
             if !isolate_service_info.service_name.is_empty()
                 && isolate_service_info.operator_domain.is_empty()
             {

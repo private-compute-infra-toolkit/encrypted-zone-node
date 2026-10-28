@@ -37,6 +37,8 @@ pub const ENV_PROXY_CONNECT_RETRY_DELAY_MS: &str = "PROXY_CONNECT_RETRY_DELAY_MS
 pub const ENV_PROXY_CONNECT_RETRY_COUNT: &str = "PROXY_CONNECT_RETRY_COUNT";
 pub const ENV_PROXY_CONNECT_RETRY_SCALING: &str = "PROXY_CONNECT_RETRY_SCALING";
 
+const TLS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Holds a pool of tonic::Channels to a gRPC server.
 /// Provides an interface for round-robin selection of channels.
 #[derive(Clone, Debug)]
@@ -195,8 +197,9 @@ async fn connect_tls(
 ) -> Result<Channel> {
     log::info!("Attempting to connect to gRPC service (TLS) at {}...", address);
 
-    let retry_strategy = ExponentialBackoff::from_millis(initial_delay_ms)
-        .factor(retry_multiplier)
+    // TokioRetry's ExponentialBackoff arguments swap the from and factor usage.
+    let retry_strategy = ExponentialBackoff::from_millis(retry_multiplier)
+        .factor(initial_delay_ms)
         .take(retry_count);
 
     let channel = if let Some(path) = address.strip_prefix("unix:") {
@@ -219,7 +222,7 @@ fn create_uds_endpoint(header_list_size: u32, is_proxied_tunnel: bool) -> Result
         // determined by the datacenter network and proxy hops. Hyper's adaptive BDP algorithm
         // misbehaves over this hybrid UDS-RPC tunnel. We disable adaptive windowing and set
         // a larger static initial window to prevent sender-side flow control starvation.
-        // TODO: Allow overriding window sizes via environment variables if needed.
+        // TODO(b/556385356): Allow overriding window sizes via environment variables if needed.
         builder = builder
             .http2_adaptive_window(false)
             .initial_stream_window_size(INITIAL_STREAM_WINDOW_SIZE)
@@ -276,12 +279,36 @@ async fn connect_uds_tls(
         let ssl_connector = ssl_connector.clone();
         let sni = sni.clone();
         async move {
-            let origin_uri = Uri::try_from(format!("http://{sni}"))
-                .with_context(|| format!("Invalid SNI for HTTP/2 authority: {sni}"))?;
             // The endpoint URI is unused because we use a custom connector.
             // However, it still expects a valid HTTP URI.
-            create_uds_endpoint(DEFAULT_MAX_HEADER_LIST_SIZE, /*is_proxied_tunnel=*/ true)?
-                .origin(origin_uri)
+            let endpoint = create_uds_endpoint(
+                DEFAULT_MAX_HEADER_LIST_SIZE,
+                /*is_proxied_tunnel=*/ true,
+            )?;
+            // When the SNI is a standard domain or service name, set it as the HTTP/2 authority
+            // (e.g. for application-level authorization or virtual host routing).
+            //
+            // For cross-replica and peer worker communication, the SNI may be prefixed with a
+            // physical instance or cluster path that contains slashes or colons. Because these
+            // cannot be parsed as valid HTTP/2 URI authorities, we fall back to the default origin.
+            // The full SNI is still conveyed to the transport proxy in the TLS ClientHello via
+            // `ssl.set_hostname(&sni)` below.
+            //
+            // Note: Instance-prefixed SNIs that fall back to the default origin do not propagate
+            // an HTTP/2 :authority header and are not compatible with upstream authorization
+            // schemes that rely on :authority verification.
+            let endpoint = match Uri::try_from(format!("http://{sni}")) {
+                Ok(origin_uri) => endpoint.origin(origin_uri),
+                Err(e) => {
+                    log::warn!(
+                        "SNI {:?} cannot be parsed into HTTP/2 origin URI ({:?}), using default origin",
+                        sni,
+                        e
+                    );
+                    endpoint
+                }
+            };
+            endpoint
                 .connect_with_connector(service_fn(move |_uri: Uri| {
                     let socket_path = socket_path.clone();
                     let ssl_connector = ssl_connector.clone();
@@ -291,16 +318,26 @@ async fn connect_uds_tls(
                         // SNI carries the peer isolate information and not used for hostname verification.
                         // Disabling verify_hostname because SNI will not match the certificate.
                         // ssl_connector.config() is a single-use object and should be called per connection.
-                        let tls_stream = tokio_boring::connect(
+                        let tls_future = tokio_boring::connect(
                             ssl_connector
                                 .configure()
                                 .map_err(std::io::Error::other)?
                                 .verify_hostname(false),
                             &sni,
                             stream,
-                        )
-                        .await
-                        .map_err(std::io::Error::other)?;
+                        );
+                        let tls_stream = tokio::time::timeout(TLS_CONNECT_TIMEOUT, tls_future)
+                            .await
+                            .map_err(|_| {
+                                std::io::Error::new(
+                                    std::io::ErrorKind::TimedOut,
+                                    format!(
+                                        "tokio_boring::connect timed out after {:?}",
+                                        TLS_CONNECT_TIMEOUT
+                                    ),
+                                )
+                            })?
+                            .map_err(std::io::Error::other)?;
                         Ok::<_, std::io::Error>(TokioIo::new(tls_stream))
                     }
                 }))

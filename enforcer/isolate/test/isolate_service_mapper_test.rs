@@ -341,7 +341,7 @@ async fn test_get_service_index_with_new_qualifiers_and_fallback() {
     };
     assert!(isolate_service_mapper.get_service_index(&mismatch_info).await.is_none());
 
-    // TODO: Remove this behavior once SDK is fully updated.
+    // TODO(b/439073817): Remove this behavior once SDK is fully updated.
     // Query with empty isolate_name and publisher_id should trigger fallback and succeed
     let fallback_query = IsolateServiceInfo {
         operator_domain: TEST_OPERATOR_DOMAIN.to_string(),

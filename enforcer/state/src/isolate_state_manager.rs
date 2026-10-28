@@ -47,7 +47,7 @@ pub struct IsolateStateManager {
     ready_notifier: Arc<broadcast::Sender<BinaryServicesIndex>>,
     ready_binary_services_map: Arc<DashMap<BinaryServicesIndex, HashSet<IsolateId>>>,
     isolates_registered: Arc<AtomicBool>,
-    // TODO: Add another map here to store the Isolates that are in MULTI-USER scope.
+    // TODO(marcuscheung): Add another map here to store the Isolates that are in MULTI-USER scope.
 }
 
 #[derive(Copy, Clone, Debug, Error, PartialEq, Eq)]

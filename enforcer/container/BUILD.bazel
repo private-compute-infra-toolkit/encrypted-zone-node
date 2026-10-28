@@ -69,9 +69,52 @@ rust_library(
 )
 
 rust_test(
+    name = "utils_test",
+    size = "small",
+    srcs = [
+        "test/llvm_profile.rs",
+        "test/utils_test.rs",
+    ],
+    # Serialize tests to avoid leaking open write file descriptors across concurrent fork calls.
+    args = ["--test-threads=1"],
+    tags = ["require_privileged"],
+    deps = [
+        ":utils",
+        "@crates//:interfaces",
+        "@crates//:libc",
+        "@crates//:log",
+        "@crates//:nix",
+        "@crates//:tar",
+        "@crates//:tempfile",
+    ],
+)
+
+rust_test(
+    name = "seccomp_test",
+    size = "small",
+    srcs = [
+        "test/llvm_profile.rs",
+        "test/seccomp_test.rs",
+    ],
+    args = ["--test-threads=1"],
+    deps = [
+        ":container",
+        ":container_custom",
+        "@crates//:libc",
+        "@crates//:log",
+        "@crates//:nix",
+    ],
+)
+
+rust_test(
     name = "container_custom_test",
     size = "small",
-    srcs = ["test/container_custom_test.rs"],
+    srcs = [
+        "test/container_custom_test.rs",
+        "test/llvm_profile.rs",
+    ],
+    # Serialize tests to avoid leaking open write file descriptors across concurrent fork calls.
+    args = ["--test-threads=1"],
     data = ["//enforcer/container/test_data:test_bundle"],
     tags = ["require_privileged"],
     deps = [
@@ -80,7 +123,7 @@ rust_test(
         ":utils",
         "@crates//:anyhow",
         "@crates//:libc",
-        "@crates//:nix",
+        "@crates//:log",
         "@crates//:tempfile",
         "@crates//:tokio",
     ],
@@ -100,5 +143,17 @@ rust_library(
         "@crates//:rand",
         "@crates//:tokio",
         "@crates//:tonic",
+    ],
+)
+
+rust_test(
+    name = "container_test_utils_test",
+    size = "small",
+    srcs = ["test/test_utils_test.rs"],
+    deps = [
+        ":container",
+        ":container_test_utils",
+        "@crates//:tempfile",
+        "@crates//:tokio",
     ],
 )

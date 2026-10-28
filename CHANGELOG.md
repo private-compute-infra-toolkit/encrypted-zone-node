@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## 0.29.0 (2026-10-28)
+
+
+### EZ Policy Enforcer
+
+* **enforcer:** Add BinaryManifest protos for Manifest v2
+* **enforcer:** Fetch isolate startup parameters in Manifest v2
+* **enforcer:** Fix ExponentialBackoff arguments in connect_tls
+* **enforcer:** Ignore --otel-traces-endpoint in production builds
+* **enforcer:** Mount the traces UDS only for Ratified Isolates
+* **enforcer:** Parse BinaryManifest and boot Setup Isolate from it
+* **enforcer:** sanitize publisher_id prefix for /dev/shm tempdir
+
+
+### Gemini
+
+* **gemini:** add coding and review rules to GEMINI.md
+* **gemini:** Add review skills for microbenchmarks, perfgate, and kokoro
+* **gemini:** Migrate idiomatic Rust guidance and review skill
+
+
+### mTLS
+
+* **mtls:** Add 10s timeout around tokio_boring::connect in UDS TLS
+* **mtls:** add allowlisted_peer_node_spiffe_id CLI flag
+* **mtls:** Fall back to default origin URI for BNS SNI in UDS TLS
+
+
+### Bug Fixes
+
+* **grpc_connector:** set HTTP/2 origin authority to SNI on UDS TLS
+* **metrics:** use metric_name macro in EzToEzOutboundMetrics
+
 ## 0.28.0 (2026-10-15)
 
 

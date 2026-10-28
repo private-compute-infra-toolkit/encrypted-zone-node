@@ -347,10 +347,43 @@ buf_lint_test(
     targets = [":opaque_isolate_manifest_proto"],
 )
 
+proto_library(
+    name = "binary_manifest_proto",
+    srcs = ["binary_manifest.proto"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":common_proto",
+        ":ez_backend_dependencies_proto",
+        ":ez_service_spec_proto",
+        ":intercepting_services_proto",
+        ":isolate_metrics_policy_proto",
+    ],
+)
+
+cc_proto_library(
+    name = "binary_manifest_cc_proto",
+    visibility = ["//visibility:public"],
+    deps = [":binary_manifest_proto"],
+)
+
+rust_prost_library(
+    name = "binary_manifest_rust_proto",
+    proto = ":binary_manifest_proto",
+    visibility = ["//visibility:public"],
+)
+
+buf_lint_test(
+    name = "binary_manifest_proto_lint",
+    size = "small",
+    config = ":buf.yaml",
+    targets = [":binary_manifest_proto"],
+)
+
 proto_descriptor_set(
     name = "manifest_descriptor_set",
     visibility = ["//visibility:public"],
     deps = [
+        ":binary_manifest_proto",
         ":common_proto",
         ":ez_backend_dependencies_proto",
         ":isolate_runtime_config_proto",

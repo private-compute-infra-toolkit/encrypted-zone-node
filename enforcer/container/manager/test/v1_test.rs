@@ -1092,7 +1092,7 @@ fn test_sanitize_path_component() {
 async fn test_non_existent_otel_traces_uds() {
     let non_existent_socket = "unix:///non/existent/path/otel.socket";
     let mut harness = TestHarness::new_with_otel_traces(
-        JSON_MANIFEST_PATH_ONE_ISOLATE,
+        JSON_MANIFEST_PATH_RATIFIED_ISOLATE,
         &IsolateRuntimeConfigs::default(),
         /* otel_endpoint= */ None,
         /* otel_traces_endpoint= */ Some(non_existent_socket.to_string()),
@@ -1195,6 +1195,49 @@ async fn test_v1_get_setup_isolate_client_none_without_setup_isolate() {
         "SetupIsolateClient should be None when isolate_name is not setup_isolate"
     );
 
+    harness.stop().await;
+    ensure_isolate_stopped(fake_container_id).await.expect("Container should stop");
+}
+
+#[tokio::test]
+async fn test_otel_traces_uds_not_mounted_for_opaque_isolate() {
+    // Opaque (untrusted) Isolates must not be given the traces collector socket: traffic on it
+    // bypasses the Enforcer, so it would be an unfiltered egress channel out of the TEE.
+    let non_existent_socket = "unix:///non/existent/path/otel.socket";
+    let mut harness = TestHarness::new_with_otel_traces(
+        JSON_MANIFEST_PATH_ONE_ISOLATE,
+        &IsolateRuntimeConfigs::default(),
+        /* otel_endpoint= */ None,
+        /* otel_traces_endpoint= */ Some(non_existent_socket.to_string()),
+        /* operator_role= */ "operator".to_string(),
+    )
+    .await
+    .expect("TestHarness::new_with_otel_traces should succeed");
+
+    let isolate_and_uds_vec =
+        check_container_started(vec![HELLOWORLD_BINARY]).await.expect("Container should start");
+    assert_eq!(isolate_and_uds_vec.len(), 1);
+    let (fake_container_id, isolate_ez_bridge_enforcer_side_uds_path) =
+        isolate_and_uds_vec[0].clone();
+    let _client = notify_isolate_ready(isolate_ez_bridge_enforcer_side_uds_path)
+        .await
+        .expect("Isolate should be ready");
+
+    let tracker = FakeContainer::get_tracker();
+    let tracked_container = tracker.get(&fake_container_id).unwrap();
+
+    let traces_mount = tracked_container.value().boot_mounts.iter().find(|m| {
+        m.destination == std::path::Path::new("/enforcer-isolate-shared/traces-otlp.sock")
+    });
+
+    assert!(
+        traces_mount.is_none(),
+        "Traces socket must NOT be mounted for an opaque isolate. Mounts: {:?}",
+        tracked_container.value().boot_mounts
+    );
+
+    drop(tracked_container);
+    drop(tracker);
     harness.stop().await;
     ensure_isolate_stopped(fake_container_id).await.expect("Container should stop");
 }

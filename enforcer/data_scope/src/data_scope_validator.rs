@@ -45,7 +45,7 @@ pub fn replace_and_enforce_invoke_isolate_resp_scopes(
     let has_data = invoke_isolate_resp.isolate_output.is_some()
         || !invoke_isolate_resp.response_extensions.is_empty();
 
-    // TODO: use the `current_scope` instead.
+    // TODO(b/532169578): use the `current_scope` instead.
     if is_missing_scope && has_data {
         return Err(DataScopeError::InvalidDataScopeType);
     }
@@ -95,7 +95,7 @@ pub fn enforce_public_api_invoke_isolate_resp_scopes(
     let has_data = invoke_isolate_resp.isolate_output.is_some()
         || !invoke_isolate_resp.response_extensions.is_empty();
 
-    // TODO: use the `current_scope` instead.
+    // TODO(b/532169578): use the `current_scope` instead.
     if is_missing_scope && has_data {
         return Err(DataScopeError::InvalidDataScopeType);
     }
@@ -144,7 +144,7 @@ pub fn replace_and_validate_invoke_ez_request_scopes(
         None => return Status::permission_denied("isolate_request_iscope is missing"),
     };
 
-    // TODO: use the `current_scope` instead of checking
+    // TODO(b/532169578): use the `current_scope` instead of checking
     // if the scope `is_empty()`.
     if iscopes.datagram_iscopes.is_empty() {
         return Status::permission_denied("datagram_iscopes cannot be empty");
@@ -211,7 +211,7 @@ pub fn validate_external_call(req: &InvokeEzRequest) -> std::result::Result<(), 
     let iscopes =
         req.isolate_request_iscope.as_ref().ok_or(DataScopeError::InvalidDataScopeType)?;
 
-    // TODO: use the `current_scope` instead of checking
+    // TODO(b/532169578): use the `current_scope` instead of checking
     // if the scope `is_empty()`.
     if iscopes.datagram_iscopes.is_empty() {
         return Err(DataScopeError::InvalidDataScopeType);

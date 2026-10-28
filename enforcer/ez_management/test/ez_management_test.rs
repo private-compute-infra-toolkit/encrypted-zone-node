@@ -15,7 +15,10 @@
 mod test_utils;
 
 use common_proto::enforcer::v2::IsolateType;
-use ez_management::{package_utils, EzManagementClient, EzManagementError, LoadIsolatesError};
+use ez_management::{
+    package_utils, EzManagementClient, EzManagementError, IsolateStartupParameters,
+    LoadIsolatesError,
+};
 use ez_management_proto::enforcer::v2::ez_management_service_server::EzManagementServiceServer;
 use ez_management_proto::enforcer::v2::{
     load_isolates_request, load_isolates_response, LoadIsolatesResponse,
@@ -25,6 +28,7 @@ use opaque_isolate_manifest_proto::enforcer::v2::OpaqueIsolateManifest;
 use ratified_isolate_manifest_proto::enforcer::v2::{
     RatifiedIsolateDescriptor, RatifiedIsolateManifest,
 };
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 use test_utils::*;
@@ -757,4 +761,65 @@ async fn test_fetch_operator_info_and_errors() {
         .await
         .expect_err("RPC error should return FetchOperatorInfoFailed");
     assert!(matches!(err, EzManagementError::FetchOperatorInfoFailed(_)));
+}
+
+#[tokio::test]
+async fn test_fetch_isolate_startup_parameters_and_errors() {
+    let ctx = setup_test_context(vec![]).await;
+    let client = &ctx.client;
+    let isolate_startup_parameters = &ctx.isolate_startup_parameters;
+    let opaque = IsolateStartupParameters {
+        identifier: Some(opaque_isolate_type("opaque_wl")),
+        command_line_arguments: vec!["--foo=bar".to_string()],
+        environment_variables: vec!["KEY=value".to_string()],
+        number_of_isolates: 2,
+    };
+
+    *isolate_startup_parameters.lock().unwrap() = Ok(vec![opaque.clone()]);
+    let fetched = client
+        .fetch_isolate_startup_parameters()
+        .await
+        .expect("fetch_isolate_startup_parameters should succeed");
+    assert_eq!(fetched, HashMap::from([(opaque_isolate_type("opaque_wl"), opaque.clone())]));
+
+    let invalid_cases = [
+        vec![IsolateStartupParameters { identifier: None, ..opaque.clone() }],
+        vec![IsolateStartupParameters {
+            identifier: Some(IsolateType {
+                publisher_id: String::new(),
+                isolate_name: "opaque_wl".to_string(),
+            }),
+            ..opaque.clone()
+        }],
+        vec![IsolateStartupParameters {
+            identifier: Some(IsolateType {
+                publisher_id: "example.com".to_string(),
+                isolate_name: String::new(),
+            }),
+            ..opaque.clone()
+        }],
+        vec![IsolateStartupParameters { number_of_isolates: -1, ..opaque.clone() }],
+        vec![IsolateStartupParameters { number_of_isolates: 0, ..opaque.clone() }],
+        vec![IsolateStartupParameters { number_of_isolates: 65, ..opaque.clone() }],
+        vec![opaque.clone(), opaque.clone()],
+    ];
+    for startup_parameters in invalid_cases {
+        *isolate_startup_parameters.lock().unwrap() = Ok(startup_parameters.clone());
+        let err = client
+            .fetch_isolate_startup_parameters()
+            .await
+            .expect_err("invalid IsolateStartupParameters should be rejected");
+        assert!(
+            matches!(err, EzManagementError::InvalidIsolateStartupParameters(_)),
+            "{startup_parameters:?}: {err:?}"
+        );
+    }
+
+    *isolate_startup_parameters.lock().unwrap() =
+        Err(tonic::Status::unimplemented("unimplemented"));
+    let err = client
+        .fetch_isolate_startup_parameters()
+        .await
+        .expect_err("RPC error should return FetchIsolateStartupParametersFailed");
+    assert!(matches!(err, EzManagementError::FetchIsolateStartupParametersFailed(_)));
 }

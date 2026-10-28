@@ -294,7 +294,7 @@ pub struct InboundTlsConfig {
     pub max_concurrent_handshakes: usize,
 }
 
-// TODO: Add e2e tests for inbound gRPC over TLS once outbound client supports TLS
+// TODO(b/439073817): Add e2e tests for inbound gRPC over TLS once outbound client supports TLS
 /// Launches the gRPC server for the inbound EZ-to-EZ API.
 pub async fn launch_server(
     handler: InboundEzToEzHandler,
@@ -305,7 +305,7 @@ pub async fn launch_server(
     log::info!("Starting inbound EZ-to-EZ server at {}...", address);
     // Extra HTTP/2 configuration is required to tunnel the TLS traffic over an tunnel
     // on the Proxy side. This is required for performance improvement.
-    // TODO: Allow overriding window sizes via environment variables if needed.
+    // TODO(b/556385356): Allow overriding window sizes via environment variables if needed.
     let server_builder = if tls_config.is_some() {
         Server::builder()
             .initial_stream_window_size(Some(INITIAL_STREAM_WINDOW_SIZE))

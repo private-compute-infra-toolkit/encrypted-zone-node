@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use anyhow::{bail, ensure, Context, Result};
+use binary_manifest_proto::enforcer::v2::{binary_manifest, BinaryManifest};
 use common_proto::enforcer::v2::IsolateType;
 use ez_backend_dependencies_proto::enforcer::v2::EzBackendDependency as EzBackendDependencyV2;
 use ez_service_spec_proto::enforcer::v2::EzServiceSpec as EzServiceSpecV2;
@@ -28,7 +29,6 @@ use prost_reflect::prost::Message;
 use prost_reflect::{DescriptorPool, DynamicMessage};
 use ratified_isolate_manifest_proto::enforcer::v2::RatifiedIsolateDescriptor;
 use serde_json::de::Deserializer;
-use setup_isolate_manifest_proto::enforcer::v2::SetupIsolateDescriptor;
 
 use super::{IsolateKind, ParsedIsolate};
 
@@ -47,30 +47,68 @@ pub(crate) fn parse_proto_message<T: Message + Default>(
     dynamic_message.transcode_to().with_context(|| format!("couldn't transcode {message_name}"))
 }
 
-/// Converts a Setup isolate descriptor into a normalized [`ParsedIsolate`].
-pub(crate) fn convert_setup_descriptor_to_parsed_isolate(
-    desc: SetupIsolateDescriptor,
-) -> Result<ParsedIsolate> {
-    let (isolate_name, publisher_id) = extract_isolate_identity(desc.isolate_type)?;
-    let number_of_isolates = extract_number_of_isolates(desc.startup_parameters.as_ref())?;
+/// Converts a BinaryManifest of any kind into a normalized [`ParsedIsolate`].
+impl TryFrom<BinaryManifest> for ParsedIsolate {
+    type Error = anyhow::Error;
 
-    Ok(ParsedIsolate {
-        isolate_name,
-        publisher_id,
-        package_filename: desc.package_filename,
-        number_of_isolates,
-        service_specs: convert_service_specs_v2_to_v1(desc.service_specs)?,
-        ez_backend_dependencies: convert_backend_dependencies_v2_to_v1(
-            desc.ez_backend_dependencies,
-        )?,
-        metrics_policy: None,
-        kind: IsolateKind::Ratified {
-            binary_filename: desc.binary_filename,
-            command_line_arguments: desc.command_line_arguments,
-            environment_variables: desc.environment_variables,
-            services_to_intercept: vec![],
-        },
-    })
+    fn try_from(manifest: BinaryManifest) -> Result<Self> {
+        let (isolate_name, publisher_id) = extract_isolate_identity(manifest.isolate_type)?;
+        ensure!(
+            !manifest.binary_filename.is_empty(),
+            "binary_filename cannot be empty in BinaryManifest"
+        );
+        let isolate_kind = manifest.isolate_kind.context("isolate_kind must be specified")?;
+        let (package_filename, metrics_policy, kind) = match isolate_kind {
+            // The Setup Isolate runs as a Ratified Isolate.
+            binary_manifest::IsolateKind::Setup(setup) => {
+                ensure!(
+                    !setup.package_filename.is_empty(),
+                    "package_filename cannot be empty in SetupControls"
+                );
+                let kind = IsolateKind::Ratified { services_to_intercept: vec![] };
+                (setup.package_filename, None, kind)
+            }
+            binary_manifest::IsolateKind::Ratified(ratified) => {
+                validate_package_digest(&manifest.package_digest_sha256)?;
+                let kind = IsolateKind::Ratified {
+                    services_to_intercept: convert_intercepting_services_v2_to_v1(
+                        ratified.services_to_intercept,
+                    )?,
+                };
+                (String::new(), ratified.metrics_policy, kind)
+            }
+            binary_manifest::IsolateKind::Opaque(opaque) => {
+                validate_package_digest(&manifest.package_digest_sha256)?;
+                (String::new(), opaque.metrics_policy, IsolateKind::Opaque)
+            }
+        };
+
+        Ok(ParsedIsolate {
+            isolate_name,
+            publisher_id,
+            // Empty for workload Isolates, whose packages arrive later through LoadIsolates.
+            package_filename,
+            // Set from IsolateStartupParameters.
+            number_of_isolates: 0,
+            binary_filename: manifest.binary_filename,
+            command_line_arguments: vec![],
+            environment_variables: vec![],
+            service_specs: convert_service_specs_v2_to_v1(manifest.service_specs)?,
+            ez_backend_dependencies: convert_backend_dependencies_v2_to_v1(
+                manifest.ez_backend_dependencies,
+            )?,
+            metrics_policy: metrics_policy.map(convert_metrics_policy_v2_to_v1),
+            kind,
+        })
+    }
+}
+
+fn validate_package_digest(digest: &str) -> Result<()> {
+    ensure!(
+        digest.len() == 64 && digest.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+        "package_digest_sha256 must be a lowercase hex-encoded SHA-256 digest, got '{digest}'"
+    );
+    Ok(())
 }
 
 /// Converts a Ratified isolate descriptor into a normalized [`ParsedIsolate`].
@@ -85,15 +123,15 @@ pub(crate) fn convert_ratified_descriptor_to_parsed_isolate(
         publisher_id,
         package_filename: desc.package_filename,
         number_of_isolates,
+        binary_filename: desc.binary_filename,
+        command_line_arguments: desc.command_line_arguments,
+        environment_variables: desc.environment_variables,
         service_specs: convert_service_specs_v2_to_v1(desc.service_specs)?,
         ez_backend_dependencies: convert_backend_dependencies_v2_to_v1(
             desc.ez_backend_dependencies,
         )?,
         metrics_policy: desc.metrics_policy.map(convert_metrics_policy_v2_to_v1),
         kind: IsolateKind::Ratified {
-            binary_filename: desc.binary_filename,
-            command_line_arguments: desc.command_line_arguments,
-            environment_variables: desc.environment_variables,
             services_to_intercept: convert_intercepting_services_v2_to_v1(
                 desc.services_to_intercept,
             )?,
@@ -113,16 +151,15 @@ pub(crate) fn convert_opaque_descriptor_to_parsed_isolate(
         publisher_id,
         package_filename: desc.package_filename,
         number_of_isolates,
+        binary_filename: desc.binary_filename,
+        command_line_arguments: vec![],
+        environment_variables: vec![],
         service_specs: convert_service_specs_v2_to_v1(desc.service_specs)?,
         ez_backend_dependencies: convert_backend_dependencies_v2_to_v1(
             desc.ez_backend_dependencies,
         )?,
         metrics_policy: desc.metrics_policy.map(convert_metrics_policy_v2_to_v1),
-        kind: IsolateKind::Opaque {
-            binary_filename: desc.binary_filename,
-            command_line_arguments: vec![],
-            environment_variables: vec![],
-        },
+        kind: IsolateKind::Opaque,
     })
 }
 

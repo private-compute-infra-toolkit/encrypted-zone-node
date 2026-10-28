@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use anyhow::{ensure, Context, Result};
+use common_proto::enforcer::v2::IsolateType;
 use container_manager::{ContainerManager, ContainerManagerArgs, ManifestSource};
 use container_manager_request::ContainerManagerRequest;
 pub use container_manager_requester::{
@@ -36,6 +37,7 @@ use interceptor::Interceptor;
 use isolate_ez_service_manager::{IsolateEzServiceManager, IsolateEzServiceManagerDependencies};
 use isolate_info::{BinaryServicesIndex, IsolateId, IsolateServiceIndex, IsolateServiceInfo};
 use isolate_service_mapper::IsolateServiceMapper;
+pub use isolate_startup_parameters_proto::enforcer::v2::IsolateStartupParameters;
 use junction_test_utils::FakeJunction;
 pub use manifest_parser_test_utils::load_workload_manifests_from_paths;
 use manifest_proto::enforcer::v1::IsolateRuntimeConfigs;
@@ -83,10 +85,23 @@ pub const JSON_MANIFEST_PATH_SETUP_ISOLATE: &str =
     "enforcer/container/manager/test/testdata/test_manifest_setup_isolate.json";
 
 // The following constants are from the test manifests.
+// publisher_id of the Setup and Ratified Isolates in v2_setup.json and v2_ratified.json,
+// used to key their IsolateStartupParameters.
+pub const V2_RATIFIED_PUBLISHER_ID: &str = "pcit-release-bot@google.com";
 // From v2_setup.json
 pub const SETUP_BINARY: &str = "/usr/local/bin/setup";
 pub const SETUP_ISOLATE_DOMAIN: &str = "EZ_Trusted";
 pub const SETUP_SERVICE: &str = "SetupService";
+pub const SETUP_ISOLATE_NAME: &str = "setup_isolate";
+
+// From v2_ratified.json and v2_opaque.json
+pub const RATIFIED_1_ISOLATE_NAME: &str = "ratified_1";
+pub const RATIFIED_2_ISOLATE_NAME: &str = "ratified_2";
+pub const HELLOWORLD_ISOLATE_NAME: &str = "helloworld";
+
+// From v2_opaque_explicit_startup_params.json
+pub const EXPLICIT_OPAQUE_DOMAIN: &str = "explicit_domain";
+pub const EXPLICIT_OPAQUE_ISOLATE_NAME: &str = "explicit_opaque";
 
 // From test_manifest_one_isolate.json
 pub const HELLOWORLD_BINARY: &str = "/usr/local/bin/main";
@@ -137,6 +152,7 @@ impl TestHarness {
             otel_endpoint,
             None,
             operator_role,
+            HashMap::new(),
         )
         .await
     }
@@ -145,6 +161,7 @@ impl TestHarness {
         setup_isolate_manifest_path: &str,
         isolate_runtime_configs: &IsolateRuntimeConfigs,
         operator_role: String,
+        isolate_startup_parameters: Vec<IsolateStartupParameters>,
     ) -> Result<Self> {
         Self::new_impl(
             ManifestSource::V2 {
@@ -154,6 +171,10 @@ impl TestHarness {
             None,
             None,
             operator_role,
+            isolate_startup_parameters
+                .into_iter()
+                .map(|parameters| (parameters.identifier.clone().unwrap(), parameters))
+                .collect(),
         )
         .await
     }
@@ -171,6 +192,7 @@ impl TestHarness {
             otel_endpoint,
             otel_traces_endpoint,
             operator_role,
+            HashMap::new(),
         )
         .await
     }
@@ -204,6 +226,7 @@ impl TestHarness {
         otel_endpoint: Option<String>,
         otel_traces_endpoint: Option<String>,
         operator_role: String,
+        isolate_startup_parameters: HashMap<IsolateType, IsolateStartupParameters>,
     ) -> Result<Self> {
         // Clear the tracker for test isolation.
         FakeContainer::clear_tracker();
@@ -268,6 +291,7 @@ impl TestHarness {
             shm_slot_size: SHM_SLOT_SIZE,
             shm_payload_threshold: SHM_PAYLOAD_THRESHOLD,
             operator_role,
+            isolate_startup_parameters,
         };
 
         let container_manager = ContainerManager::<FakeContainer>::start(container_manager_args)
@@ -310,6 +334,27 @@ impl TestHarness {
         }
         self.container_manager.stop().await;
     }
+}
+
+/// Returns the startup parameters of a Manifest V2 isolate that only set number_of_isolates.
+pub fn startup_parameters(
+    publisher_id: &str,
+    isolate_name: &str,
+    number_of_isolates: i32,
+) -> IsolateStartupParameters {
+    IsolateStartupParameters {
+        identifier: Some(IsolateType {
+            isolate_name: isolate_name.to_string(),
+            publisher_id: publisher_id.to_string(),
+        }),
+        number_of_isolates,
+        ..Default::default()
+    }
+}
+
+/// Returns the startup parameters of the Setup Isolate in v2_setup.json.
+pub fn setup_startup_parameters() -> IsolateStartupParameters {
+    startup_parameters(V2_RATIFIED_PUBLISHER_ID, SETUP_ISOLATE_NAME, 1)
 }
 
 // Helper function to create a gRPC client for the IsolateEzBridge service

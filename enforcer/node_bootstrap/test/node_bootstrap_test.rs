@@ -36,6 +36,7 @@ use ez_management_proto::enforcer::v2::{
 };
 use inbound_ez_to_ez_handler::InboundEzToEzHandler;
 use isolate_info::{register_isolate_type, BinaryServicesIndex, IsolateId};
+use isolate_startup_parameters_proto::enforcer::v2::IsolateStartupParameters;
 use junction_test_utils::FakeJunction;
 use junction_trait::Junction;
 use node_bootstrap::{NodeBootstrapV2, NodeBootstrapV2Config};
@@ -49,6 +50,7 @@ use ratified_isolate_manifest_proto::enforcer::v2::RatifiedIsolateManifest;
 use setup_isolate_client::SetupIsolateClient;
 use setup_isolate_proto::enforcer::v2::FetchTlsCertificateResponse;
 use state_manager::IsolateStateManager;
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -63,7 +65,8 @@ use tonic::{Request, Response, Status, Streaming};
 
 const MAX_DECODING_SIZE: usize = 4 * 1024 * 1024;
 const CHANNEL_SIZE: usize = 128;
-const SETUP_PUBLISHER_ID: &str = "EZ_Trusted";
+const SETUP_PUBLISHER_ID: &str = "pcit-release-bot@google.com";
+const SETUP_ISOLATE_NAME: &str = "setup_isolate";
 const OPERATOR_DOMAIN: &str = "operator.example.com";
 const OPERATOR_ROLE: &str = "PRIMARY";
 // Long enough for an erroneously ungated bootstrap to reach the service, short enough to keep
@@ -212,6 +215,23 @@ async fn test_fetch_operator_info_before_setup_isolate_is_ready() {
     assert!(
         !harness.management_service_contacted_within(NOT_CONTACTED_WINDOW).await,
         "LoadIsolates must not start before the Setup Isolate is Ready"
+    );
+}
+
+#[tokio::test]
+async fn test_fetch_isolate_startup_parameters_before_setup_isolate_is_ready() {
+    let harness = TestHarness::new().await;
+
+    let startup_parameters =
+        timeout(CONTACTED_TIMEOUT, harness.bootstrap.fetch_isolate_startup_parameters())
+            .await
+            .expect("fetch_isolate_startup_parameters must not wait for the Setup Isolate")
+            .expect("fetch_isolate_startup_parameters should succeed");
+
+    let setup_parameters = setup_isolate_startup_parameters();
+    assert_eq!(
+        startup_parameters,
+        HashMap::from([(setup_parameters.identifier.clone().unwrap(), setup_parameters)])
     );
 }
 
@@ -371,6 +391,17 @@ async fn test_bootstrap_fails_without_a_setup_isolate() {
     );
 }
 
+fn setup_isolate_startup_parameters() -> IsolateStartupParameters {
+    IsolateStartupParameters {
+        identifier: Some(IsolateType {
+            publisher_id: SETUP_PUBLISHER_ID.to_string(),
+            isolate_name: SETUP_ISOLATE_NAME.to_string(),
+        }),
+        number_of_isolates: 1,
+        ..Default::default()
+    }
+}
+
 #[tonic::async_trait]
 impl EzManagementService for FakeManagementService {
     async fn fetch_operator_info(
@@ -389,7 +420,9 @@ impl EzManagementService for FakeManagementService {
         &self,
         _request: Request<FetchIsolateStartupParametersRequest>,
     ) -> Result<Response<FetchIsolateStartupParametersResponse>, Status> {
-        Ok(Response::new(FetchIsolateStartupParametersResponse::default()))
+        Ok(Response::new(FetchIsolateStartupParametersResponse {
+            startup_parameters: vec![setup_isolate_startup_parameters()],
+        }))
     }
 
     type LoadIsolatesStream =

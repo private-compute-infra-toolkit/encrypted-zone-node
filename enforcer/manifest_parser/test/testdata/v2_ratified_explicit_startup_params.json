@@ -2,8 +2,8 @@
   "ratified_isolate_descriptors": [
     {
       "isolate_type": {
-        "isolate_name": "ezpkg://explicit.ratified.com",
-        "publisher_id": "EZ_Trusted"
+        "isolate_name": "explicit_ratified",
+        "publisher_id": "pcit-release-bot@google.com"
       },
       "package_filename": "enforcer/container/test_data/test_binary.tar",
       "binary_filename": "/usr/local/bin/main",
