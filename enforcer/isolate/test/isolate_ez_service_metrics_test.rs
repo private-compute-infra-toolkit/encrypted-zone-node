@@ -45,11 +45,12 @@ use payload_proto::enforcer::v1::{
 };
 use shared_memory_manager::SharedMemManager;
 use state_manager::IsolateStateManager;
+use std::path::PathBuf;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
-use tonic::transport::{Endpoint, Server};
+use tonic::transport::{Channel, Endpoint, Server};
 
 const TEST_INTERNAL_OPERATOR_DOMAIN: &str = "internal";
 const CHANNEL_SIZE: usize = 10;
@@ -58,6 +59,244 @@ const METRICS_UDS_NAME: &str = "otel-metrics.sock";
 const ISOLATE_UDS_NAME: &str = "isolate-ez-bridge-uds";
 const TEST_ISOLATE_NAME: &str = "test-isolate";
 const TEST_PUBLISHER_ID: &str = "test-publisher";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_metrics_server_reception() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let temp_dir = tempfile::Builder::new().prefix("test-metrics-server").tempdir().unwrap();
+    let metrics_uds_path = temp_dir.path().join(METRICS_UDS_NAME);
+    let isolate_uds_path = temp_dir.path().join(ISOLATE_UDS_NAME);
+    let manager = create_test_service_manager();
+    let isolate_id = IsolateId::new(BinaryServicesIndex::new(false));
+
+    manager
+        .start_isolate_ez_server(isolate_ez_service_manager::StartIsolateEzServerArgs {
+            isolate_id,
+            isolate_address: isolate_uds_path.display().to_string(),
+            // Opening a real FIFO for writing blocks until a reader opens it,
+            // which frequently deadlocks in sandboxed/containerized environments.
+            isolate_fifo_path: "/dev/null".to_string(),
+            otel_metrics_address: metrics_uds_path.display().to_string(),
+            metrics_policy: IsolateMetricsPolicy {
+                allowed_metrics: vec![AllowedMetric {
+                    name: "test_metric".to_string(),
+                    r#type: 1, // Gauge
+                    allowed_attributes: vec![],
+                }],
+            },
+            isolate_type: IsolateType {
+                isolate_name: TEST_ISOLATE_NAME.to_string(),
+                publisher_id: TEST_PUBLISHER_ID.to_string(),
+            },
+            isolate_instance_id: "1".to_string(),
+        })
+        .await;
+
+    let mut attempts = 0;
+    while !metrics_uds_path.exists() && attempts < 100 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        attempts += 1;
+    }
+    assert!(metrics_uds_path.exists(), "Metrics UDS path was never created");
+
+    let stream = tokio::net::UnixStream::connect(&metrics_uds_path).await;
+    assert!(stream.is_ok(), "Failed to connect to Metrics UDS via simple UnixStream");
+    drop(stream);
+
+    let channel = connect_uds_channel(metrics_uds_path).await;
+    let mut client = opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_client::MetricsServiceClient::new(channel);
+
+    let metric = opentelemetry_proto::tonic::metrics::v1::Metric {
+        name: "test_metric".to_string(),
+        description: "".to_string(),
+        unit: "".to_string(),
+        data: Some(opentelemetry_proto::tonic::metrics::v1::metric::Data::Gauge(
+            opentelemetry_proto::tonic::metrics::v1::Gauge {
+                data_points: vec![opentelemetry_proto::tonic::metrics::v1::NumberDataPoint {
+                    attributes: vec![],
+                    value: Some(
+                        opentelemetry_proto::tonic::metrics::v1::number_data_point::Value::AsInt(
+                            42,
+                        ),
+                    ),
+                    ..Default::default()
+                }],
+            },
+        )),
+        ..Default::default()
+    };
+
+    let request = ExportMetricsServiceRequest {
+        resource_metrics: vec![opentelemetry_proto::tonic::metrics::v1::ResourceMetrics {
+            resource: Some(Default::default()),
+            scope_metrics: vec![opentelemetry_proto::tonic::metrics::v1::ScopeMetrics {
+                scope: None,
+                metrics: vec![metric],
+                schema_url: "".to_string(),
+            }],
+            schema_url: "".to_string(),
+        }],
+    };
+
+    let response = client.export(request).await;
+    assert!(response.is_err(), "Expected export to fail when no safe endpoint is configured");
+
+    drop(client); // Close connection
+    manager.stop_isolate_servers(isolate_id).await;
+    metrics::global::reset_global_providers();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_isolate_ez_service_stream_metrics() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let mut collector = FakeCollectorServer::start().await.expect("Failed to start fake collector");
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+
+    // Setup metrics with the collector
+    let providers = setup_otel_metrics(Some(collector.endpoint()), Some(collector.endpoint()))
+        .await
+        .expect("Failed to setup OTel metrics");
+
+    let harness = TestHarness::new(listener).await.expect("Harness should start");
+
+    let service_info = IsolateServiceInfo {
+        operator_domain: TEST_INTERNAL_OPERATOR_DOMAIN.to_string(),
+        service_name: "service".into(),
+        ..Default::default()
+    };
+
+    harness
+        .add_backend_dependency(&service_info, TEST_INTERNAL_ROUTE_TYPE)
+        .await
+        .expect("Failed to add backend dependency");
+
+    harness.setup_data_scope().await.expect("Should be able to add to DSM/RIM");
+
+    let (req_tx, req_rx) = mpsc::channel(CHANNEL_SIZE);
+
+    // Send 2 requests
+    let req1 = create_test_request(&service_info.operator_domain, &service_info.service_name);
+    let req2 = create_test_request(&service_info.operator_domain, &service_info.service_name);
+
+    let client_handle = tokio::spawn(async move {
+        let mut client = harness.client.clone();
+
+        let _ = req_tx.send(req1).await;
+
+        let request_stream = ReceiverStream::new(req_rx);
+        let mut response_stream =
+            client.stream_invoke_ez(request_stream).await.unwrap().into_inner();
+
+        // Wait for first response
+        if let Ok(Some(_)) = response_stream.message().await {}
+
+        let _ = req_tx.send(req2).await;
+        // Wait for second response
+        if let Ok(Some(_)) = response_stream.message().await {}
+
+        // Drop tx to close stream
+        drop(req_tx);
+        // Drain
+        while let Ok(Some(_)) = response_stream.message().await {}
+    });
+
+    client_handle.await.unwrap();
+
+    // Check Metrics
+    // Give time for metrics to be processed and sent
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    if let Some(ref provider) = providers.safe {
+        let _ = provider.force_flush();
+    }
+    if let Some(ref provider) = providers.unsafe_metrics {
+        let _ = provider.force_flush();
+    }
+    // Small delay to ensure flush completes and collector receives data
+    tokio::time::sleep(Duration::from_millis(2000)).await;
+
+    let exported = collector.exported_metrics(5, Duration::from_secs(2)).await;
+
+    let verifier = MetricsVerifier::new(exported);
+
+    // Verify Message Count (encrypted_zone.enforcer.isolate_ez_service.message_size)
+    let message_size_points =
+        verifier.get_histogram_points("encrypted_zone.enforcer.isolate_ez_service.message_size");
+    let mut request_message_count: u64 = 0;
+    let mut response_message_count: u64 = 0;
+    let mut found_route_type = false;
+
+    for (count, attrs) in message_size_points {
+        if let Some(dir) = attrs.get("direction") {
+            if dir.contains("request") {
+                request_message_count = request_message_count.max(count);
+            } else if dir.contains("response") {
+                response_message_count = response_message_count.max(count);
+            }
+        }
+        if let Some(rt) = attrs.get("route_type") {
+            if rt.contains("internal") {
+                found_route_type = true;
+            }
+        }
+    }
+
+    assert_eq!(request_message_count, 2, "Expected 2 request messages");
+    assert_eq!(response_message_count, 2, "Expected 2 response messages");
+    assert!(found_route_type, "Should have found route_type=internal attribute");
+
+    // Verify Processing Duration (encrypted_zone.enforcer.isolate_ez_service.message.processing_duration)
+    let processing_points = verifier.get_histogram_points(
+        "encrypted_zone.enforcer.isolate_ez_service.message.processing_duration",
+    );
+    let processing_count: u64 = processing_points.iter().map(|(c, _)| *c).max().unwrap_or(0);
+
+    assert!(
+        processing_count >= 2,
+        "Expected at least 2 processing duration samples (received {})",
+        processing_count
+    );
+
+    // Verify Request Duration (encrypted_zone.enforcer.isolate_ez_service.request.duration)
+    let duration_points = verifier
+        .get_histogram_points("encrypted_zone.enforcer.isolate_ez_service.request.duration");
+    let duration_count: u64 = duration_points.iter().map(|(c, _)| *c).max().unwrap_or(0);
+
+    assert_eq!(duration_count, 1, "Expected 1 stream duration");
+
+    metrics::global::reset_global_providers();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_service_manager_stop_unknown_and_missing_fifo() {
+    let temp_dir = tempfile::Builder::new().prefix("test-mgr-lifecycle").tempdir().unwrap();
+    let metrics_uds_path = temp_dir.path().join(METRICS_UDS_NAME);
+    let isolate_uds_path = temp_dir.path().join(ISOLATE_UDS_NAME);
+    let missing_fifo_path = temp_dir.path().join("nonexistent-ready.fifo");
+    let manager = create_test_service_manager();
+    manager.stop_isolate_servers(IsolateId::new(BinaryServicesIndex::new(false))).await;
+    let isolate_id = IsolateId::new(BinaryServicesIndex::new(true));
+    manager
+        .start_isolate_ez_server(isolate_ez_service_manager::StartIsolateEzServerArgs {
+            isolate_id,
+            isolate_address: isolate_uds_path.display().to_string(),
+            isolate_fifo_path: missing_fifo_path.display().to_string(),
+            otel_metrics_address: metrics_uds_path.display().to_string(),
+            metrics_policy: IsolateMetricsPolicy::default(),
+            isolate_type: IsolateType {
+                isolate_name: TEST_ISOLATE_NAME.to_string(),
+                publisher_id: TEST_PUBLISHER_ID.to_string(),
+            },
+            isolate_instance_id: "2".to_string(),
+        })
+        .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(isolate_uds_path.exists(), "Isolate UDS path should exist even if FIFO open fails");
+    assert!(metrics_uds_path.exists(), "Metrics UDS path should exist");
+    let _channel = connect_uds_channel(isolate_uds_path).await;
+    manager.stop_isolate_servers(isolate_id).await;
+    metrics::global::reset_global_providers();
+}
 
 #[derive(Debug)]
 struct TestHarness {
@@ -220,18 +459,12 @@ fn create_test_request(operator_domain: &str, service_name: &str) -> InvokeEzReq
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_metrics_server_reception() {
-    let _ = env_logger::builder().is_test(true).try_init();
-    let temp_dir = tempfile::Builder::new().prefix("test-metrics-server").tempdir().unwrap();
-    let metrics_uds_path = temp_dir.path().join(METRICS_UDS_NAME);
-    let isolate_uds_path = temp_dir.path().join(ISOLATE_UDS_NAME);
+fn create_test_service_manager() -> isolate_ez_service_manager::IsolateEzServiceManager {
+    log::set_max_level(log::LevelFilter::Trace);
     let service_mapper = IsolateServiceMapper::default();
     let data_scope_requester = DataScopeRequester::new(0);
-    let (tx, _container_manager_rx) = tokio::sync::mpsc::channel(1);
+    let (tx, _container_manager_rx) = mpsc::channel(1);
     let container_manager_requester = ContainerManagerRequester::new(tx);
-    let manifest_validator = ManifestValidator::default();
-
     let deps = isolate_ez_service_manager::IsolateEzServiceManagerDependencies {
         isolate_junction: Box::new(FakeJunction::default()),
         isolate_state_manager: IsolateStateManager::new(
@@ -242,56 +475,21 @@ async fn test_metrics_server_reception() {
         fileshare_manager: FileshareManager::new(container_manager_requester),
         external_proxy_connector: None,
         isolate_service_mapper: service_mapper.clone(),
-        data_scope_requester: data_scope_requester.clone(),
-        manifest_validator: manifest_validator.clone(),
+        data_scope_requester,
+        manifest_validator: ManifestValidator::default(),
         ez_to_ez_outbound_handler: None,
         max_decoding_message_size: 4 * 1024 * 1024,
         interceptor: Interceptor::new(service_mapper),
         otel_endpoint: None,
         disable_metrics_filtering: false,
-        shm_payload_threshold: 100 * 1024 * 1024, // 100MiB
+        shm_payload_threshold: 100 * 1024 * 1024,
     };
+    isolate_ez_service_manager::IsolateEzServiceManager::new(deps)
+}
 
-    let manager = isolate_ez_service_manager::IsolateEzServiceManager::new(deps);
-    let isolate_id = IsolateId::new(BinaryServicesIndex::new(false));
-
-    manager
-        .start_isolate_ez_server(isolate_ez_service_manager::StartIsolateEzServerArgs {
-            isolate_id,
-            isolate_address: isolate_uds_path.display().to_string(),
-            // Opening a real FIFO for writing blocks until a reader opens it,
-            // which frequently deadlocks in sandboxed/containerized environments.
-            isolate_fifo_path: "/dev/null".to_string(),
-            otel_metrics_address: metrics_uds_path.display().to_string(),
-            metrics_policy: IsolateMetricsPolicy {
-                allowed_metrics: vec![AllowedMetric {
-                    name: "test_metric".to_string(),
-                    r#type: 1, // Gauge
-                    allowed_attributes: vec![],
-                }],
-            },
-            isolate_type: IsolateType {
-                isolate_name: TEST_ISOLATE_NAME.to_string(),
-                publisher_id: TEST_PUBLISHER_ID.to_string(),
-            },
-            isolate_instance_id: "1".to_string(),
-        })
-        .await;
-
-    let mut attempts = 0;
-    while !metrics_uds_path.exists() && attempts < 100 {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        attempts += 1;
-    }
-    assert!(metrics_uds_path.exists(), "Metrics UDS path was never created");
-
-    let stream = tokio::net::UnixStream::connect(&metrics_uds_path).await;
-    assert!(stream.is_ok(), "Failed to connect to Metrics UDS via simple UnixStream");
-    drop(stream);
-
-    let endpoint = Endpoint::from_shared("http://127.0.0.1".to_string()).unwrap();
-    let socket_path = metrics_uds_path.clone();
-    let channel = endpoint
+async fn connect_uds_channel(socket_path: PathBuf) -> Channel {
+    Endpoint::from_shared("http://127.0.0.1".to_string())
+        .unwrap()
         .connect_with_connector(tower::service_fn(move |_: tonic::transport::Uri| {
             let socket_path = socket_path.clone();
             async move {
@@ -301,166 +499,5 @@ async fn test_metrics_server_reception() {
             }
         }))
         .await
-        .unwrap();
-    let mut client = opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_client::MetricsServiceClient::new(channel);
-
-    let metric = opentelemetry_proto::tonic::metrics::v1::Metric {
-        name: "test_metric".to_string(),
-        description: "".to_string(),
-        unit: "".to_string(),
-        data: Some(opentelemetry_proto::tonic::metrics::v1::metric::Data::Gauge(
-            opentelemetry_proto::tonic::metrics::v1::Gauge {
-                data_points: vec![opentelemetry_proto::tonic::metrics::v1::NumberDataPoint {
-                    attributes: vec![],
-                    value: Some(
-                        opentelemetry_proto::tonic::metrics::v1::number_data_point::Value::AsInt(
-                            42,
-                        ),
-                    ),
-                    ..Default::default()
-                }],
-            },
-        )),
-        ..Default::default()
-    };
-
-    let request = ExportMetricsServiceRequest {
-        resource_metrics: vec![opentelemetry_proto::tonic::metrics::v1::ResourceMetrics {
-            resource: Some(Default::default()),
-            scope_metrics: vec![opentelemetry_proto::tonic::metrics::v1::ScopeMetrics {
-                scope: None,
-                metrics: vec![metric],
-                schema_url: "".to_string(),
-            }],
-            schema_url: "".to_string(),
-        }],
-    };
-
-    let response = client.export(request).await;
-    assert!(response.is_err(), "Expected export to fail when no safe endpoint is configured");
-
-    drop(client); // Close connection
-    manager.stop_isolate_servers(isolate_id).await;
-    metrics::global::reset_global_providers();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_isolate_ez_service_stream_metrics() {
-    let _ = env_logger::builder().is_test(true).try_init();
-    let mut collector = FakeCollectorServer::start().await.expect("Failed to start fake collector");
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-
-    // Setup metrics with the collector
-    let providers = setup_otel_metrics(Some(collector.endpoint()), Some(collector.endpoint()))
-        .await
-        .expect("Failed to setup OTel metrics");
-
-    let harness = TestHarness::new(listener).await.expect("Harness should start");
-
-    let service_info = IsolateServiceInfo {
-        operator_domain: TEST_INTERNAL_OPERATOR_DOMAIN.to_string(),
-        service_name: "service".into(),
-        ..Default::default()
-    };
-
-    harness
-        .add_backend_dependency(&service_info, TEST_INTERNAL_ROUTE_TYPE)
-        .await
-        .expect("Failed to add backend dependency");
-
-    harness.setup_data_scope().await.expect("Should be able to add to DSM/RIM");
-
-    let (req_tx, req_rx) = mpsc::channel(CHANNEL_SIZE);
-
-    // Send 2 requests
-    let req1 = create_test_request(&service_info.operator_domain, &service_info.service_name);
-    let req2 = create_test_request(&service_info.operator_domain, &service_info.service_name);
-
-    let client_handle = tokio::spawn(async move {
-        let mut client = harness.client.clone();
-
-        let _ = req_tx.send(req1).await;
-
-        let request_stream = ReceiverStream::new(req_rx);
-        let mut response_stream =
-            client.stream_invoke_ez(request_stream).await.unwrap().into_inner();
-
-        // Wait for first response
-        if let Ok(Some(_)) = response_stream.message().await {}
-
-        let _ = req_tx.send(req2).await;
-        // Wait for second response
-        if let Ok(Some(_)) = response_stream.message().await {}
-
-        // Drop tx to close stream
-        drop(req_tx);
-        // Drain
-        while let Ok(Some(_)) = response_stream.message().await {}
-    });
-
-    client_handle.await.unwrap();
-
-    // Check Metrics
-    // Give time for metrics to be processed and sent
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    if let Some(ref provider) = providers.safe {
-        let _ = provider.force_flush();
-    }
-    if let Some(ref provider) = providers.unsafe_metrics {
-        let _ = provider.force_flush();
-    }
-    // Small delay to ensure flush completes and collector receives data
-    tokio::time::sleep(Duration::from_millis(2000)).await;
-
-    let exported = collector.exported_metrics(5, Duration::from_secs(2)).await;
-
-    let verifier = MetricsVerifier::new(exported);
-
-    // Verify Message Count (encrypted_zone.enforcer.isolate_ez_service.message_size)
-    let message_size_points =
-        verifier.get_histogram_points("encrypted_zone.enforcer.isolate_ez_service.message_size");
-    let mut request_message_count: u64 = 0;
-    let mut response_message_count: u64 = 0;
-    let mut found_route_type = false;
-
-    for (count, attrs) in message_size_points {
-        if let Some(dir) = attrs.get("direction") {
-            if dir.contains("request") {
-                request_message_count = request_message_count.max(count);
-            } else if dir.contains("response") {
-                response_message_count = response_message_count.max(count);
-            }
-        }
-        if let Some(rt) = attrs.get("route_type") {
-            if rt.contains("internal") {
-                found_route_type = true;
-            }
-        }
-    }
-
-    assert_eq!(request_message_count, 2, "Expected 2 request messages");
-    assert_eq!(response_message_count, 2, "Expected 2 response messages");
-    assert!(found_route_type, "Should have found route_type=internal attribute");
-
-    // Verify Processing Duration (encrypted_zone.enforcer.isolate_ez_service.message.processing_duration)
-    let processing_points = verifier.get_histogram_points(
-        "encrypted_zone.enforcer.isolate_ez_service.message.processing_duration",
-    );
-    let processing_count: u64 = processing_points.iter().map(|(c, _)| *c).max().unwrap_or(0);
-
-    assert!(
-        processing_count >= 2,
-        "Expected at least 2 processing duration samples (received {})",
-        processing_count
-    );
-
-    // Verify Request Duration (encrypted_zone.enforcer.isolate_ez_service.request.duration)
-    let duration_points = verifier
-        .get_histogram_points("encrypted_zone.enforcer.isolate_ez_service.request.duration");
-    let duration_count: u64 = duration_points.iter().map(|(c, _)| *c).max().unwrap_or(0);
-
-    assert_eq!(duration_count, 1, "Expected 1 stream duration");
-
-    metrics::global::reset_global_providers();
+        .expect("should connect to UDS endpoint")
 }

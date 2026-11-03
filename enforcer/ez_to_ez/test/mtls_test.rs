@@ -20,6 +20,7 @@ use ez_mtls_proto::enforcer::v1::ez_mtls_service_server::{EzMtlsService, EzMtlsS
 use ez_mtls_proto::enforcer::v1::{
     GetCertificateRequest, GetCertificateResponse, ReportSniRequest, ReportSniResponse,
 };
+use ez_to_ez_service_proto::enforcer::v1::ez_to_ez_api_server::EzToEzApiServer;
 use isolate_info::IsolateId;
 use junction_trait::Junction;
 use manifest_parser::v1::parse_manifest;
@@ -35,11 +36,13 @@ use payload_proto::enforcer::v1::{
 use prost::Message;
 use setup_isolate_client::SetupIsolateClient;
 use setup_isolate_proto::enforcer::v2::{FetchTlsCertificateRequest, FetchTlsCertificateResponse};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
-use tokio_stream::wrappers::TcpListenerStream;
+use tokio_stream::wrappers::{TcpListenerStream, UnixListenerStream};
+use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status};
 
 #[derive(Clone)]
@@ -391,6 +394,8 @@ struct TestContext {
     server_task: tokio::task::JoinHandle<()>,
     /// Manager for the client's mTLS identities.
     client_manager: EzMtlsManager,
+    /// TLS acceptor configured for the test server identity.
+    acceptor: boring::ssl::SslAcceptor,
     /// Server socket address.
     server_address: String,
     /// Outbound TLS configuration.
@@ -437,7 +442,7 @@ async fn create_test_context() -> TestContext {
         inbound_ez_to_ez_handler::InboundEzToEzHandler::new(Box::new(fake_junction.clone()));
 
     let tls_config = inbound_ez_to_ez_handler::InboundTlsConfig {
-        acceptor,
+        acceptor: acceptor.clone(),
         handshake_timeout: std::time::Duration::from_secs(2),
         max_concurrent_handshakes: 5,
     };
@@ -465,6 +470,7 @@ async fn create_test_context() -> TestContext {
         TestMetrics::default(),
         Some(outbound_tls_config.clone()),
         /* expect_tls_config= */ false,
+        /* enable_per_unary_tls_channel= */ true,
         4 * 1024 * 1024,
     )
     .await
@@ -475,6 +481,7 @@ async fn create_test_context() -> TestContext {
         mock_service_tx: tx,
         server_task,
         client_manager,
+        acceptor,
         server_address,
         outbound_tls_config,
         outbound_handler,
@@ -531,7 +538,7 @@ async fn test_e2e_mtls() {
     };
     assert_eq!(output_payload, b"hello world");
 
-    // Second invoke reuses cached channel in tls_channel_pool.
+    // Subsequent unary invoke also succeeds over a fresh TLS channel.
     let response2 = ctx.outbound_handler.remote_invoke(request, None).await;
     assert!(response2.is_ok());
 
@@ -670,6 +677,7 @@ async fn test_outbound_pending_then_set_tls_config_works() {
         TestMetrics::default(),
         /* tls_config= */ None,
         /* expect_tls_config= */ true,
+        /* enable_per_unary_tls_channel= */ true,
         4 * 1024 * 1024,
     )
     .await
@@ -848,4 +856,128 @@ async fn test_ez_mtls_manager_build_missing_config_fields() {
     assert!(err
         .to_string()
         .contains("mtls_key_path must be provided when setup_isolate_client is not set"));
+}
+
+#[tokio::test]
+async fn test_outbound_per_unary_tls_channel_enabled_vs_disabled() {
+    let ctx = create_test_context().await;
+    let counting_sock = ctx._dir.path().join("counting.sock");
+    let (addr, tls_handshakes, counting_task) =
+        start_counting_tls_uds_server(&counting_sock, ctx.acceptor.clone());
+    let meta = ControlPlaneMetadata {
+        destination_operator_domain: ctx.client_manager.spiffe_identity().operator_domain.clone(),
+        ..Default::default()
+    };
+    let make_req = |msg: &str| enforcer_proto::enforcer::v1::InvokeEzRequest {
+        control_plane_metadata: Some(meta.clone()),
+        isolate_request_payload: Some(EzHybridPayload {
+            delivery_method: Some(DeliveryMethod::InlineData(EzPayloadData {
+                datagrams: vec![msg.as_bytes().to_vec()],
+            })),
+        }),
+        ..Default::default()
+    };
+
+    // 1. Default (enabled): each unary RPC opens 1 fresh TLS channel; streams share the pool.
+    let per_unary = OutboundEzToEzHandler::new(
+        addr.clone(),
+        TestMetrics::default(),
+        Some(ctx.outbound_tls_config.clone()),
+        false,
+        /* enable_per_unary_tls_channel= */ true,
+        4 * 1024 * 1024,
+    )
+    .await
+    .unwrap();
+    let wait = Duration::from_secs(2);
+    assert_eq!(tls_handshakes.load(Ordering::SeqCst), 0);
+    for expected in 1..=3 {
+        let msg = format!("unary-{expected}");
+        let res = tokio::time::timeout(wait, per_unary.remote_invoke(make_req(&msg), None))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(extract_first_datagram(res), msg.as_bytes());
+        assert_eq!(tls_handshakes.load(Ordering::SeqCst), expected);
+    }
+    for idx in 1..=2 {
+        let (req_tx, req_rx) = tokio::sync::mpsc::channel(4);
+        let mut res_rx =
+            per_unary.remote_streaming_connect(Some(&meta), req_rx, None).await.unwrap();
+        let msg = format!("stream-{idx}");
+        req_tx.send(make_req(&msg)).await.unwrap();
+        let res = tokio::time::timeout(wait, res_rx.recv()).await.unwrap().unwrap().unwrap();
+        assert_eq!(extract_first_datagram(res), msg.as_bytes());
+        assert_eq!(tls_handshakes.load(Ordering::SeqCst), 3 + grpc_connector::DEFAULT_POOL_SIZE);
+    }
+
+    // 2. Disabled: unary RPCs initialize and reuse the channel pool.
+    tls_handshakes.store(0, Ordering::SeqCst);
+    let pooled = OutboundEzToEzHandler::new(
+        addr,
+        TestMetrics::default(),
+        Some(ctx.outbound_tls_config),
+        false,
+        /* enable_per_unary_tls_channel= */ false,
+        4 * 1024 * 1024,
+    )
+    .await
+    .unwrap();
+    for idx in 1..=3 {
+        let msg = format!("pooled-{idx}");
+        let res = tokio::time::timeout(wait, pooled.remote_invoke(make_req(&msg), None))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(extract_first_datagram(res), msg.as_bytes());
+        assert_eq!(tls_handshakes.load(Ordering::SeqCst), grpc_connector::DEFAULT_POOL_SIZE);
+    }
+
+    counting_task.abort();
+    let _ = ctx.mock_service_tx.send(());
+    ctx.server_task.abort();
+}
+
+fn extract_first_datagram(res: enforcer_proto::enforcer::v1::InvokeEzResponse) -> Vec<u8> {
+    match res.ez_response_payload.unwrap().delivery_method.unwrap() {
+        DeliveryMethod::InlineData(inline) => inline.datagrams[0].clone(),
+        _ => panic!("Expected InlineData"),
+    }
+}
+
+fn start_counting_tls_uds_server(
+    socket_path: &std::path::Path,
+    acceptor: boring::ssl::SslAcceptor,
+) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+    let addr = format!("unix:{}", socket_path.to_str().unwrap());
+    let uds = tokio::net::UnixListener::bind(socket_path).unwrap();
+    let acceptor = Arc::new(acceptor);
+    let tls_handshakes = Arc::new(AtomicUsize::new(0));
+    let handshakes = tls_handshakes.clone();
+    let incoming = UnixListenerStream::new(uds)
+        .then(move |conn| {
+            let (acceptor, handshakes) = (acceptor.clone(), handshakes.clone());
+            async move {
+                let tls = tokio::time::timeout(
+                    Duration::from_secs(1),
+                    tokio_boring::accept(&acceptor, conn.ok()?),
+                )
+                .await
+                .ok()?
+                .ok()?;
+                handshakes.fetch_add(1, Ordering::SeqCst);
+                Some(Ok::<_, std::io::Error>(mtls::mtls::BoringTlsStream::new(tls)))
+            }
+        })
+        .filter_map(|x| x);
+    let junction = Box::new(junction_test_utils::FakeJunction::default());
+    let handler = inbound_ez_to_ez_handler::InboundEzToEzHandler::new(junction);
+    let task = tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(EzToEzApiServer::new(handler))
+            .serve_with_incoming(incoming)
+            .await
+            .unwrap();
+    });
+    (addr, tls_handshakes, task)
 }

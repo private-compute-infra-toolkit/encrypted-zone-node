@@ -23,11 +23,12 @@ use ez_to_ez_service_proto::enforcer::v1::{
     ez_to_ez_api_client::EzToEzApiClient, EzCallRequest, EzCallResponse,
 };
 use grpc_connector::GrpcChannelPool;
-use metrics::common::ServiceMetrics;
+use metrics::common::{MetricAttributes, ServiceMetrics};
 use metrics::observed_proxy_channel::ObservedSender;
 use outbound_ez_to_ez_client::OutboundEzToEzClient;
 use payload_proto::enforcer::v1::ez_hybrid_payload::DeliveryMethod;
 use payload_proto::enforcer::v1::EzPayloadScope;
+use prost::Message;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -51,6 +52,8 @@ pub struct OutboundEzToEzHandler<MetricsImpl: ServiceMetrics> {
 
     // Whether TLS configuration is expected for outbound connections.
     expect_tls_config: bool,
+    // Whether each unary TLS request creates a new channel for per-request load balancing.
+    enable_per_unary_tls_channel: bool,
     // Outbound TLS configuration, dynamically swappable once fetched.
     tls_config: Arc<ArcSwapOption<OutboundTlsConfig>>,
     // Map from unique SNI to TLS client channel pool.
@@ -66,6 +69,7 @@ impl<MetricsImpl: ServiceMetrics> OutboundEzToEzHandler<MetricsImpl> {
         metrics: MetricsImpl,
         tls_config: Option<OutboundTlsConfig>,
         expect_tls_config: bool,
+        enable_per_unary_tls_channel: bool,
         max_decoding_message_size: usize,
     ) -> Result<Self> {
         let client_channel_pool = GrpcChannelPool::new_from_env(&proxy_address)
@@ -78,6 +82,7 @@ impl<MetricsImpl: ServiceMetrics> OutboundEzToEzHandler<MetricsImpl> {
             metrics,
             max_decoding_message_size,
             expect_tls_config,
+            enable_per_unary_tls_channel,
             tls_config: Arc::new(ArcSwapOption::new(tls_config.map(Arc::new))),
             tls_channel_pool: Arc::new(RwLock::new(HashMap::new())),
         })
@@ -121,9 +126,12 @@ impl<MetricsImpl: ServiceMetrics> OutboundEzToEzHandler<MetricsImpl> {
         log::info!("Done transporting responses from remote to local enforcer.");
     }
 
-    // This function gets or creates a TLS channel based on the SNI constructed from
-    // the Control Plane Metadata.
-    async fn get_or_create_channel(&self, meta: Option<&ControlPlaneMetadata>) -> Result<Channel> {
+    // Gets or creates a channel based on the SNI constructed from the Control Plane Metadata.
+    async fn get_or_create_channel(
+        &self,
+        meta: Option<&ControlPlaneMetadata>,
+        for_unary: bool,
+    ) -> Result<Channel> {
         let tls_config = match self.tls_config.load_full() {
             Some(config) => config,
             None if self.expect_tls_config => {
@@ -148,6 +156,12 @@ impl<MetricsImpl: ServiceMetrics> OutboundEzToEzHandler<MetricsImpl> {
             &meta.destination_operator_domain,
             &tls_config.trust_domain,
         );
+
+        if for_unary && self.enable_per_unary_tls_channel {
+            let connector =
+                tls_config.factory.create_connector(&meta.destination_operator_domain).await?;
+            return grpc_connector::connect_tls_from_env(&self.proxy_address, connector, sni).await;
+        }
 
         let cell = {
             let read_guard = self.tls_channel_pool.read().await;
@@ -200,7 +214,16 @@ impl<MetricsImpl: ServiceMetrics> OutboundEzToEzClient for OutboundEzToEzHandler
     ) -> Result<InvokeEzResponse> {
         let original_metadata = request.control_plane_metadata.clone();
         let ez_call_request = invoke_ez_request_to_ez_call_request(request);
-        let channel = self.get_or_create_channel(original_metadata.as_ref()).await?;
+        let metric_attr = MetricAttributes::from(&ez_call_request);
+        let _call_tracker = self.metrics.track_call(metric_attr.base());
+        self.metrics
+            .record_message_size_bytes(metric_attr.request(), ez_call_request.encoded_len() as u64);
+        let channel = self
+            .get_or_create_channel(original_metadata.as_ref(), /* for_unary= */ true)
+            .await
+            .inspect_err(|_e| {
+                self.metrics.record_error(&metric_attr.base(), "channel_creation_failed");
+            })?;
         let mut client =
             EzToEzApiClient::new(channel).max_decoding_message_size(self.max_decoding_message_size);
         let mut tonic_request = tonic::Request::new(ez_call_request);
@@ -210,11 +233,13 @@ impl<MetricsImpl: ServiceMetrics> OutboundEzToEzClient for OutboundEzToEzHandler
         let response = client
             .ez_call(tonic_request)
             .await
-            .map_err(|e| {
+            .inspect_err(|e| {
+                self.metrics.record_error(&metric_attr.base(), "remote_ez_call_failed");
                 log::error!("EzToEz outbound unary call failed: {e:#?}");
-                e
             })?
             .into_inner();
+        self.metrics
+            .record_message_size_bytes(metric_attr.response(), response.encoded_len() as u64);
 
         ez_call_response_to_invoke_ez_response(response, original_metadata)
     }
@@ -225,7 +250,8 @@ impl<MetricsImpl: ServiceMetrics> OutboundEzToEzClient for OutboundEzToEzHandler
         from_local_rx: mpsc::Receiver<InvokeEzRequest>,
         timeout: Option<std::time::Duration>,
     ) -> Result<mpsc::Receiver<anyhow::Result<InvokeEzResponse>>> {
-        let channel = self.get_or_create_channel(first_request_metadata).await?;
+        let channel =
+            self.get_or_create_channel(first_request_metadata, /* for_unary= */ false).await?;
         let mut client =
             EzToEzApiClient::new(channel).max_decoding_message_size(self.max_decoding_message_size);
 

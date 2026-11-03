@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## 0.30.0 (2026-11-03)
+
+
+### EZ Policy Enforcer
+
+* **enforcer:** Add args and env vars to v2 BinaryManifest
+* **enforcer:** add connect_tls_from_env helper
+* **enforcer:** Add EzManifest and IsolateDigest protos
+* **enforcer:** add per-unary TLS channel CLI flag
+
+
+### Gemini
+
+* **gemini:** Add atomic knowledge base rules for review agent
+* **gemini:** document pre-commit argument flags and rustfmt aspects
+
+
+### mTLS
+
+* **mtls:** support per-unary outbound TLS channel
+
+
+### Bug Fixes
+
+* **ez_to_ez:** record outbound metrics for unary remote_invoke calls
+
 ## 0.29.0 (2026-10-28)
 
 

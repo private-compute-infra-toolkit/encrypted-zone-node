@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use binary_manifest_proto::enforcer::v2::{
-    binary_manifest, BinaryManifest, RatifiedControls, SetupControls,
+    binary_manifest, BinaryManifest, IsolateDigest, RatifiedControls, SetupControls,
 };
 use intercepting_services_proto::enforcer::v2::InterceptingServices;
 use manifest_parser::v2::{
@@ -150,10 +150,20 @@ fn test_v2_binary_manifest_invalid_digest_fails() {
     for digest in ["", "abc", &"0123456789ABCDEF".repeat(4)] {
         for path in [V2_RATIFIED_PUBSUB_BROKER_JSON_PATH, V2_OPAQUE_HELLOWORLD_JSON_PATH] {
             let mut manifest = load_manifest(path);
-            manifest.package_digest_sha256 = digest.to_string();
+            manifest.isolate_digest = Some(IsolateDigest { package_sha256: digest.to_string() });
             let err = ParsedIsolate::try_from(manifest).unwrap_err();
-            assert!(err.to_string().contains("package_digest_sha256"), "{err}");
+            assert!(err.to_string().contains("isolate_digest.package_sha256"), "{err}");
         }
+    }
+}
+
+#[test]
+fn test_v2_binary_manifest_missing_isolate_digest_fails() {
+    for path in [V2_RATIFIED_PUBSUB_BROKER_JSON_PATH, V2_OPAQUE_HELLOWORLD_JSON_PATH] {
+        let mut manifest = load_manifest(path);
+        manifest.isolate_digest = None;
+        let err = ParsedIsolate::try_from(manifest).unwrap_err();
+        assert!(err.to_string().contains("isolate_digest is required"), "{err}");
     }
 }
 

@@ -3,7 +3,9 @@
     "isolate_name": "pubsub_broker",
     "publisher_id": "pcit-release-bot@google.com"
   },
-  "package_digest_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "isolate_digest": {
+    "package_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  },
   "binary_filename": "/usr/local/bin/main",
   "service_specs": [
     {

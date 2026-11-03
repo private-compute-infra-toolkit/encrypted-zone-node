@@ -73,6 +73,7 @@ rust_test(
         "//enforcer/interceptor",
         "//enforcer/isolate:isolate_info",
         "//enforcer/isolate:isolate_service_mapper",
+        "//enforcer/isolate:isolate_test_utils",
         "//enforcer/junction:junction_test_utils",
         "//enforcer/metrics",
         "//enforcer/state:state_manager",

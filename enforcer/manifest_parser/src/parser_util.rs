@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use anyhow::{bail, ensure, Context, Result};
-use binary_manifest_proto::enforcer::v2::{binary_manifest, BinaryManifest};
+use binary_manifest_proto::enforcer::v2::{binary_manifest, BinaryManifest, IsolateDigest};
 use common_proto::enforcer::v2::IsolateType;
 use ez_backend_dependencies_proto::enforcer::v2::EzBackendDependency as EzBackendDependencyV2;
 use ez_service_spec_proto::enforcer::v2::EzServiceSpec as EzServiceSpecV2;
@@ -69,7 +69,7 @@ impl TryFrom<BinaryManifest> for ParsedIsolate {
                 (setup.package_filename, None, kind)
             }
             binary_manifest::IsolateKind::Ratified(ratified) => {
-                validate_package_digest(&manifest.package_digest_sha256)?;
+                validate_isolate_digest(manifest.isolate_digest.as_ref())?;
                 let kind = IsolateKind::Ratified {
                     services_to_intercept: convert_intercepting_services_v2_to_v1(
                         ratified.services_to_intercept,
@@ -78,7 +78,7 @@ impl TryFrom<BinaryManifest> for ParsedIsolate {
                 (String::new(), ratified.metrics_policy, kind)
             }
             binary_manifest::IsolateKind::Opaque(opaque) => {
-                validate_package_digest(&manifest.package_digest_sha256)?;
+                validate_isolate_digest(manifest.isolate_digest.as_ref())?;
                 (String::new(), opaque.metrics_policy, IsolateKind::Opaque)
             }
         };
@@ -103,10 +103,15 @@ impl TryFrom<BinaryManifest> for ParsedIsolate {
     }
 }
 
-fn validate_package_digest(digest: &str) -> Result<()> {
+/// Requires an `isolate_digest` whose `package_sha256` is a lowercase hex SHA-256 digest.
+fn validate_isolate_digest(isolate_digest: Option<&IsolateDigest>) -> Result<()> {
+    let digest = &isolate_digest
+        .context("isolate_digest is required for Ratified and Opaque Isolates")?
+        .package_sha256;
     ensure!(
         digest.len() == 64 && digest.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
-        "package_digest_sha256 must be a lowercase hex-encoded SHA-256 digest, got '{digest}'"
+        "isolate_digest.package_sha256 must be a lowercase hex-encoded SHA-256 digest, got \
+         '{digest}'"
     );
     Ok(())
 }

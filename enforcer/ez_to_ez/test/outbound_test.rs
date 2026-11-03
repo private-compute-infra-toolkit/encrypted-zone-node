@@ -105,6 +105,9 @@ impl EzToEzApi for FakeEzToEzProxy {
 
 const DEFAULT_MAX_DECODING_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
 const LARGE_MAX_DECODING_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
+const BOXED_UNARY_PAYLOAD: &str = "boxed trait unary payload";
+const BOXED_STREAM_PAYLOAD: &str = "boxed trait stream payload";
+const STREAM_RECV_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub async fn start_fake_proxy_server(
     response_delay: Option<Duration>,
@@ -152,6 +155,52 @@ pub fn create_test_request(input_payload: Option<&str>) -> InvokeEzRequest {
 }
 
 #[tokio::test]
+async fn test_outbound_boxed_client_unary_and_streaming_flow() {
+    let (port, shutdown_tx) = start_fake_proxy_server(None).await;
+    let server_address = format!("http://localhost:{}", port);
+    let handler = OutboundEzToEzHandler::new(
+        server_address,
+        TestMetrics::default(),
+        /* tls_config= */ None,
+        /* expect_tls_config= */ false,
+        /* enable_per_unary_tls_channel= */ true,
+        DEFAULT_MAX_DECODING_MESSAGE_SIZE,
+    )
+    .await
+    .unwrap();
+    let client: Box<dyn OutboundEzToEzClient> = Box::new(handler);
+    let cloned_client = client.clone();
+    assert_eq!(format!("{client:?}"), "Box<dyn OutboundEzToEzClient>");
+
+    let unary_response =
+        client.remote_invoke(create_test_request(Some(BOXED_UNARY_PAYLOAD)), None).await.unwrap();
+    let unary_output = match unary_response.ez_response_payload.unwrap().delivery_method.unwrap() {
+        DeliveryMethod::InlineData(inline) => inline.datagrams[0].clone(),
+        _ => panic!("Expected InlineData"),
+    };
+    assert_eq!(unary_output, BOXED_UNARY_PAYLOAD.as_bytes());
+
+    let (local_to_outbound, from_local_rx) = mpsc::channel(10);
+    let mut outbound_to_local =
+        cloned_client.remote_streaming_connect(None, from_local_rx, None).await.unwrap();
+    local_to_outbound.send(create_test_request(Some(BOXED_STREAM_PAYLOAD))).await.unwrap();
+    let stream_response = tokio::time::timeout(STREAM_RECV_TIMEOUT, outbound_to_local.recv())
+        .await
+        .expect("Timed out waiting for streamed response")
+        .expect("Stream closed prematurely")
+        .expect("Streamed call should succeed");
+    let stream_output = match stream_response.ez_response_payload.unwrap().delivery_method.unwrap()
+    {
+        DeliveryMethod::InlineData(inline) => inline.datagrams[0].clone(),
+        _ => panic!("Expected InlineData"),
+    };
+    assert_eq!(stream_output, BOXED_STREAM_PAYLOAD.as_bytes());
+    drop(local_to_outbound);
+    assert!(outbound_to_local.recv().await.is_none());
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
 async fn test_outbound_unary_flow() {
     let (port, shutdown_tx) = start_fake_proxy_server(None).await;
     let server_address = format!("http://localhost:{}", port);
@@ -160,6 +209,7 @@ async fn test_outbound_unary_flow() {
         TestMetrics::default(),
         /* tls_config= */ None,
         /* expect_tls_config= */ false,
+        /* enable_per_unary_tls_channel= */ true,
         DEFAULT_MAX_DECODING_MESSAGE_SIZE,
     )
     .await
@@ -188,6 +238,7 @@ async fn test_outbound_unary_empty_payload() {
         TestMetrics::default(),
         /* tls_config= */ None,
         /* expect_tls_config= */ false,
+        /* enable_per_unary_tls_channel= */ true,
         DEFAULT_MAX_DECODING_MESSAGE_SIZE,
     )
     .await
@@ -214,6 +265,7 @@ async fn test_outbound_unary_call_timeout_propagation() {
         TestMetrics::default(),
         /* tls_config= */ None,
         /* expect_tls_config= */ false,
+        /* enable_per_unary_tls_channel= */ true,
         DEFAULT_MAX_DECODING_MESSAGE_SIZE,
     )
     .await
@@ -252,6 +304,7 @@ async fn test_outbound_streaming_flow() {
         TestMetrics::default(),
         /* tls_config= */ None,
         /* expect_tls_config= */ false,
+        /* enable_per_unary_tls_channel= */ true,
         DEFAULT_MAX_DECODING_MESSAGE_SIZE,
     )
     .await
@@ -301,6 +354,7 @@ async fn test_outbound_extensions_propagated() {
         TestMetrics::default(),
         /* tls_config= */ None,
         /* expect_tls_config= */ false,
+        /* enable_per_unary_tls_channel= */ true,
         DEFAULT_MAX_DECODING_MESSAGE_SIZE,
     )
     .await
@@ -325,6 +379,7 @@ async fn test_outbound_streaming_empty_payload() {
         TestMetrics::default(),
         /* tls_config= */ None,
         /* expect_tls_config= */ false,
+        /* enable_per_unary_tls_channel= */ true,
         DEFAULT_MAX_DECODING_MESSAGE_SIZE,
     )
     .await
@@ -387,6 +442,7 @@ async fn test_outbound_pending_tls_fails_precondition_unary() {
         TestMetrics::default(),
         /* tls_config= */ None,
         /* expect_tls_config= */ true,
+        /* enable_per_unary_tls_channel= */ true,
         DEFAULT_MAX_DECODING_MESSAGE_SIZE,
     )
     .await
@@ -410,6 +466,7 @@ async fn test_outbound_pending_tls_fails_precondition_streaming() {
         TestMetrics::default(),
         /* tls_config= */ None,
         /* expect_tls_config= */ true,
+        /* enable_per_unary_tls_channel= */ true,
         DEFAULT_MAX_DECODING_MESSAGE_SIZE,
     )
     .await
@@ -433,6 +490,7 @@ async fn test_outbound_large_payload_unary_and_streaming() {
         TestMetrics::default(),
         /* tls_config= */ None,
         /* expect_tls_config= */ false,
+        /* enable_per_unary_tls_channel= */ true,
         LARGE_MAX_DECODING_MESSAGE_SIZE,
     )
     .await

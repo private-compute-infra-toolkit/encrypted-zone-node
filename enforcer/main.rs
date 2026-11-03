@@ -192,6 +192,19 @@ struct EnforcerInputs {
     )]
     ez_to_ez_max_concurrent_handshakes: usize,
 
+    #[arg(
+        long,
+        default_value_t = true,
+        default_missing_value = "true",
+        num_args = 0..=1,
+        require_equals = true,
+        action = clap::ArgAction::Set,
+        help = "Creates a new outbound TLS channel for each unary EZ-to-EZ request to allow \
+                per-request load balancing. Streaming EZ-to-EZ calls continue to use the channel \
+                pool."
+    )]
+    ez_to_ez_per_unary_tls: bool,
+
     // SPIFFE ID follows the SPIFFE SPEC https://spiffe.io/docs/latest/spiffe-specs/spiffe-id/#2-spiffe-identity
     // Example: spiffe://prod.google.com.tca.staging.aws.pcit.goog/operator/prod.google.com/prober-staging/publisher/google.com/pcit-release-bot/workload/attestation-verification-service-prober-staging
     #[allow(dead_code)]
@@ -426,6 +439,7 @@ fn main() -> anyhow::Result<()> {
                         // setup_isolate.
                         /* tls_config= */ None,
                         /* expect_tls_config= */ enforcer_inputs.enable_mtls,
+                        enforcer_inputs.ez_to_ez_per_unary_tls,
                         max_decoding_message_size,
                     )
                     .await?,

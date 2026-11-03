@@ -12,366 +12,35 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::{Context, Result};
-use container_manager_request::ContainerManagerRequest;
-use container_manager_requester::ContainerManagerRequester;
-use data_scope::{
-    manifest_validator::ManifestValidator,
-    request::{
-        AddBackendDependenciesRequest, AddIsolateRequest, AddManifestScopeRequest,
-        GetIsolateScopeRequest, ValidateIsolateRequest,
-    },
-    requester::DataScopeRequester,
-};
+mod isolate_ez_service_test_common;
+
+use anyhow::Result;
+use data_scope::request::AddBackendDependenciesRequest;
 use data_scope_proto::enforcer::v1::DataScopeType;
-use enforcer_proto::enforcer::v1::{
-    isolate_ez_bridge_client::IsolateEzBridgeClient,
-    isolate_ez_bridge_server::IsolateEzBridgeServer, ControlPlaneMetadata, CreateFileshareRequest,
-    CreateMemshareRequest, EzPayloadIsolateScope, InvokeEzRequest, InvokeEzResponse,
-    IsolateDataScope, IsolateState, NotifyIsolateStateRequest, NotifyIsolateStateResponse,
-    PollIsolateStateRequest,
+use enforcer_proto::enforcer::v1::InvokeEzRequest;
+use isolate_ez_service_test_common::{
+    add_backend_dependencies, add_to_data_scope_requester, create_test_request,
+    create_test_request_with_scope, get_sample_invoke_ez_response, TestHarness, TestHarnessConfig,
+    CHANNEL_SIZE, SHM_PAYLOAD_LARGE_THRESHOLD, TEST_EXTERNAL_OPERATOR_DOMAIN,
+    TEST_EXTERNAL_ROUTE_TYPE, TEST_INTERNAL_OPERATOR_DOMAIN, TEST_INTERNAL_ROUTE_TYPE,
+    TEST_REMOTE_OPERATOR_DOMAIN, TEST_REMOTE_ROUTE_TYPE, TEST_SERVICE_NAME, TEST_SOME_DOMAIN,
+    TEST_SOME_SERVICE_NAME,
 };
-use external_proxy_connector::{ExternalProxyChannel, ExternalProxyConnectorError};
-use fileshare_manager::FileshareManager;
-use hyper_util::rt::tokio::TokioIo;
-use isolate_ez_service::{IsolateEzBridgeDependencies, IsolateEzBridgeService};
-use isolate_info::{BinaryServicesIndex, IsolateId, IsolateServiceInfo};
-use isolate_service_mapper::IsolateServiceMapper;
+use isolate_info::IsolateServiceInfo;
 use isolate_test_utils::{
-    DefaultEchoIsolate, ScopeDragInstruction, TEST_ERROR_CODE, TEST_ERROR_MESSAGE,
-    TEST_ERROR_SERVICE_NAME,
+    ScopeDragInstruction, TEST_ERROR_CODE, TEST_ERROR_MESSAGE, TEST_ERROR_SERVICE_NAME,
 };
-use junction_test_utils::FakeJunction;
 use manifest_proto::enforcer::v1::ez_backend_dependency::RouteType;
-use outbound_ez_to_ez_client::{OutboundEzToEzClient, OutboundTlsConfig};
-use payload_proto::enforcer::v1::{
-    ez_hybrid_payload::DeliveryMethod, EzHybridPayload, EzPayloadData,
-};
-use shared_memory_manager::SharedMemManager;
-use shm_slab_pool::{ShmSlabPool, ShmSlabPoolOptions};
-use state_manager::IsolateStateManager;
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc, Mutex,
-};
-use tokio::sync::mpsc::{self, Receiver, Sender};
+use std::sync::atomic::Ordering;
+use tokio::sync::mpsc;
 use tokio::time::{sleep, timeout, Duration};
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::transport::{Channel, Endpoint, Server};
-use tonic::{codec::Streaming, Status};
-use tower::service_fn;
+use tonic::Status;
 
-const CHANNEL_SIZE: usize = 10;
-const REGION_SIZE: i64 = 4096;
-// We use a low payload threshold to force our test requests/responses to trigger
-// shared memory payload conversion (i.e., ShmData instead of inline data)
-const SHM_PAYLOAD_LOW_THRESHOLD: u64 = 0;
-// We use a large payload to force our test requests through the default
-// gRPC over UDS path (i.e inline data rather than shared mem payloads)
-const SHM_PAYLOAD_LARGE_THRESHOLD: u64 = 100 * 1024 * 1024; // 100 MiB
-
-const TEST_REMOTE_OPERATOR_DOMAIN: &str = "some.remote.service";
-const TEST_SERVICE_NAME: &str = "TestService";
-const TEST_INTERNAL_OPERATOR_DOMAIN: &str = "internal";
-const TEST_EXTERNAL_OPERATOR_DOMAIN: &str = "some.external.service";
 const TEST_UNKNOWN_DOMAIN: &str = "unknown.domain";
 const TEST_UNKNOWN_SERVICE_NAME: &str = "UnknownService";
-const TEST_SOME_DOMAIN: &str = "some.domain";
-const TEST_SOME_SERVICE_NAME: &str = "some_service";
 const RATIFIED_INTERCEPTOR_DOMAIN: &str = "ratified.interceptor.domain";
 const RATIFIED_INTERCEPTOR_SERVICE: &str = "RatifiedInterceptorService";
-const TEST_INTERNAL_ROUTE_TYPE: RouteType = RouteType::Internal;
-const TEST_EXTERNAL_ROUTE_TYPE: RouteType = RouteType::External;
-const TEST_REMOTE_ROUTE_TYPE: RouteType = RouteType::Remote;
-const TEST_PAYLOAD: &[u8] = b"hello world";
-
-// Creates a Mock Proxy Component for testing Ez-to-External external streaming calls.
-#[derive(Clone, Debug, Default)]
-struct MockExternalProxy {
-    call_count: Arc<AtomicUsize>,
-    received_from_bridge_count: Arc<AtomicUsize>,
-    delay: Arc<Mutex<Duration>>,
-}
-
-#[tonic::async_trait]
-impl ExternalProxyChannel for MockExternalProxy {
-    async fn proxy_external(
-        &self,
-        _: IsolateId,
-        request: InvokeEzRequest,
-        timeout: Option<std::time::Instant>,
-    ) -> Result<InvokeEzResponse, ExternalProxyConnectorError> {
-        self.call_count.fetch_add(1, Ordering::SeqCst);
-        if let Some(t) = timeout {
-            let delay = *self.delay.lock().unwrap();
-            if std::time::Instant::now() + delay > t {
-                return Err(ExternalProxyConnectorError::ConnectionFailed(
-                    "Mock proxy timeout".to_string(),
-                ));
-            }
-        }
-        let delay = *self.delay.lock().unwrap();
-        sleep(delay).await;
-        if request.control_plane_metadata.unwrap().destination_service_name
-            == TEST_ERROR_SERVICE_NAME
-        {
-            return Err(ExternalProxyConnectorError::UnaryCallFailed(Status::new(
-                TEST_ERROR_CODE.into(),
-                TEST_ERROR_MESSAGE,
-            )));
-        }
-        Ok(get_sample_invoke_ez_response())
-    }
-    async fn stream_proxy_external(
-        &self,
-        _: IsolateId,
-        mut from_bridge_rx: Receiver<InvokeEzRequest>,
-        _timeout: Option<std::time::Duration>,
-    ) -> Result<Receiver<Result<InvokeEzResponse, Status>>, ExternalProxyConnectorError> {
-        self.call_count.fetch_add(1, Ordering::SeqCst);
-        let received_from_bridge_count = self.received_from_bridge_count.clone();
-
-        let (to_bridge_tx, to_bridge_rx) = mpsc::channel(1);
-        let ret = if let Some(first_request) = from_bridge_rx.recv().await {
-            received_from_bridge_count.fetch_add(1, Ordering::SeqCst);
-            if first_request.control_plane_metadata.unwrap().destination_service_name
-                == TEST_ERROR_SERVICE_NAME
-            {
-                return Err(ExternalProxyConnectorError::StreamFailed(Box::new(Status::new(
-                    TEST_ERROR_CODE.into(),
-                    TEST_ERROR_MESSAGE,
-                ))));
-            }
-            Ok(to_bridge_rx)
-        } else {
-            Err(ExternalProxyConnectorError::ConnectionFailed(
-                "Failed to receive first request".to_string(),
-            ))
-        };
-        tokio::spawn(async move {
-            while from_bridge_rx.recv().await.is_some() {
-                received_from_bridge_count.fetch_add(1, Ordering::SeqCst);
-                to_bridge_tx
-                    .send(Ok(get_sample_invoke_ez_response()))
-                    .await
-                    .expect("Should be able to send response");
-            }
-        });
-        ret
-    }
-    fn clone_channel(&self) -> Box<dyn ExternalProxyChannel> {
-        Box::new(self.clone())
-    }
-}
-
-// Mock for EzToEzOutboundHandler for testing remote routing.
-#[derive(Clone, Debug, Default)]
-struct MockEzToEzOutboundHandler {
-    call_count: Arc<AtomicUsize>,
-    delay: Arc<Mutex<Duration>>,
-}
-
-#[tonic::async_trait]
-impl OutboundEzToEzClient for MockEzToEzOutboundHandler {
-    async fn remote_invoke(
-        &self,
-        request: InvokeEzRequest,
-        timeout: Option<std::time::Instant>,
-    ) -> anyhow::Result<InvokeEzResponse> {
-        self.call_count.fetch_add(1, Ordering::SeqCst);
-        if let Some(t) = timeout {
-            let delay = *self.delay.lock().unwrap();
-            if std::time::Instant::now() + delay > t {
-                return Err(anyhow::anyhow!("Mock remote_invoke timeout"));
-            }
-        }
-        let delay = *self.delay.lock().unwrap();
-        sleep(delay).await;
-        if request.control_plane_metadata.unwrap().destination_service_name
-            == TEST_ERROR_SERVICE_NAME
-        {
-            return Err(Status::new(TEST_ERROR_CODE.into(), TEST_ERROR_MESSAGE).into());
-        }
-        Ok(InvokeEzResponse::default())
-    }
-
-    async fn remote_streaming_connect(
-        &self,
-        _first_request_metadata: Option<&ControlPlaneMetadata>,
-        mut from_local_rx: Receiver<InvokeEzRequest>,
-        _timeout: Option<std::time::Duration>,
-    ) -> anyhow::Result<Receiver<Result<InvokeEzResponse>>> {
-        self.call_count.fetch_add(1, Ordering::SeqCst);
-        let (to_caller_tx, to_caller_rx) = mpsc::channel(1);
-        tokio::spawn(async move {
-            while let Some(request) = from_local_rx.recv().await {
-                if request.control_plane_metadata.unwrap().destination_service_name
-                    == TEST_ERROR_SERVICE_NAME
-                {
-                    to_caller_tx
-                        .send(Err(Status::new(TEST_ERROR_CODE.into(), TEST_ERROR_MESSAGE).into()))
-                        .await
-                        .expect("Should be able to send error response");
-                    continue;
-                }
-                to_caller_tx
-                    .send(Ok(get_sample_invoke_ez_response()))
-                    .await
-                    .expect("Should be able to send response");
-            }
-        });
-        Ok(to_caller_rx)
-    }
-
-    fn set_tls_config(&self, _tls_config: OutboundTlsConfig) -> anyhow::Result<()> {
-        Ok(())
-    }
-}
-
-#[derive(Debug)]
-struct TestHarness {
-    isolate_id: IsolateId,
-    mock_junction: FakeJunction,
-    mock_proxy: MockExternalProxy,
-    mock_ez_to_ez: MockEzToEzOutboundHandler,
-    mapper: IsolateServiceMapper,
-    isolate_state_manager: IsolateStateManager,
-    data_scope_requester: DataScopeRequester,
-    manifest_validator: ManifestValidator,
-    container_manager_rx: Receiver<ContainerManagerRequest>,
-    client: IsolateEzBridgeClient<Channel>,
-    interceptor: interceptor::Interceptor,
-    shared_memory_manager: SharedMemManager,
-}
-
-impl TestHarness {
-    async fn new_with_arguments(
-        is_ratified: bool,
-        instruction: ScopeDragInstruction,
-        shm_payload_threshold: u64,
-    ) -> Result<Self> {
-        let mock_proxy = MockExternalProxy::default();
-        let mut mock_junction = FakeJunction::default();
-        mock_junction.set_fake_isolate(Box::new(DefaultEchoIsolate::new(instruction, None)));
-
-        let mock_ez_to_ez = MockEzToEzOutboundHandler::default();
-        let service_mapper = IsolateServiceMapper::default();
-        let isolate_id = IsolateId::new(BinaryServicesIndex::new(is_ratified));
-
-        let (tx, container_manager_rx) = mpsc::channel(1);
-        let container_manager_requester = ContainerManagerRequester::new(tx);
-        let data_scope_requester = DataScopeRequester::new(0);
-
-        let manifest_validator = ManifestValidator::default();
-        let isolate_state_manager = IsolateStateManager::new(
-            data_scope_requester.clone(),
-            container_manager_requester.clone(),
-        );
-        let shared_memory_manager =
-            SharedMemManager::new(container_manager_requester.clone(), 64, 4);
-        let interceptor_instance = interceptor::Interceptor::new(service_mapper.clone());
-        let fileshare_manager = FileshareManager::new(container_manager_requester);
-
-        let deps = IsolateEzBridgeDependencies {
-            isolate_id,
-            isolate_junction: Box::new(mock_junction.clone()),
-            isolate_state_manager: isolate_state_manager.clone(),
-            shared_memory_manager: shared_memory_manager.clone(),
-            fileshare_manager: fileshare_manager.clone(),
-            external_proxy_connector: Some(Box::new(mock_proxy.clone())),
-            isolate_service_mapper: service_mapper.clone(),
-            data_scope_requester: data_scope_requester.clone(),
-            manifest_validator: manifest_validator.clone(),
-            ez_to_ez_outbound_handler: Some(Box::new(mock_ez_to_ez.clone())),
-            interceptor: interceptor_instance.clone(),
-            shm_payload_threshold,
-        };
-        let isolate_ez_bridge_service = IsolateEzBridgeService::new(deps);
-        let client = spawn_test_server(isolate_ez_bridge_service).await;
-
-        Ok(Self {
-            isolate_id,
-            mock_junction,
-            mock_proxy,
-            mock_ez_to_ez,
-            mapper: service_mapper,
-            isolate_state_manager,
-            data_scope_requester,
-            manifest_validator,
-            container_manager_rx,
-            client,
-            interceptor: interceptor_instance,
-            shared_memory_manager,
-        })
-    }
-
-    async fn new() -> Result<Self> {
-        Self::new_with_arguments(false, ScopeDragInstruction::KeepSame, SHM_PAYLOAD_LARGE_THRESHOLD)
-            .await
-    }
-
-    async fn new_with_self_hosted_services(service_infos: Vec<IsolateServiceInfo>) -> Result<Self> {
-        let mock_proxy = MockExternalProxy::default();
-        let mut mock_junction = FakeJunction::default();
-        mock_junction.set_fake_isolate(Box::new(DefaultEchoIsolate::new(
-            ScopeDragInstruction::KeepSame,
-            None,
-        )));
-
-        let mock_ez_to_ez = MockEzToEzOutboundHandler::default();
-        let service_mapper = IsolateServiceMapper::default();
-        let binary_services_index = service_mapper
-            .new_binary_index(service_infos, false, "".to_string(), "".to_string())
-            .await?;
-        let isolate_id = IsolateId::new(binary_services_index);
-
-        let (tx, container_manager_rx) = mpsc::channel(1);
-        let container_manager_requester = ContainerManagerRequester::new(tx);
-        let data_scope_requester = DataScopeRequester::new(0);
-
-        let manifest_validator = ManifestValidator::default();
-        let isolate_state_manager = IsolateStateManager::new(
-            data_scope_requester.clone(),
-            container_manager_requester.clone(),
-        );
-        let shared_memory_manager =
-            SharedMemManager::new(container_manager_requester.clone(), 64, 4);
-        let interceptor_instance = interceptor::Interceptor::new(service_mapper.clone());
-        let fileshare_manager = FileshareManager::new(container_manager_requester);
-
-        let deps = IsolateEzBridgeDependencies {
-            isolate_id,
-            isolate_junction: Box::new(mock_junction.clone()),
-            isolate_state_manager: isolate_state_manager.clone(),
-            shared_memory_manager: shared_memory_manager.clone(),
-            fileshare_manager: fileshare_manager.clone(),
-            external_proxy_connector: Some(Box::new(mock_proxy.clone())),
-            isolate_service_mapper: service_mapper.clone(),
-            data_scope_requester: data_scope_requester.clone(),
-            manifest_validator: manifest_validator.clone(),
-            ez_to_ez_outbound_handler: Some(Box::new(mock_ez_to_ez.clone())),
-            interceptor: interceptor_instance.clone(),
-            shm_payload_threshold: SHM_PAYLOAD_LARGE_THRESHOLD,
-        };
-        let isolate_ez_bridge_service = IsolateEzBridgeService::new(deps);
-        let client = spawn_test_server(isolate_ez_bridge_service).await;
-
-        Ok(Self {
-            isolate_id,
-            mock_junction,
-            mock_proxy,
-            mock_ez_to_ez,
-            mapper: service_mapper,
-            isolate_state_manager,
-            data_scope_requester,
-            manifest_validator,
-            container_manager_rx,
-            client,
-            interceptor: interceptor_instance,
-            shared_memory_manager,
-        })
-    }
-}
 
 /// Test case for Isolate to find an internal service using Junction Component.
 #[tokio::test]
@@ -752,51 +421,6 @@ async fn unary_routes_to_external_proxy() {
     let _ = harness.client.invoke_ez(request).await.expect("Invoke should succeed");
 
     assert_eq!(proxy_calls.load(Ordering::SeqCst), 1, "External proxy should have been called");
-    assert_eq!(junction_calls.load(Ordering::SeqCst), 0, "Junction should NOT have been called");
-}
-
-#[tokio::test]
-async fn unary_routes_to_external_proxy_bypasses_scopes() {
-    let mut harness = TestHarness::new().await.expect("Harness should start");
-    let junction_calls = harness.mock_junction.call_count.clone();
-    let proxy_calls = harness.mock_proxy.call_count.clone();
-    let service_info = IsolateServiceInfo {
-        operator_domain: TEST_EXTERNAL_OPERATOR_DOMAIN.to_string(),
-        service_name: TEST_SERVICE_NAME.to_string(),
-        ..Default::default()
-    };
-
-    add_backend_dependencies(
-        harness.isolate_id,
-        harness.mapper.clone(),
-        harness.manifest_validator.clone(),
-        &service_info,
-        false,
-        TEST_EXTERNAL_ROUTE_TYPE,
-    )
-    .await
-    .expect("Failed to add backend dependency");
-
-    // Simulate setting up the data scopes.
-    add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
-        .await
-        .expect("Should be able to add to DSM/RIM");
-
-    let mut request =
-        create_test_request(&service_info.operator_domain, &service_info.service_name);
-    // Omit scopes completely!
-    request.isolate_request_iscope = None;
-
-    // Requests without datascopes are validated and blocked.
-    let response = harness.client.invoke_ez(request).await;
-
-    assert!(response.is_err(), "Invoke should be blocked");
-    assert_eq!(response.unwrap_err().code(), tonic::Code::PermissionDenied);
-    assert_eq!(
-        proxy_calls.load(Ordering::SeqCst),
-        0,
-        "External proxy should have been called due to bypass"
-    );
     assert_eq!(junction_calls.load(Ordering::SeqCst), 0, "Junction should NOT have been called");
 }
 
@@ -1303,382 +927,6 @@ async fn unary_routes_to_remote_handler_with_qualifiers() {
 }
 
 #[tokio::test]
-async fn notify_isolate_state_success() {
-    let mut harness = TestHarness::new().await.expect("Harness should start");
-    harness
-        .isolate_state_manager
-        .add_isolate(AddIsolateRequest {
-            current_data_scope_type: DataScopeType::Public,
-            allowed_data_scope_type: DataScopeType::Public,
-            isolate_id: harness.isolate_id,
-        })
-        .await;
-
-    let (tx, mut rx) = setup_notify_state_stream(&mut harness.client)
-        .await
-        .expect("Should be able to setup notify state stream");
-
-    tx.send(NotifyIsolateStateRequest { new_isolate_state: IsolateState::Ready.into() })
-        .await
-        .expect("Should be able to send state update");
-
-    let response = rx.message().await;
-    assert!(response.is_ok(), "Expected a successful state update response");
-}
-
-#[tokio::test]
-async fn notify_isolate_state_failure() {
-    let mut harness = TestHarness::new().await.expect("Harness should start");
-    harness
-        .isolate_state_manager
-        .add_isolate(AddIsolateRequest {
-            current_data_scope_type: DataScopeType::Public,
-            allowed_data_scope_type: DataScopeType::Public,
-            isolate_id: harness.isolate_id,
-        })
-        .await;
-    harness.isolate_state_manager.mark_channel_connected(harness.isolate_id).await.unwrap();
-
-    let (tx, mut rx) = setup_notify_state_stream(&mut harness.client)
-        .await
-        .expect("Should be able to setup notify state stream");
-
-    // Send the same state twice to trigger a DuplicateStateUpdate error.
-    tx.send(NotifyIsolateStateRequest { new_isolate_state: IsolateState::Ready.into() })
-        .await
-        .expect("Should be able to send state update");
-    let response = rx.message().await;
-    assert!(response.is_ok(), "Expected a successful state update response");
-
-    tx.send(NotifyIsolateStateRequest { new_isolate_state: IsolateState::Ready.into() })
-        .await
-        .expect("Should be able to send state update");
-
-    // The service sends an error, then a success. We check for the error.
-    let response = rx.message().await;
-    assert!(response.is_err(), "Expected a state update failure");
-    assert_eq!(response.expect_err("Expected an error response").code(), tonic::Code::Aborted);
-}
-
-#[tokio::test]
-async fn poll_isolate_state_success() {
-    let mut harness = TestHarness::new().await.expect("Harness should start");
-    harness
-        .isolate_state_manager
-        .add_isolate(AddIsolateRequest {
-            current_data_scope_type: DataScopeType::Public,
-            allowed_data_scope_type: DataScopeType::Public,
-            isolate_id: harness.isolate_id,
-        })
-        .await;
-    harness.isolate_state_manager.mark_channel_connected(harness.isolate_id).await.unwrap();
-
-    harness
-        .isolate_state_manager
-        .update_state(harness.isolate_id, IsolateState::Ready)
-        .await
-        .expect("Should be able to update state");
-
-    let response = harness
-        .client
-        .poll_isolate_state(PollIsolateStateRequest {})
-        .await
-        .expect("Should succeed");
-
-    assert_eq!(response.get_ref().isolate_state, IsolateState::Ready as i32);
-}
-
-#[tokio::test]
-async fn create_memshare_success() {
-    let mut harness = TestHarness::new().await.expect("Harness should start");
-    harness
-        .isolate_state_manager
-        .add_isolate(AddIsolateRequest {
-            current_data_scope_type: DataScopeType::Public,
-            allowed_data_scope_type: DataScopeType::Public,
-            isolate_id: harness.isolate_id,
-        })
-        .await;
-
-    let (tx, rx) = mpsc::channel(CHANNEL_SIZE);
-    let mut response_stream = harness
-        .client
-        .create_memshare(ReceiverStream::new(rx))
-        .await
-        .expect("create_memshare should succeed")
-        .into_inner();
-
-    tx.send(CreateMemshareRequest { region_size: REGION_SIZE, data_scope: None })
-        .await
-        .expect("Should be able to send memshare request");
-
-    // Check that ContainerManager receives a MountWritableFile request.
-    let cm_request = timeout(Duration::from_secs(1), harness.container_manager_rx.recv())
-        .await
-        .expect("ContainerManager did not receive request in time")
-        .expect("ContainerManager request channel should not be closed while harness is in scope");
-
-    let (mount_req, resp_tx) = match cm_request {
-        ContainerManagerRequest::MountWritableFile { req, resp } => (req, resp),
-        _ => panic!("Expected MountWritableFile request"),
-    };
-    assert_eq!(mount_req.isolate_id, harness.isolate_id);
-    assert_eq!(mount_req.region_size, REGION_SIZE);
-
-    // Simulate successful mount by ContainerManager.
-    resp_tx
-        .send(Ok(container_manager_request::MountFileResponse {}))
-        .expect("Should be able to send MountFileResponse");
-
-    // Check for a successful response from create_memshare.
-    let response = response_stream
-        .message()
-        .await
-        .expect("Stream should have a response")
-        .expect("Response should be Ok");
-
-    assert!(!response.shared_memory_handle.is_empty());
-}
-
-#[tokio::test]
-async fn create_memshare_freeze_scope_failure() {
-    let mut harness = TestHarness::new().await.expect("Harness should start");
-    // Do not add the Isolate to the state manager to cause freeze_scope to fail.
-
-    let (tx, rx) = mpsc::channel(CHANNEL_SIZE);
-    let mut response_stream = harness
-        .client
-        .create_memshare(ReceiverStream::new(rx))
-        .await
-        .expect("create_memshare should succeed")
-        .into_inner();
-
-    tx.send(enforcer_proto::enforcer::v1::CreateMemshareRequest {
-        region_size: REGION_SIZE,
-        data_scope: None,
-    })
-    .await
-    .expect("Should be able to send memshare request");
-
-    // Check for a failure response from create_memshare.
-    let status = response_stream.message().await.expect_err("Stream should return an error");
-
-    assert_eq!(status.code(), tonic::Code::PermissionDenied);
-
-    // Ensure ContainerManager is not called.
-    assert!(
-        tokio::time::timeout(Duration::from_millis(50), harness.container_manager_rx.recv())
-            .await
-            .is_err(),
-        "ContainerManager should not have been called"
-    );
-}
-
-#[tokio::test]
-async fn create_memshare_rejects_scope_above_manifest() {
-    // Manifest output scope is only enforced for Ratified Isolates.
-    let mut harness = TestHarness::new_with_arguments(
-        true,
-        ScopeDragInstruction::KeepSame,
-        SHM_PAYLOAD_LARGE_THRESHOLD,
-    )
-    .await
-    .expect("Harness should start");
-    harness
-        .isolate_state_manager
-        .add_isolate(AddIsolateRequest {
-            current_data_scope_type: DataScopeType::Public,
-            allowed_data_scope_type: DataScopeType::UserPrivate,
-            isolate_id: harness.isolate_id,
-        })
-        .await;
-    add_manifest_output_scope(&harness, DataScopeType::Public).await;
-
-    let (tx, rx) = mpsc::channel(CHANNEL_SIZE);
-    let mut response_stream = harness
-        .client
-        .create_memshare(ReceiverStream::new(rx))
-        .await
-        .expect("create_memshare should succeed")
-        .into_inner();
-
-    tx.send(CreateMemshareRequest {
-        region_size: REGION_SIZE,
-        data_scope: Some(IsolateDataScope {
-            scope_type: DataScopeType::UserPrivate.into(),
-            ..Default::default()
-        }),
-    })
-    .await
-    .expect("Should be able to send memshare request");
-
-    let status = response_stream.message().await.expect_err("Stream should return an error");
-
-    assert_eq!(status.code(), tonic::Code::PermissionDenied);
-    assert!(
-        tokio::time::timeout(Duration::from_millis(50), harness.container_manager_rx.recv())
-            .await
-            .is_err(),
-        "ContainerManager should not have been called"
-    );
-}
-
-#[tokio::test]
-async fn create_fileshare_rejects_scope_above_manifest() {
-    // Manifest output scope is only enforced for Ratified Isolates.
-    let harness = TestHarness::new_with_arguments(
-        true,
-        ScopeDragInstruction::KeepSame,
-        SHM_PAYLOAD_LARGE_THRESHOLD,
-    )
-    .await
-    .expect("Harness should start");
-    harness
-        .isolate_state_manager
-        .add_isolate(AddIsolateRequest {
-            current_data_scope_type: DataScopeType::Public,
-            allowed_data_scope_type: DataScopeType::UserPrivate,
-            isolate_id: harness.isolate_id,
-        })
-        .await;
-    add_manifest_output_scope(&harness, DataScopeType::Public).await;
-
-    let mut client = harness.client.clone();
-    let status = client
-        .create_fileshare(CreateFileshareRequest {
-            data_scope: Some(IsolateDataScope {
-                scope_type: DataScopeType::UserPrivate.into(),
-                ..Default::default()
-            }),
-        })
-        .await
-        .expect_err("CreateFileshare should fail");
-
-    assert_eq!(status.code(), tonic::Code::PermissionDenied);
-}
-
-#[tokio::test]
-async fn create_memshare_records_current_scope_of_opaque_isolate() {
-    let mut harness = TestHarness::new().await.expect("Harness should start");
-    harness
-        .isolate_state_manager
-        .add_isolate(AddIsolateRequest {
-            current_data_scope_type: DataScopeType::UserPrivate,
-            allowed_data_scope_type: DataScopeType::UserPrivate,
-            isolate_id: harness.isolate_id,
-        })
-        .await;
-
-    // An Opaque Isolate cannot declare its way out of the scope it is currently in.
-    let handle = create_memshare_handle(&mut harness, DataScopeType::Public).await;
-
-    assert_eq!(recorded_share_scope(&harness, handle), DataScopeType::UserPrivate);
-}
-
-#[tokio::test]
-async fn create_memshare_ignores_stricter_declared_scope_of_opaque_isolate() {
-    let mut harness = TestHarness::new().await.expect("Harness should start");
-    harness
-        .isolate_state_manager
-        .add_isolate(AddIsolateRequest {
-            current_data_scope_type: DataScopeType::Public,
-            allowed_data_scope_type: DataScopeType::UserPrivate,
-            isolate_id: harness.isolate_id,
-        })
-        .await;
-
-    let handle = create_memshare_handle(&mut harness, DataScopeType::UserPrivate).await;
-
-    assert_eq!(recorded_share_scope(&harness, handle), DataScopeType::Public);
-}
-
-#[tokio::test]
-async fn create_memshare_records_declared_scope_of_ratified_isolate() {
-    let mut harness = TestHarness::new_with_arguments(
-        true,
-        ScopeDragInstruction::KeepSame,
-        SHM_PAYLOAD_LARGE_THRESHOLD,
-    )
-    .await
-    .expect("Harness should start");
-    harness
-        .isolate_state_manager
-        .add_isolate(AddIsolateRequest {
-            current_data_scope_type: DataScopeType::Public,
-            allowed_data_scope_type: DataScopeType::UserPrivate,
-            isolate_id: harness.isolate_id,
-        })
-        .await;
-    add_manifest_output_scope(&harness, DataScopeType::UserPrivate).await;
-
-    let handle = create_memshare_handle(&mut harness, DataScopeType::Public).await;
-
-    assert_eq!(recorded_share_scope(&harness, handle), DataScopeType::Public);
-}
-
-/// Creates a memshare through the service, declaring `declared_scope`, and returns its handle.
-async fn create_memshare_handle(
-    harness: &mut TestHarness,
-    declared_scope: DataScopeType,
-) -> String {
-    let (tx, rx) = mpsc::channel(CHANNEL_SIZE);
-    let mut response_stream = harness
-        .client
-        .create_memshare(ReceiverStream::new(rx))
-        .await
-        .expect("create_memshare should succeed")
-        .into_inner();
-    tx.send(CreateMemshareRequest {
-        region_size: REGION_SIZE,
-        data_scope: Some(IsolateDataScope {
-            scope_type: declared_scope.into(),
-            ..Default::default()
-        }),
-    })
-    .await
-    .expect("Should be able to send memshare request");
-
-    match timeout(Duration::from_secs(1), harness.container_manager_rx.recv())
-        .await
-        .expect("ContainerManager did not receive request in time")
-        .expect("ContainerManager request channel should not be closed")
-    {
-        ContainerManagerRequest::MountWritableFile { resp, .. } => resp
-            .send(Ok(container_manager_request::MountFileResponse {}))
-            .expect("Should be able to send MountFileResponse"),
-        _ => panic!("Expected MountWritableFile request"),
-    }
-
-    response_stream
-        .message()
-        .await
-        .expect("Stream should have a response")
-        .expect("Response should be Ok")
-        .shared_memory_handle
-}
-
-/// Returns the scope the SharedMemManager recorded for `handle`.
-fn recorded_share_scope(harness: &TestHarness, handle: String) -> DataScopeType {
-    let receiver_id = IsolateId::new(BinaryServicesIndex::new(false));
-    harness
-        .shared_memory_manager
-        .share_scope(harness.isolate_id, receiver_id, &[handle])
-        .expect("Share should be valid")
-}
-
-async fn add_manifest_output_scope(harness: &TestHarness, max_output_scope: DataScopeType) {
-    harness
-        .manifest_validator
-        .add_scope_info(AddManifestScopeRequest {
-            binary_services_index: harness.isolate_id.get_binary_services_index(),
-            max_input_scope: DataScopeType::UserPrivate,
-            max_output_scope,
-        })
-        .await
-        .expect("Should add manifest scope info");
-}
-
-#[tokio::test]
 async fn unary_invoke_ez_fails_without_control_plane_metadata() {
     let mut harness = TestHarness::new().await.expect("Harness should start");
     let request = InvokeEzRequest::default(); // No metadata
@@ -1731,530 +979,6 @@ async fn stream_invoke_ez_fails_for_unknown_service() {
         .into_inner();
     let response = response_stream.message().await;
     assert_eq!(response.expect_err("Stream should fail").code(), tonic::Code::FailedPrecondition);
-}
-
-#[tokio::test]
-async fn unary_invoke_ez_fails_manifest_validation() {
-    let mut harness = TestHarness::new().await.expect("Harness should start");
-    add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
-        .await
-        .expect("Should be able to add to DSM/RIM");
-    let service_info = IsolateServiceInfo {
-        operator_domain: TEST_SOME_DOMAIN.to_string(),
-        service_name: TEST_SOME_SERVICE_NAME.to_string(),
-        ..Default::default()
-    };
-    // Add to mapper but not to manifest validator.
-    harness
-        .mapper
-        .add_backend_dependency_service(&service_info, TEST_REMOTE_ROUTE_TYPE)
-        .await
-        .expect("Failed to add backend dependency");
-    let request = create_test_request(&service_info.operator_domain, &service_info.service_name);
-    let response = harness.client.invoke_ez(request).await;
-    assert_eq!(response.expect_err("Request should fail").code(), tonic::Code::FailedPrecondition);
-}
-
-#[tokio::test]
-async fn stream_invoke_ez_fails_manifest_validation() {
-    let mut harness = TestHarness::new().await.expect("Harness should start");
-    add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
-        .await
-        .expect("Should be able to add to DSM/RIM");
-    let service_info = IsolateServiceInfo {
-        operator_domain: TEST_SOME_DOMAIN.to_string(),
-        service_name: TEST_SOME_SERVICE_NAME.to_string(),
-        ..Default::default()
-    };
-    // Add to mapper but not to manifest validator.
-    harness
-        .mapper
-        .add_backend_dependency_service(&service_info, TEST_REMOTE_ROUTE_TYPE)
-        .await
-        .expect("Failed to add backend dependency");
-    let (req_tx, req_rx) = mpsc::channel(CHANNEL_SIZE);
-    req_tx
-        .send(create_test_request(&service_info.operator_domain, &service_info.service_name))
-        .await
-        .expect("Should send request successfully");
-    let mut response_stream = harness
-        .client
-        .stream_invoke_ez(ReceiverStream::new(req_rx))
-        .await
-        .expect("Stream should set up")
-        .into_inner();
-    let response = response_stream.message().await;
-    assert_eq!(response.expect_err("Stream should fail").code(), tonic::Code::FailedPrecondition);
-}
-
-#[tokio::test]
-async fn unary_invoke_ez_fails_scope_enforcement() {
-    let mut harness = TestHarness::new().await.expect("Harness should start");
-    let mut request = create_test_request(TEST_SOME_DOMAIN, TEST_SOME_SERVICE_NAME);
-    request
-        .isolate_request_iscope
-        .as_mut()
-        .expect("Scope is mentioned in the request")
-        .datagram_iscopes[0]
-        .set_scope_type(DataScopeType::Public);
-
-    harness
-        .data_scope_requester
-        .add_isolate(AddIsolateRequest {
-            current_data_scope_type: DataScopeType::UserPrivate,
-            allowed_data_scope_type: DataScopeType::UserPrivate,
-            isolate_id: harness.isolate_id,
-        })
-        .await
-        .expect("Should be able to add to DSM/RIM");
-
-    // Request with public scope fails
-    let response = harness.client.invoke_ez(request).await;
-    assert_eq!(response.expect_err("Request should fail").code(), tonic::Code::PermissionDenied);
-}
-
-#[tokio::test]
-async fn stream_invoke_ez_fails_scope_enforcement() {
-    let mut harness = TestHarness::new().await.expect("Harness should start");
-    let mut request = create_test_request(TEST_SOME_DOMAIN, TEST_SOME_SERVICE_NAME);
-    request
-        .isolate_request_iscope
-        .as_mut()
-        .expect("Scope is mentioned in the request")
-        .datagram_iscopes[0]
-        .set_scope_type(DataScopeType::Public);
-
-    harness
-        .data_scope_requester
-        .add_isolate(AddIsolateRequest {
-            current_data_scope_type: DataScopeType::UserPrivate,
-            allowed_data_scope_type: DataScopeType::UserPrivate,
-            isolate_id: harness.isolate_id,
-        })
-        .await
-        .expect("Should be able to add to DSM/RIM");
-
-    // Request with public scope fails
-    let (req_tx, req_rx) = mpsc::channel(CHANNEL_SIZE);
-    req_tx.send(request).await.expect("Should send request successfully");
-    let mut response_stream = harness
-        .client
-        .stream_invoke_ez(ReceiverStream::new(req_rx))
-        .await
-        .expect("Stream should set up")
-        .into_inner();
-    let response = response_stream.message().await;
-    assert_eq!(response.expect_err("Stream should fail").code(), tonic::Code::PermissionDenied);
-}
-
-#[tokio::test]
-async fn stream_invoke_ez_fails_scope_enforcement_on_second_request() {
-    let mut harness = TestHarness::new().await.expect("Harness should start");
-    let junction_calls = harness.mock_junction.call_count.clone();
-    let junction_steam_calls = harness.mock_junction.stream_call_count.clone();
-    let service_info = IsolateServiceInfo {
-        operator_domain: TEST_INTERNAL_OPERATOR_DOMAIN.to_string(),
-        service_name: "service".into(),
-        ..Default::default()
-    };
-    add_backend_dependencies(
-        harness.isolate_id,
-        harness.mapper.clone(),
-        harness.manifest_validator.clone(),
-        &service_info,
-        true,
-        TEST_INTERNAL_ROUTE_TYPE,
-    )
-    .await
-    .expect("Failed to add backend dependency");
-
-    // Initial scope is Public.
-    // Set up the Isolate to only allow upto User Private scope.
-    add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
-        .await
-        .expect("Should be able to add to DSM/RIM");
-
-    let (req_tx, req_rx) = mpsc::channel(CHANNEL_SIZE);
-    let mut response_stream = harness
-        .client
-        .stream_invoke_ez(ReceiverStream::new(req_rx))
-        .await
-        .expect("Stream should set up")
-        .into_inner();
-
-    // First request with Public scope, should pass.
-    let mut request1 =
-        create_test_request(&service_info.operator_domain, &service_info.service_name);
-    request1
-        .isolate_request_iscope
-        .as_mut()
-        .expect("Scope is mentioned in the request")
-        .datagram_iscopes[0]
-        .set_scope_type(DataScopeType::Public);
-    req_tx.send(request1).await.expect("Should send request successfully");
-    let response = response_stream.message().await;
-    assert!(response.is_ok());
-    assert_eq!(junction_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(junction_steam_calls.load(Ordering::SeqCst), 1);
-
-    // Update scope to UserPrivate.
-    harness
-        .data_scope_requester
-        .validate_isolate_scope(ValidateIsolateRequest {
-            requested_scope: DataScopeType::UserPrivate,
-            isolate_id: harness.isolate_id,
-        })
-        .await
-        .expect("Should be able to add to DSM/RIM");
-
-    // Second request with Public scope, should fail because current scope is now UserPrivate.
-    // Request enforcements prevent emission of Public Scope while being in UserPrivate.
-    let mut request =
-        create_test_request(&service_info.operator_domain, &service_info.service_name);
-    request
-        .isolate_request_iscope
-        .as_mut()
-        .expect("Scope is mentioned in the request")
-        .datagram_iscopes[0]
-        .set_scope_type(DataScopeType::Public);
-    req_tx.send(request).await.expect("Should send request successfully");
-
-    // The error from the second request should be received.
-    let response = response_stream.message().await;
-    assert_eq!(response.expect_err("Stream should fail").code(), tonic::Code::PermissionDenied);
-    assert_eq!(junction_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(junction_steam_calls.load(Ordering::SeqCst), 1);
-
-    // Third request should fail to send
-    let request = create_test_request(&service_info.operator_domain, &service_info.service_name);
-    req_tx.send(request).await.expect_err("Should fail to send 3rd request");
-}
-
-#[tokio::test]
-async fn stream_invoke_ez_ratified_isolate_skips_scope_enforcement_on_second_request() {
-    let mut harness = TestHarness::new_with_arguments(
-        true,
-        ScopeDragInstruction::KeepSame,
-        SHM_PAYLOAD_LARGE_THRESHOLD,
-    )
-    .await
-    .expect("Harness should start"); // Ratified Isolate
-
-    let junction_calls = harness.mock_junction.call_count.clone();
-    let junction_steam_calls = harness.mock_junction.stream_call_count.clone();
-    let service_info = IsolateServiceInfo {
-        operator_domain: TEST_INTERNAL_OPERATOR_DOMAIN.to_string(),
-        service_name: "service".into(),
-        ..Default::default()
-    };
-    add_backend_dependencies(
-        harness.isolate_id,
-        harness.mapper.clone(),
-        harness.manifest_validator.clone(),
-        &service_info,
-        true,
-        TEST_INTERNAL_ROUTE_TYPE,
-    )
-    .await
-    .expect("Failed to add backend dependency");
-
-    // Initial scope is Public.
-    // Set up the Isolate to only allow upto User Private scope.
-    add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
-        .await
-        .expect("Should be able to add to DSM/RIM");
-
-    let (req_tx, req_rx) = mpsc::channel(CHANNEL_SIZE);
-    let mut response_stream = harness
-        .client
-        .stream_invoke_ez(ReceiverStream::new(req_rx))
-        .await
-        .expect("Stream should set up")
-        .into_inner();
-
-    // First request with Public scope.
-    let mut request =
-        create_test_request(&service_info.operator_domain, &service_info.service_name);
-    request
-        .isolate_request_iscope
-        .as_mut()
-        .expect("Scope is mentioned in the request")
-        .datagram_iscopes[0]
-        .set_scope_type(DataScopeType::Public);
-    req_tx.send(request).await.expect("Should send request successfully");
-
-    let response = response_stream.message().await;
-    assert!(response.is_ok());
-    assert_eq!(junction_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(junction_steam_calls.load(Ordering::SeqCst), 1);
-
-    // Update scope to UserPrivate.
-    harness
-        .data_scope_requester
-        .validate_isolate_scope(ValidateIsolateRequest {
-            requested_scope: DataScopeType::UserPrivate,
-            isolate_id: harness.isolate_id,
-        })
-        .await
-        .expect("Should be able to add to DSM/RIM");
-
-    // Second request with Public scope. For Ratified Isolate, this should still pass.
-    let mut request =
-        create_test_request(&service_info.operator_domain, &service_info.service_name);
-    request
-        .isolate_request_iscope
-        .as_mut()
-        .expect("Scope is mentioned in the request")
-        .datagram_iscopes[0]
-        .set_scope_type(DataScopeType::Public);
-    req_tx.send(request).await.expect("Should send request successfully");
-
-    // There should be no error message on the stream.
-    let response = response_stream.message().await;
-    assert_eq!(junction_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(junction_steam_calls.load(Ordering::SeqCst), 2);
-    assert!(response.is_ok(), "Stream should not have any error messages");
-}
-
-#[tokio::test]
-async fn unary_invoke_ez_fails_response_scope_enforcement() {
-    // Create the test harness that increases response scope by one
-    let mut harness = TestHarness::new_with_arguments(
-        false,
-        ScopeDragInstruction::IncreaseByOne,
-        SHM_PAYLOAD_LARGE_THRESHOLD,
-    )
-    .await
-    .expect("Harness should start");
-
-    let junction_calls = harness.mock_junction.call_count.clone();
-    let service_info = IsolateServiceInfo {
-        operator_domain: TEST_INTERNAL_OPERATOR_DOMAIN.to_string(),
-        service_name: "service".into(),
-        ..Default::default()
-    };
-    add_backend_dependencies(
-        harness.isolate_id,
-        harness.mapper.clone(),
-        harness.manifest_validator.clone(),
-        &service_info,
-        true,
-        TEST_INTERNAL_ROUTE_TYPE,
-    )
-    .await
-    .expect("Failed to add backend dependency");
-
-    // Set up the Isolate to only allow upto User Private scope.
-    add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
-        .await
-        .expect("Should be able to add to DSM/RIM");
-
-    // Create a request with Private scope. The mock junction will echo this back with MultiUserPrivate.
-    let request = create_test_request_with_scope(
-        &service_info.operator_domain,
-        &service_info.service_name,
-        DataScopeType::UserPrivate,
-    );
-    let response = harness.client.invoke_ez(request).await;
-
-    assert_eq!(response.expect_err("Request should fail").code(), tonic::Code::PermissionDenied);
-    assert_eq!(junction_calls.load(Ordering::SeqCst), 1, "Junction should have been called");
-}
-
-#[tokio::test]
-async fn stream_invoke_ez_fails_response_scope_enforcement() {
-    // Create the test harness that increases response scope by one
-    let mut harness = TestHarness::new_with_arguments(
-        false,
-        ScopeDragInstruction::IncreaseByOne,
-        SHM_PAYLOAD_LARGE_THRESHOLD,
-    )
-    .await
-    .expect("Harness should start");
-
-    let service_info = IsolateServiceInfo {
-        operator_domain: TEST_INTERNAL_OPERATOR_DOMAIN.to_string(),
-        service_name: "service".into(),
-        ..Default::default()
-    };
-    add_backend_dependencies(
-        harness.isolate_id,
-        harness.mapper.clone(),
-        harness.manifest_validator.clone(),
-        &service_info,
-        true,
-        RouteType::Internal,
-    )
-    .await
-    .expect("Failed to add backend dependency");
-
-    // Set up the Isolate to be in UserPrivate scope.
-    harness
-        .data_scope_requester
-        .add_isolate(AddIsolateRequest {
-            current_data_scope_type: DataScopeType::UserPrivate,
-            allowed_data_scope_type: DataScopeType::UserPrivate,
-            isolate_id: harness.isolate_id,
-        })
-        .await
-        .expect("Should be able to add to DSM/RIM");
-    let (req_tx, req_rx) = mpsc::channel(CHANNEL_SIZE);
-    req_tx
-        .send(create_test_request_with_scope(
-            &service_info.operator_domain,
-            &service_info.service_name,
-            DataScopeType::Public,
-        ))
-        .await
-        .expect("Should send request successfully");
-
-    // Response fails because it is in MultiUserPrivate Scope
-    let mut response_stream = harness
-        .client
-        .stream_invoke_ez(ReceiverStream::new(req_rx))
-        .await
-        .expect("Stream should set up")
-        .into_inner();
-    let response = response_stream.message().await;
-    assert_eq!(response.expect_err("Stream should fail").code(), tonic::Code::PermissionDenied);
-
-    // Ensure that the Isolate remains in User Private
-    let current_scope = harness
-        .data_scope_requester
-        .get_isolate_scope(GetIsolateScopeRequest { isolate_id: harness.isolate_id })
-        .await
-        .expect("Valid GetIsolateScopeResponse")
-        .current_scope;
-    assert_eq!(current_scope, DataScopeType::UserPrivate);
-}
-
-#[tokio::test]
-async fn unary_invoke_ez_succeeds_for_less_strict_response_scope() {
-    // Create the test harness that decreases response scope by one
-    let mut harness = TestHarness::new_with_arguments(
-        false,
-        ScopeDragInstruction::DecreaseByOne,
-        SHM_PAYLOAD_LARGE_THRESHOLD,
-    )
-    .await
-    .expect("Harness should start");
-
-    let junction_calls = harness.mock_junction.call_count.clone();
-    let service_info = IsolateServiceInfo {
-        operator_domain: TEST_INTERNAL_OPERATOR_DOMAIN.to_string(),
-        service_name: "service".into(),
-        ..Default::default()
-    };
-    add_backend_dependencies(
-        harness.isolate_id,
-        harness.mapper.clone(),
-        harness.manifest_validator.clone(),
-        &service_info,
-        true,
-        TEST_INTERNAL_ROUTE_TYPE,
-    )
-    .await
-    .expect("Failed to add backend dependency");
-
-    // Set up the Isolate to be in UserPrivate scope.
-    harness
-        .data_scope_requester
-        .add_isolate(AddIsolateRequest {
-            current_data_scope_type: DataScopeType::UserPrivate,
-            allowed_data_scope_type: DataScopeType::UserPrivate,
-            isolate_id: harness.isolate_id,
-        })
-        .await
-        .expect("Should be able to add to DSM/RIM");
-
-    // Create a request with UserPrivate scope. The mock junction will echo this back with Domain Scope.
-    // This should succeed because DomainOwned is less strict than UserPrivate.
-    let request = create_test_request_with_scope(
-        &service_info.operator_domain,
-        &service_info.service_name,
-        DataScopeType::UserPrivate,
-    );
-    assert!(harness.client.invoke_ez(request).await.is_ok(), "Request should succeed");
-    assert_eq!(junction_calls.load(Ordering::SeqCst), 1, "Junction should have been called");
-}
-
-#[tokio::test]
-async fn stream_invoke_ez_fails_response_scope_enforcement_on_second_request() {
-    // Create the test harness that decreases response scope by one
-    let mut harness = TestHarness::new_with_arguments(
-        false,
-        ScopeDragInstruction::IncreaseByOne,
-        SHM_PAYLOAD_LARGE_THRESHOLD,
-    )
-    .await
-    .expect("Harness should start");
-
-    let service_info = IsolateServiceInfo {
-        operator_domain: TEST_INTERNAL_OPERATOR_DOMAIN.to_string(),
-        service_name: "service".into(),
-        ..Default::default()
-    };
-    add_backend_dependencies(
-        harness.isolate_id,
-        harness.mapper.clone(),
-        harness.manifest_validator.clone(),
-        &service_info,
-        true,
-        TEST_INTERNAL_ROUTE_TYPE,
-    )
-    .await
-    .expect("Failed to add backend dependency");
-
-    // Set up the Isolate to only allow up to UserPrivate scope.
-    add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
-        .await
-        .expect("Should be able to add to DSM/RIM");
-    let (req_tx, req_rx) = mpsc::channel(CHANNEL_SIZE);
-    let mut response_stream = harness
-        .client
-        .stream_invoke_ez(ReceiverStream::new(req_rx))
-        .await
-        .expect("Stream should set up")
-        .into_inner();
-
-    // First request with a valid scope should pass.
-    let first_request = create_test_request_with_scope(
-        &service_info.operator_domain,
-        &service_info.service_name,
-        DataScopeType::DomainOwned,
-    );
-    req_tx.send(first_request).await.expect("Should send request successfully");
-    assert!(response_stream.message().await.is_ok());
-    // Ensure that the Isolate is now in UserPrivateScope
-    let current_scope = harness
-        .data_scope_requester
-        .get_isolate_scope(GetIsolateScopeRequest { isolate_id: harness.isolate_id })
-        .await
-        .expect("Valid GetIsolateScopeResponse")
-        .current_scope;
-    assert_eq!(current_scope, DataScopeType::UserPrivate);
-
-    // Second request with a scope that will be rejected on response.
-    // Response enforcements fail to scope-drag Isolate to MultiUserPrivate.
-    let second_request = create_test_request_with_scope(
-        &service_info.operator_domain,
-        &service_info.service_name,
-        DataScopeType::UserPrivate,
-    );
-
-    // Maximum permissible scope is UserPrivate but response scope is MultiUserPrivate
-    req_tx.send(second_request).await.expect("Should send request successfully");
-    let response = response_stream.message().await;
-    assert_eq!(response.expect_err("Stream should fail").code(), tonic::Code::PermissionDenied);
-
-    // Ensure that the Isolate remains in UserPrivateScope
-    let current_scope = harness
-        .data_scope_requester
-        .get_isolate_scope(GetIsolateScopeRequest { isolate_id: harness.isolate_id })
-        .await
-        .expect("Valid GetIsolateScopeResponse")
-        .current_scope;
-    assert_eq!(current_scope, DataScopeType::UserPrivate);
 }
 
 #[tokio::test]
@@ -2389,166 +1113,6 @@ async fn verify_all_backend_dependency_routing() {
         1,
         "REMOTE call: Remote handler should be called once."
     );
-}
-
-/// Spawns test Bridge Server to talk with external connector
-async fn spawn_test_server(service: IsolateEzBridgeService) -> IsolateEzBridgeClient<Channel> {
-    let (client_io, server_io) = tokio::io::duplex(1024);
-
-    tokio::spawn(async move {
-        Server::builder()
-            .add_service(IsolateEzBridgeServer::new(service))
-            .serve_with_incoming(tokio_stream::once(Ok::<_, std::io::Error>(server_io)))
-            .await
-    });
-
-    let mut client_conn = Some(client_io);
-    Endpoint::try_from("http://in-memory.test")
-        .expect("Endpoint should be valid")
-        .connect_with_connector(service_fn(move |_| {
-            let client = client_conn.take();
-            async move {
-                if let Some(client) = client {
-                    Ok(TokioIo::new(client))
-                } else {
-                    Err(std::io::Error::other("Client already taken"))
-                }
-            }
-        }))
-        .await
-        .map(IsolateEzBridgeClient::new)
-        .expect("Should connect client")
-}
-
-/// Creates test request for Isolates.
-fn create_test_request(domain: &str, name: &str) -> InvokeEzRequest {
-    InvokeEzRequest {
-        control_plane_metadata: Some(ControlPlaneMetadata {
-            destination_operator_domain: domain.to_string(),
-            destination_service_name: name.to_string(),
-            ..Default::default()
-        }),
-        isolate_request_iscope: Some(EzPayloadIsolateScope {
-            datagram_iscopes: vec![IsolateDataScope {
-                scope_type: DataScopeType::Unspecified.into(),
-                ..Default::default()
-            }],
-        }),
-        isolate_request_payload: Some(EzHybridPayload {
-            delivery_method: Some(DeliveryMethod::InlineData(EzPayloadData {
-                datagrams: vec![TEST_PAYLOAD.to_vec()],
-            })),
-        }),
-    }
-}
-
-/// Creates test request for Isolates with specific isolate_name and publisher_id.
-fn create_test_request_with_qualifiers(
-    domain: &str,
-    name: &str,
-    isolate_name: &str,
-    publisher_id: &str,
-) -> InvokeEzRequest {
-    let mut req = create_test_request(domain, name);
-    if let Some(meta) = req.control_plane_metadata.as_mut() {
-        meta.destination_isolate_name = isolate_name.to_string();
-        meta.destination_publisher_id = publisher_id.to_string();
-    }
-    req
-}
-
-/// Creates test request for Isolates with a specific scope.
-fn create_test_request_with_scope(
-    domain: &str,
-    name: &str,
-    scope: DataScopeType,
-) -> InvokeEzRequest {
-    let mut request = create_test_request(domain, name);
-    request.isolate_request_iscope = Some(EzPayloadIsolateScope {
-        datagram_iscopes: vec![IsolateDataScope { scope_type: scope.into(), ..Default::default() }],
-    });
-    request
-}
-
-async fn setup_notify_state_stream(
-    client: &mut IsolateEzBridgeClient<Channel>,
-) -> Result<(Sender<NotifyIsolateStateRequest>, Streaming<NotifyIsolateStateResponse>)> {
-    let (tx, rx) = mpsc::channel(CHANNEL_SIZE);
-    let inbound = client
-        .notify_isolate_state(ReceiverStream::new(rx))
-        .await
-        .context("Failed to get inbound channel")?;
-    let response_stream = inbound.into_inner();
-    Ok((tx, response_stream))
-}
-
-async fn add_backend_dependencies(
-    isolate_id: IsolateId,
-    isolate_service_mapper: IsolateServiceMapper,
-    manifest_validator: ManifestValidator,
-    isolate_service_info: &IsolateServiceInfo,
-    is_internal: bool,
-    route_type: RouteType,
-) -> Result<()> {
-    if is_internal {
-        isolate_service_mapper
-            .new_binary_index(
-                vec![isolate_service_info.clone()],
-                false,
-                isolate_service_info.publisher_id.clone(),
-                isolate_service_info.isolate_name.clone(),
-            )
-            .await
-            .context("Should be a valid binary services index")?;
-    }
-
-    let dependency_index = isolate_service_mapper
-        .add_backend_dependency_service(isolate_service_info, route_type)
-        .await
-        .context("Should be able to add external isolate service")?;
-    manifest_validator
-        .add_backend_dependencies(AddBackendDependenciesRequest {
-            binary_services_index: isolate_id.get_binary_services_index(),
-            dependency_index,
-        })
-        .await
-        .context("Should be able to add backend dependency in manifest")?;
-    Ok(())
-}
-
-async fn add_to_data_scope_requester(
-    data_scope_requester: DataScopeRequester,
-    isolate_id: IsolateId,
-) -> Result<()> {
-    data_scope_requester
-        .add_isolate(AddIsolateRequest {
-            current_data_scope_type: DataScopeType::Public,
-            allowed_data_scope_type: DataScopeType::UserPrivate,
-            isolate_id,
-        })
-        .await?;
-    Ok(())
-}
-
-fn get_sample_invoke_ez_response() -> InvokeEzResponse {
-    InvokeEzResponse {
-        ez_response_payload: Some(payload_proto::enforcer::v1::EzHybridPayload {
-            delivery_method: Some(
-                payload_proto::enforcer::v1::ez_hybrid_payload::DeliveryMethod::InlineData(
-                    payload_proto::enforcer::v1::EzPayloadData {
-                        datagrams: vec![TEST_PAYLOAD.to_vec()],
-                    },
-                ),
-            ),
-        }),
-        ez_response_iscope: Some(EzPayloadIsolateScope {
-            datagram_iscopes: vec![IsolateDataScope {
-                scope_type: DataScopeType::Public.into(),
-                mapped_scope_owner: None,
-            }],
-        }),
-        ..Default::default()
-    }
 }
 
 #[tokio::test]
@@ -2909,76 +1473,6 @@ async fn test_interceptor_replacement_skipped_for_ratified_isolate() {
 }
 
 #[tokio::test]
-async fn create_fileshare_success() {
-    let mut harness = TestHarness::new().await.expect("Harness should start");
-
-    let service_info = IsolateServiceInfo {
-        operator_domain: TEST_INTERNAL_OPERATOR_DOMAIN.to_string(),
-        service_name: "service".into(),
-        ..Default::default()
-    };
-    add_backend_dependencies(
-        harness.isolate_id,
-        harness.mapper.clone(),
-        harness.manifest_validator.clone(),
-        &service_info,
-        true,
-        TEST_INTERNAL_ROUTE_TYPE,
-    )
-    .await
-    .expect("Failed to add backend dependency");
-
-    let dependency_index =
-        harness.mapper.get_service_index(&service_info).await.expect("Service should be indexed");
-
-    // Setup receiver isolate in DSM
-    let receiver_binary_index = dependency_index.get_binary_services_index().unwrap();
-    let receiver_id = IsolateId::new(receiver_binary_index);
-
-    harness
-        .data_scope_requester
-        .add_isolate(AddIsolateRequest {
-            current_data_scope_type: DataScopeType::UserPrivate,
-            allowed_data_scope_type: DataScopeType::UserPrivate,
-            isolate_id: receiver_id,
-        })
-        .await
-        .expect("Should add receiver to DSM");
-
-    add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
-        .await
-        .expect("Should be able to add sender to DSM/RIM");
-
-    // We must intercept ContainerManager requests because CreateFileshare waits for them.
-    let mut rx = harness.container_manager_rx;
-    tokio::spawn(async move {
-        // Expect MountWritableDirectory (for sender)
-        match rx.recv().await.expect("Sender mount request") {
-            ContainerManagerRequest::MountWritableDirectory { req, resp } => {
-                assert!(!req.container_dir_name.is_empty());
-                resp.send(Ok(container_manager_request::MountDirectoryResponse {})).unwrap();
-            }
-            _ => panic!("Expected MountWritableDirectory"),
-        }
-        // Expect MountReadOnlyDirectory (for receiver)
-        match rx.recv().await.expect("Receiver mount request") {
-            ContainerManagerRequest::MountReadOnlyDirectory { req, resp } => {
-                assert!(!req.container_dir_name.is_empty());
-                resp.send(Ok(container_manager_request::MountDirectoryResponse {})).unwrap();
-            }
-            _ => panic!("Expected MountReadOnlyDirectory"),
-        }
-    });
-
-    let response = harness
-        .client
-        .create_fileshare(CreateFileshareRequest { data_scope: None })
-        .await
-        .expect("CreateFileshare should succeed");
-    assert!(!response.get_ref().fileshare_handle.is_empty());
-}
-
-#[tokio::test]
 async fn unary_routes_to_internal_junction_with_granular_qualifiers() {
     let mut harness = TestHarness::new().await.expect("Harness should start");
     let junction_calls = harness.mock_junction.call_count.clone();
@@ -3011,461 +1505,6 @@ async fn unary_routes_to_internal_junction_with_granular_qualifiers() {
     let _ = harness.client.invoke_ez(request).await.expect("Invoke should succeed");
 
     assert_eq!(junction_calls.load(Ordering::SeqCst), 1, "Junction should have been called");
-}
-
-#[tokio::test]
-async fn unary_routes_shm_payload_to_inline_data() {
-    let mut harness = TestHarness::new().await.expect("Harness should start");
-    let junction_calls = harness.mock_junction.call_count.clone();
-    let service_info = IsolateServiceInfo {
-        operator_domain: TEST_INTERNAL_OPERATOR_DOMAIN.to_string(),
-        service_name: TEST_SERVICE_NAME.to_string(),
-        ..Default::default()
-    };
-    add_backend_dependencies(
-        harness.isolate_id,
-        harness.mapper.clone(),
-        harness.manifest_validator.clone(),
-        &service_info,
-        true,
-        TEST_INTERNAL_ROUTE_TYPE,
-    )
-    .await
-    .expect("Failed to add backend dependency");
-    add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
-        .await
-        .expect("Should be able to add to DSM/RIM");
-
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().to_string_lossy().to_string();
-
-    // Setup bridge communication buffers in the shared memory manager
-    harness
-        .shared_memory_manager
-        .setup_bridge_communication_buffers(harness.isolate_id, &path)
-        .await
-        .expect("Failed to setup bridge communication buffers");
-
-    // Create the isolate writer pool
-    let isolate_pool = ShmSlabPool::new(ShmSlabPoolOptions {
-        file_name: format!("{path}/isolate-writes"),
-        number_of_slots: 64,
-        slot_size: 4,
-        writer: true,
-    })
-    .expect("Failed to create isolate writer pool");
-
-    let slot_refs =
-        isolate_pool.write_to_pool(TEST_PAYLOAD).await.expect("Failed to write to pool");
-
-    let mut request =
-        create_test_request(&service_info.operator_domain, &service_info.service_name);
-    request.isolate_request_payload = Some(EzHybridPayload {
-        delivery_method: Some(DeliveryMethod::ShmData(payload_proto::enforcer::v1::ShmSlotData {
-            slots: slot_refs,
-        })),
-    });
-
-    let _ = harness.client.invoke_ez(request).await.expect("Invoke should succeed");
-
-    assert_eq!(junction_calls.load(Ordering::SeqCst), 1, "Junction should have been called");
-
-    let received_request =
-        harness.mock_junction.invoked_isolate_requests.lock().unwrap().last().unwrap().clone();
-
-    let payload = received_request.isolate_input.expect("Should have payload");
-    let delivery = payload.delivery_method.expect("Should have delivery method");
-    match delivery {
-        DeliveryMethod::InlineData(data) => {
-            assert_eq!(data.datagrams.len(), 1);
-            assert_eq!(data.datagrams[0], TEST_PAYLOAD);
-        }
-        _ => panic!("Expected InlineData delivery method"),
-    }
-}
-
-#[tokio::test]
-async fn unary_routes_shm_payload_read_failure() {
-    let mut harness = TestHarness::new().await.expect("Harness should start");
-    let service_info = IsolateServiceInfo {
-        operator_domain: TEST_INTERNAL_OPERATOR_DOMAIN.to_string(),
-        service_name: TEST_SERVICE_NAME.to_string(),
-        ..Default::default()
-    };
-    add_backend_dependencies(
-        harness.isolate_id,
-        harness.mapper.clone(),
-        harness.manifest_validator.clone(),
-        &service_info,
-        true,
-        TEST_INTERNAL_ROUTE_TYPE,
-    )
-    .await
-    .expect("Failed to add backend dependency");
-    add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
-        .await
-        .expect("Should be able to add to DSM/RIM");
-
-    let mut request =
-        create_test_request(&service_info.operator_domain, &service_info.service_name);
-    request.isolate_request_payload = Some(EzHybridPayload {
-        delivery_method: Some(DeliveryMethod::ShmData(payload_proto::enforcer::v1::ShmSlotData {
-            slots: vec![payload_proto::enforcer::v1::ShmSlotReference { slot_index: 0, length: 4 }],
-        })),
-    });
-
-    // We did not setup bridge communication buffers, so reading from SHM will fail
-    let response = harness.client.invoke_ez(request).await;
-    assert!(response.is_err());
-    let status = response.unwrap_err();
-    assert_eq!(status.code(), tonic::Code::Internal);
-    assert!(status.message().contains("Failed to read from SHM"));
-}
-
-// Regression test for b/556034613. The SHM payload is read before any routing or policy
-// validation runs, so a crafted ShmSlotReference used to drive the enforcer into an
-// out-of-bounds atomic write. The bridge must reject the request and stay healthy.
-#[tokio::test]
-async fn unary_rejects_malicious_shm_slot_reference() {
-    let mut harness = TestHarness::new().await.expect("Harness should start");
-    let junction_calls = harness.mock_junction.call_count.clone();
-    let service_info = IsolateServiceInfo {
-        operator_domain: TEST_INTERNAL_OPERATOR_DOMAIN.to_string(),
-        service_name: TEST_SERVICE_NAME.to_string(),
-        ..Default::default()
-    };
-    add_backend_dependencies(
-        harness.isolate_id,
-        harness.mapper.clone(),
-        harness.manifest_validator.clone(),
-        &service_info,
-        true,
-        TEST_INTERNAL_ROUTE_TYPE,
-    )
-    .await
-    .expect("Failed to add backend dependency");
-    add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
-        .await
-        .expect("Should be able to add to DSM/RIM");
-
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().to_string_lossy().to_string();
-    harness
-        .shared_memory_manager
-        .setup_bridge_communication_buffers(harness.isolate_id, &path)
-        .await
-        .expect("Failed to setup bridge communication buffers");
-
-    // slot_index = 2^44 was entirely unbounded before the fix: depending on the pool geometry it
-    // either panicked while slicing the data mapping or drove free_slots into an atomic
-    // read-modify-write ~2 TiB past the header mapping. Either outcome takes down the enforcer.
-    let mut request =
-        create_test_request(&service_info.operator_domain, &service_info.service_name);
-    request.isolate_request_payload = Some(EzHybridPayload {
-        delivery_method: Some(DeliveryMethod::ShmData(payload_proto::enforcer::v1::ShmSlotData {
-            slots: vec![payload_proto::enforcer::v1::ShmSlotReference {
-                slot_index: 1 << 44,
-                length: 0,
-            }],
-        })),
-    });
-
-    let status =
-        harness.client.invoke_ez(request).await.expect_err("Hostile reference must be rejected");
-    assert_eq!(status.code(), tonic::Code::Internal);
-    assert!(status.message().contains("Failed to read from SHM"), "got: {}", status.message());
-
-    // The request is rejected while parsing the payload, so no routing decision is ever made.
-    assert_eq!(junction_calls.load(Ordering::SeqCst), 0, "Junction should not have been called");
-
-    // The bridge must survive the hostile message and keep serving legitimate SHM traffic.
-    let isolate_pool = ShmSlabPool::new(ShmSlabPoolOptions {
-        file_name: format!("{path}/isolate-writes"),
-        number_of_slots: 64,
-        slot_size: 4,
-        writer: true,
-    })
-    .expect("Failed to create isolate writer pool");
-    let slot_refs =
-        isolate_pool.write_to_pool(TEST_PAYLOAD).await.expect("Failed to write to pool");
-
-    let mut request =
-        create_test_request(&service_info.operator_domain, &service_info.service_name);
-    request.isolate_request_payload = Some(EzHybridPayload {
-        delivery_method: Some(DeliveryMethod::ShmData(payload_proto::enforcer::v1::ShmSlotData {
-            slots: slot_refs,
-        })),
-    });
-    let _ = harness.client.invoke_ez(request).await.expect("Valid invoke should still succeed");
-
-    assert_eq!(junction_calls.load(Ordering::SeqCst), 1, "Junction should have been called");
-    let received_request =
-        harness.mock_junction.invoked_isolate_requests.lock().unwrap().last().unwrap().clone();
-    let payload = received_request.isolate_input.expect("Should have payload");
-    match payload.delivery_method.expect("Should have delivery method") {
-        DeliveryMethod::InlineData(data) => {
-            assert_eq!(data.datagrams.len(), 1);
-            assert_eq!(data.datagrams[0], TEST_PAYLOAD);
-        }
-        _ => panic!("Expected InlineData delivery method"),
-    }
-}
-
-#[tokio::test]
-async fn stream_routes_shm_payload_to_inline_data() {
-    let mut harness = TestHarness::new().await.expect("Harness should start");
-    let junction_calls = harness.mock_junction.call_count.clone();
-    let service_info = IsolateServiceInfo {
-        operator_domain: TEST_INTERNAL_OPERATOR_DOMAIN.to_string(),
-        service_name: TEST_SERVICE_NAME.to_string(),
-        ..Default::default()
-    };
-    add_backend_dependencies(
-        harness.isolate_id,
-        harness.mapper.clone(),
-        harness.manifest_validator.clone(),
-        &service_info,
-        true,
-        TEST_INTERNAL_ROUTE_TYPE,
-    )
-    .await
-    .expect("Failed to add backend dependency");
-    add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
-        .await
-        .expect("Should be able to add to DSM/RIM");
-
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().to_string_lossy().to_string();
-
-    // Setup bridge communication buffers in the shared memory manager
-    harness
-        .shared_memory_manager
-        .setup_bridge_communication_buffers(harness.isolate_id, &path)
-        .await
-        .expect("Failed to setup bridge communication buffers");
-
-    // Create the isolate writer pool
-    let isolate_pool = ShmSlabPool::new(ShmSlabPoolOptions {
-        file_name: format!("{path}/isolate-writes"),
-        number_of_slots: 64,
-        slot_size: 4,
-        writer: true,
-    })
-    .expect("Failed to create isolate writer pool");
-
-    let slot_refs =
-        isolate_pool.write_to_pool(TEST_PAYLOAD).await.expect("Failed to write to pool");
-
-    let mut request =
-        create_test_request(&service_info.operator_domain, &service_info.service_name);
-    request.isolate_request_payload = Some(EzHybridPayload {
-        delivery_method: Some(DeliveryMethod::ShmData(payload_proto::enforcer::v1::ShmSlotData {
-            slots: slot_refs,
-        })),
-    });
-
-    let (req_tx, req_rx) = mpsc::channel(CHANNEL_SIZE);
-    req_tx.send(request).await.expect("Should be able to send request");
-
-    let _ = harness
-        .client
-        .stream_invoke_ez(ReceiverStream::new(req_rx))
-        .await
-        .expect("Stream invoke should succeed");
-
-    sleep(Duration::from_millis(20)).await;
-
-    assert_eq!(junction_calls.load(Ordering::SeqCst), 1, "Junction should have been called");
-
-    let received_request =
-        harness.mock_junction.invoked_isolate_requests.lock().unwrap().last().unwrap().clone();
-
-    let payload = received_request.isolate_input.expect("Should have payload");
-    let delivery = payload.delivery_method.expect("Should have delivery method");
-    match delivery {
-        DeliveryMethod::InlineData(data) => {
-            assert_eq!(data.datagrams.len(), 1);
-            assert_eq!(data.datagrams[0], TEST_PAYLOAD);
-        }
-        _ => panic!("Expected InlineData delivery method"),
-    }
-}
-
-#[tokio::test]
-async fn stream_routes_shm_payload_read_failure() {
-    let mut harness = TestHarness::new().await.expect("Harness should start");
-    let service_info = IsolateServiceInfo {
-        operator_domain: TEST_INTERNAL_OPERATOR_DOMAIN.to_string(),
-        service_name: TEST_SERVICE_NAME.to_string(),
-        ..Default::default()
-    };
-    add_backend_dependencies(
-        harness.isolate_id,
-        harness.mapper.clone(),
-        harness.manifest_validator.clone(),
-        &service_info,
-        true,
-        TEST_INTERNAL_ROUTE_TYPE,
-    )
-    .await
-    .expect("Failed to add backend dependency");
-    add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
-        .await
-        .expect("Should be able to add to DSM/RIM");
-
-    let mut request =
-        create_test_request(&service_info.operator_domain, &service_info.service_name);
-    request.isolate_request_payload = Some(EzHybridPayload {
-        delivery_method: Some(DeliveryMethod::ShmData(payload_proto::enforcer::v1::ShmSlotData {
-            slots: vec![payload_proto::enforcer::v1::ShmSlotReference { slot_index: 0, length: 4 }],
-        })),
-    });
-
-    let (req_tx, req_rx) = mpsc::channel(CHANNEL_SIZE);
-    req_tx.send(request).await.expect("Should be able to send request");
-
-    // We did not setup bridge communication buffers, so reading from SHM will fail
-    let response = harness.client.stream_invoke_ez(ReceiverStream::new(req_rx)).await;
-    assert!(response.is_ok());
-    let mut response_stream = response.unwrap().into_inner();
-    let status =
-        response_stream.message().await.expect_err("SHM read failure should fail the stream");
-    assert_eq!(status.code(), tonic::Code::Internal);
-    assert!(status.message().contains("Failed to read from SHM"));
-}
-
-#[tokio::test]
-async fn unary_routes_shm_response_to_shm_data() {
-    // Initialize with a low threshold, so b"hello world" always triggers SHM writing
-    let mut harness = TestHarness::new_with_arguments(
-        false,
-        ScopeDragInstruction::KeepSame,
-        SHM_PAYLOAD_LOW_THRESHOLD,
-    )
-    .await
-    .expect("Harness should start");
-    let service_info = IsolateServiceInfo {
-        operator_domain: TEST_INTERNAL_OPERATOR_DOMAIN.to_string(),
-        service_name: TEST_SERVICE_NAME.to_string(),
-        ..Default::default()
-    };
-    add_backend_dependencies(
-        harness.isolate_id,
-        harness.mapper.clone(),
-        harness.manifest_validator.clone(),
-        &service_info,
-        true,
-        TEST_INTERNAL_ROUTE_TYPE,
-    )
-    .await
-    .expect("Failed to add backend dependency");
-    add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
-        .await
-        .expect("Should be able to add to DSM/RIM");
-
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().to_string_lossy().to_string();
-
-    // Setup bridge communication buffers in the shared memory manager
-    harness
-        .shared_memory_manager
-        .setup_bridge_communication_buffers(harness.isolate_id, &path)
-        .await
-        .expect("Failed to setup bridge communication buffers");
-
-    // Create the enforcer reader pool to verify written slots
-    let enforcer_pool = ShmSlabPool::new(ShmSlabPoolOptions {
-        file_name: format!("{path}/enforcer-writes"),
-        number_of_slots: 64,
-        slot_size: 4,
-        writer: false,
-    })
-    .expect("Failed to create enforcer reader pool");
-
-    let request = create_test_request(&service_info.operator_domain, &service_info.service_name);
-    let response = harness.client.invoke_ez(request).await;
-    assert!(response.is_ok());
-    let response_msg = response.unwrap().into_inner();
-
-    let payload = response_msg.ez_response_payload.expect("Should have payload");
-    let delivery = payload.delivery_method.expect("Should have delivery method");
-    match delivery {
-        DeliveryMethod::ShmData(shm_data) => {
-            let read_bytes =
-                enforcer_pool.read_from_pool(&shm_data.slots).expect("Failed to read from pool");
-            assert_eq!(read_bytes, TEST_PAYLOAD);
-        }
-        _ => panic!("Expected ShmData delivery method"),
-    }
-}
-
-#[tokio::test]
-async fn stream_routes_shm_response_to_shm_data() {
-    // Initialize with a threshold of 1 byte, so b"hello world" always triggers SHM writing
-    let mut harness = TestHarness::new_with_arguments(false, ScopeDragInstruction::KeepSame, 1)
-        .await
-        .expect("Harness should start");
-    let service_info = IsolateServiceInfo {
-        operator_domain: TEST_INTERNAL_OPERATOR_DOMAIN.to_string(),
-        service_name: TEST_SERVICE_NAME.to_string(),
-        ..Default::default()
-    };
-    add_backend_dependencies(
-        harness.isolate_id,
-        harness.mapper.clone(),
-        harness.manifest_validator.clone(),
-        &service_info,
-        true,
-        TEST_INTERNAL_ROUTE_TYPE,
-    )
-    .await
-    .expect("Failed to add backend dependency");
-    add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
-        .await
-        .expect("Should be able to add to DSM/RIM");
-
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().to_string_lossy().to_string();
-
-    // Setup bridge communication buffers in the shared memory manager
-    harness
-        .shared_memory_manager
-        .setup_bridge_communication_buffers(harness.isolate_id, &path)
-        .await
-        .expect("Failed to setup bridge communication buffers");
-
-    // Create the enforcer reader pool to verify written slots
-    let enforcer_pool = ShmSlabPool::new(ShmSlabPoolOptions {
-        file_name: format!("{path}/enforcer-writes"),
-        number_of_slots: 64,
-        slot_size: 4,
-        writer: false,
-    })
-    .expect("Failed to create enforcer reader pool");
-
-    let request = create_test_request(&service_info.operator_domain, &service_info.service_name);
-    let (req_tx, req_rx) = mpsc::channel(CHANNEL_SIZE);
-    req_tx.send(request).await.expect("Should be able to send request");
-
-    let response = harness.client.stream_invoke_ez(ReceiverStream::new(req_rx)).await;
-    assert!(response.is_ok());
-    let mut response_stream = response.unwrap().into_inner();
-    let response_msg = response_stream
-        .message()
-        .await
-        .expect("Should receive response message")
-        .expect("Response message should be present");
-
-    let payload = response_msg.ez_response_payload.expect("Should have payload");
-    let delivery = payload.delivery_method.expect("Should have delivery method");
-    match delivery {
-        DeliveryMethod::ShmData(shm_data) => {
-            let read_bytes =
-                enforcer_pool.read_from_pool(&shm_data.slots).expect("Failed to read from pool");
-            assert_eq!(read_bytes, TEST_PAYLOAD);
-        }
-        _ => panic!("Expected ShmData delivery method"),
-    }
 }
 
 #[tokio::test]
@@ -3611,4 +1650,229 @@ async fn stream_rejects_midstream_route_mismatch_internal_to_remote() {
     let err = second_resp.expect_err("Second request should error out");
     assert_eq!(err.code(), tonic::Code::FailedPrecondition);
     assert!(err.message().contains("Mid-stream route mismatch"));
+}
+
+#[tokio::test]
+async fn test_unconfigured_external_and_remote_handlers_and_empty_stream() {
+    let mut harness =
+        TestHarness::new_without_outbound_handlers().await.expect("Harness should start");
+    let external_info = IsolateServiceInfo {
+        operator_domain: TEST_EXTERNAL_OPERATOR_DOMAIN.to_string(),
+        service_name: TEST_SERVICE_NAME.to_string(),
+        ..Default::default()
+    };
+    add_backend_dependencies(
+        harness.isolate_id,
+        harness.mapper.clone(),
+        harness.manifest_validator.clone(),
+        &external_info,
+        false,
+        TEST_EXTERNAL_ROUTE_TYPE,
+    )
+    .await
+    .expect("add external dep");
+    let remote_info = IsolateServiceInfo {
+        operator_domain: TEST_REMOTE_OPERATOR_DOMAIN.to_string(),
+        service_name: TEST_SERVICE_NAME.to_string(),
+        ..Default::default()
+    };
+    add_backend_dependencies(
+        harness.isolate_id,
+        harness.mapper.clone(),
+        harness.manifest_validator.clone(),
+        &remote_info,
+        false,
+        TEST_REMOTE_ROUTE_TYPE,
+    )
+    .await
+    .expect("add remote dep");
+    add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
+        .await
+        .expect("add isolate scope");
+    let (empty_tx, empty_rx) = mpsc::channel::<InvokeEzRequest>(1);
+    drop(empty_tx);
+    let mut empty_stream = harness
+        .client
+        .stream_invoke_ez(ReceiverStream::new(empty_rx))
+        .await
+        .expect("empty stream setup")
+        .into_inner();
+    let eof = timeout(Duration::from_secs(5), empty_stream.message())
+        .await
+        .expect("empty stream should finish promptly")
+        .expect("empty stream should close cleanly");
+    assert!(eof.is_none());
+    let ext_unary_err = harness
+        .client
+        .invoke_ez(create_test_request(TEST_EXTERNAL_OPERATOR_DOMAIN, TEST_SERVICE_NAME))
+        .await
+        .expect_err("unary external without connector must fail");
+    assert_eq!(ext_unary_err.code(), tonic::Code::FailedPrecondition);
+    let (ext_tx, ext_rx) = mpsc::channel(CHANNEL_SIZE);
+    ext_tx
+        .send(create_test_request(TEST_EXTERNAL_OPERATOR_DOMAIN, TEST_SERVICE_NAME))
+        .await
+        .unwrap();
+    drop(ext_tx);
+    let mut ext_stream = harness
+        .client
+        .stream_invoke_ez(ReceiverStream::new(ext_rx))
+        .await
+        .expect("external stream setup")
+        .into_inner();
+    let ext_stream_err = timeout(Duration::from_secs(5), ext_stream.message())
+        .await
+        .expect("external stream error should arrive")
+        .expect_err("streaming external without connector must fail");
+    assert_eq!(ext_stream_err.code(), tonic::Code::FailedPrecondition);
+    let rem_unary_err = harness
+        .client
+        .invoke_ez(create_test_request(TEST_REMOTE_OPERATOR_DOMAIN, TEST_SERVICE_NAME))
+        .await
+        .expect_err("unary remote without handler must fail");
+    assert_eq!(rem_unary_err.code(), tonic::Code::FailedPrecondition);
+    let (rem_tx, rem_rx) = mpsc::channel(CHANNEL_SIZE);
+    rem_tx.send(create_test_request(TEST_REMOTE_OPERATOR_DOMAIN, TEST_SERVICE_NAME)).await.unwrap();
+    drop(rem_tx);
+    let mut rem_stream = harness
+        .client
+        .stream_invoke_ez(ReceiverStream::new(rem_rx))
+        .await
+        .expect("remote stream setup")
+        .into_inner();
+    let rem_stream_err = timeout(Duration::from_secs(5), rem_stream.message())
+        .await
+        .expect("remote stream error should arrive")
+        .expect_err("streaming remote without handler must fail");
+    assert_eq!(rem_stream_err.code(), tonic::Code::FailedPrecondition);
+}
+
+#[tokio::test]
+async fn test_missing_metadata_and_midstream_route_mismatch_rejected() {
+    let mut harness = TestHarness::new().await.expect("Harness should start");
+    for (domain, is_internal, route_type) in [
+        (TEST_INTERNAL_OPERATOR_DOMAIN, true, TEST_INTERNAL_ROUTE_TYPE),
+        (TEST_EXTERNAL_OPERATOR_DOMAIN, false, TEST_EXTERNAL_ROUTE_TYPE),
+        (TEST_REMOTE_OPERATOR_DOMAIN, false, TEST_REMOTE_ROUTE_TYPE),
+    ] {
+        let info = IsolateServiceInfo {
+            operator_domain: domain.to_string(),
+            service_name: TEST_SERVICE_NAME.to_string(),
+            ..Default::default()
+        };
+        add_backend_dependencies(
+            harness.isolate_id,
+            harness.mapper.clone(),
+            harness.manifest_validator.clone(),
+            &info,
+            is_internal,
+            route_type,
+        )
+        .await
+        .expect("add route dependency");
+    }
+    add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
+        .await
+        .expect("add isolate scope");
+    let mut no_meta_req = create_test_request(TEST_INTERNAL_OPERATOR_DOMAIN, TEST_SERVICE_NAME);
+    no_meta_req.control_plane_metadata = None;
+    let no_meta_err = harness
+        .client
+        .invoke_ez(no_meta_req)
+        .await
+        .expect_err("unary request without metadata must fail");
+    assert_eq!(no_meta_err.code(), tonic::Code::FailedPrecondition);
+    let rem_ok = harness
+        .client
+        .invoke_ez(create_test_request(TEST_REMOTE_OPERATOR_DOMAIN, TEST_SERVICE_NAME))
+        .await
+        .expect("unary remote call with empty response scope should succeed")
+        .into_inner();
+    assert!(rem_ok.ez_response_payload.is_none());
+    let (ext_tx, ext_rx) = mpsc::channel(CHANNEL_SIZE);
+    ext_tx
+        .send(create_test_request(TEST_EXTERNAL_OPERATOR_DOMAIN, TEST_SERVICE_NAME))
+        .await
+        .unwrap();
+    ext_tx
+        .send(create_test_request(TEST_EXTERNAL_OPERATOR_DOMAIN, TEST_SERVICE_NAME))
+        .await
+        .unwrap();
+    let mut ext_stream = harness
+        .client
+        .stream_invoke_ez(ReceiverStream::new(ext_rx))
+        .await
+        .expect("external stream setup")
+        .into_inner();
+    let echoed = timeout(Duration::from_secs(5), ext_stream.message())
+        .await
+        .expect("external stream echo should arrive")
+        .expect("external stream response should be Ok")
+        .expect("external stream should emit echoed payload");
+    assert_eq!(echoed.ez_response_payload, get_sample_invoke_ez_response().ez_response_payload);
+    ext_tx
+        .send(create_test_request(TEST_INTERNAL_OPERATOR_DOMAIN, TEST_SERVICE_NAME))
+        .await
+        .unwrap();
+    let ext_mismatch = timeout(Duration::from_secs(5), ext_stream.message())
+        .await
+        .expect("external route mismatch error should arrive")
+        .expect_err("switching external stream to internal route must fail");
+    assert_eq!(ext_mismatch.code(), tonic::Code::FailedPrecondition);
+    drop(ext_tx);
+    for (initial_domain, switched_domain) in [
+        (TEST_REMOTE_OPERATOR_DOMAIN, TEST_INTERNAL_OPERATOR_DOMAIN),
+        (TEST_INTERNAL_OPERATOR_DOMAIN, TEST_EXTERNAL_OPERATOR_DOMAIN),
+    ] {
+        let (tx, rx) = mpsc::channel(CHANNEL_SIZE);
+        tx.send(create_test_request(initial_domain, TEST_SERVICE_NAME)).await.unwrap();
+        let mut stream = harness
+            .client
+            .stream_invoke_ez(ReceiverStream::new(rx))
+            .await
+            .expect("stream setup")
+            .into_inner();
+        let first = timeout(Duration::from_secs(5), stream.message())
+            .await
+            .expect("initial stream response should arrive")
+            .expect("initial stream response should be Ok");
+        assert!(first.is_some());
+        tx.send(create_test_request(switched_domain, TEST_SERVICE_NAME)).await.unwrap();
+        drop(tx);
+        let mismatch = timeout(Duration::from_secs(5), stream.message())
+            .await
+            .expect("route mismatch error should arrive")
+            .expect_err("mid-stream route switch must fail");
+        assert_eq!(mismatch.code(), tonic::Code::FailedPrecondition);
+    }
+}
+
+impl TestHarness {
+    async fn new_without_outbound_handlers() -> Result<Self> {
+        Self::with_config(TestHarnessConfig { with_outbound_handlers: false, ..Default::default() })
+            .await
+    }
+
+    async fn new_with_self_hosted_services(service_infos: Vec<IsolateServiceInfo>) -> Result<Self> {
+        Self::with_config(TestHarnessConfig {
+            self_hosted_services: service_infos,
+            ..Default::default()
+        })
+        .await
+    }
+}
+
+/// Creates test request for Isolates with specific `isolate_name` and `publisher_id`.
+fn create_test_request_with_qualifiers(
+    domain: &str,
+    name: &str,
+    isolate_name: &str,
+    publisher_id: &str,
+) -> InvokeEzRequest {
+    let mut req = create_test_request(domain, name);
+    if let Some(meta) = req.control_plane_metadata.as_mut() {
+        meta.destination_isolate_name = isolate_name.to_string();
+        meta.destination_publisher_id = publisher_id.to_string();
+    }
+    req
 }

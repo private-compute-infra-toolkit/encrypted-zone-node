@@ -21,18 +21,26 @@ The project is built using Bazel. The [`docs/Development.md`](docs/Development.m
 instructions for setting up the development environment, including configuring `rust-analyzer` for
 IDE support.
 
-To build the project, you can use the `bazel build` command. For example, to build the `enforcer`
-binary:
+To build the project, use the `devkit/build bazel build` command. For example, to build the
+`enforcer` binary:
 
 ```bash
-bazel build //enforcer/...
+devkit/build bazel build //enforcer/...
 ```
 
-To run the tests, you can use the `bazel test` command:
+To run the tests, use the `devkit/build bazel test` command:
 
 ```bash
-bazel test //...
+devkit/build bazel test //...
 ```
+
+Note that `.bazelrc` enables `--config=rustfmt` (`rustfmt_aspect`) and `--config=clippy`
+(`rust_clippy_aspect`), which only execute on the top-level targets explicitly listed on the `bazel`
+command line and do **not** propagate transitively along `deps`. Running `devkit/build bazel test`
+on a single `rust_test` target only runs `rustfmt` and `clippy` on that test target, skipping its
+`rust_library` dependencies under `src/`. Always pass the package wildcard (for example,
+`devkit/build bazel test //enforcer/isolate/...`) or explicit library targets so `rustfmt` and
+`clippy` validate all modified sources.
 
 The [`docs/Microbenchmarks.md`](docs/Microbenchmarks.md) file provides instructions for running
 benchmarks.
@@ -45,6 +53,23 @@ benchmarks.
     `.pre-commit-config.yaml` file.
 -   The `BUILD.bazel` files define the build rules and dependencies for each component.
 -   The `MODULE.bazel` file defines the external dependencies for the project.
+
+### Pre-commit hooks, formatting & linting
+
+-   Before finalizing or amending any commit, run `devkit/pre-commit` and `devkit/gitlint` (matching
+    `google_internal/kokoro/pre-commit`).
+-   Bare `devkit/pre-commit` (with no arguments) defaults to `pre-commit run --all-files`. Passing
+    **any** arguments (such as `devkit/pre-commit run` or `devkit/pre-commit run docker-rustfmt`)
+    overrides that default; without `--all-files`, `--files <files>`, or
+    `--from-ref <base> --to-ref <head>`, `pre-commit` only inspects **currently staged files
+    (`git diff --cached`)** and silently skips files that have already been committed.
+-   When running a specific hook or verifying already-committed changes in a branch or stack, always
+    pass `--all-files` (for example, `devkit/pre-commit run docker-rustfmt --all-files`) or
+    `--from-ref origin/main --to-ref HEAD`.
+-   Never skip `docker-rustfmt` (`SKIP=docker-rustfmt`). If Docker is unavailable in a sandboxed
+    agent environment, format and verify all modified Rust packages using Bazel's hermetic `rustfmt`
+    toolchain (`devkit/build bazel run @rules_rust//:rustfmt -- //enforcer/<pkg>/...` and
+    `devkit/build bazel build //enforcer/<pkg>/...`).
 
 ### Testing & Coverage
 

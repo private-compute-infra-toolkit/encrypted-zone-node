@@ -8,7 +8,7 @@
 // limitations under the License.
 
 use grpc_connector::GrpcChannelPool;
-use grpc_connector::{get_grpc_timeout_or_log, try_parse_grpc_timeout};
+use grpc_connector::{connect_tls_from_env, get_grpc_timeout_or_log, try_parse_grpc_timeout};
 use grpc_connector_test_proto::enforcer::grpc_connector::test::{
     test_service_client::TestServiceClient,
     test_service_server::{TestService, TestServiceServer},
@@ -16,6 +16,7 @@ use grpc_connector_test_proto::enforcer::grpc_connector::test::{
 };
 use std::net::Ipv4Addr;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -31,6 +32,7 @@ use tonic::transport::{server::Connected, Server, Uri};
 #[derive(Default, Clone)]
 struct MockTestService {
     last_authority: Arc<Mutex<Option<String>>>,
+    accepted_connections: Arc<AtomicUsize>,
 }
 
 #[tonic::async_trait]
@@ -152,10 +154,13 @@ async fn setup_tls_uds_server(
     let uds_path = temp_dir.path().join("test-tls-connector.sock");
     let uds = UnixListener::bind(&uds_path).unwrap();
     let acceptor = Arc::new(acceptor);
+    let accepted_connections = service.accepted_connections.clone();
     let tls_stream = UnixListenerStream::new(uds).then(move |conn| {
         let acceptor = acceptor.clone();
+        let accepted_connections = accepted_connections.clone();
         async move {
             let stream = conn?;
+            accepted_connections.fetch_add(1, Ordering::SeqCst);
             let tls =
                 tokio_boring::accept(&acceptor, stream).await.map_err(std::io::Error::other)?;
             Ok::<_, std::io::Error>(TestTlsStream(tls))
@@ -323,6 +328,44 @@ async fn test_new_tls_sets_sni_as_authority() {
 
     assert_eq!(service.last_authority.lock().unwrap().as_deref(), Some(expected_sni));
     let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn test_connect_tls_from_env_opens_single_connection() {
+    let service = MockTestService::default();
+    let (acceptor, connector) = create_test_tls_acceptor_and_connector();
+    let (addr, shutdown_tx, _temp_dir) = setup_tls_uds_server(service.clone(), acceptor).await;
+    let expected_sni = "single-conn-sni.example.com";
+
+    for expected_connections in 1..=2 {
+        *service.last_authority.lock().unwrap() = None;
+        let channel = connect_tls_from_env(&addr, connector.clone(), expected_sni.to_string())
+            .await
+            .expect("Failed to connect single TLS UDS channel");
+
+        let mut client = TestServiceClient::new(channel);
+        tokio::time::timeout(Duration::from_secs(2), client.unary_call(TestRequest {}))
+            .await
+            .expect("Unary call timed out")
+            .expect("Unary call over single TLS UDS channel failed");
+
+        assert_eq!(service.accepted_connections.load(Ordering::SeqCst), expected_connections);
+        assert_eq!(service.last_authority.lock().unwrap().as_deref(), Some(expected_sni));
+    }
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn test_connect_tls_from_env_tcp_rejected() {
+    let (_acceptor, connector) = create_test_tls_acceptor_and_connector();
+    let err = connect_tls_from_env(
+        "http://127.0.0.1:8080",
+        connector,
+        /*sni=*/ "localhost".to_string(),
+    )
+    .await
+    .expect_err("Expected TLS over TCP to fail");
+    assert!(err.to_string().contains("TLS over TCP is not supported"));
 }
 
 #[tokio::test]

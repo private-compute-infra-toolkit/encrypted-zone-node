@@ -3,7 +3,9 @@
     "isolate_name": "helloworld",
     "publisher_id": "helloworld_domain"
   },
-  "package_digest_sha256": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+  "isolate_digest": {
+    "package_sha256": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+  },
   "binary_filename": "/usr/local/bin/main",
   "service_specs": [
     {

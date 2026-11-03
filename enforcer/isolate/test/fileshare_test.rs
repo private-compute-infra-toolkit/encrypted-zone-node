@@ -26,7 +26,7 @@ use enforcer_proto::enforcer::v1::{
     stream_subscribe_to_response::Payload as StreamPayload, EventTopic, FileshareEvent,
     PublishEventForRequest, StreamSubscribeToRequest,
 };
-use fileshare_manager::FileshareManager;
+use fileshare_manager::{FileshareManager, FileshareManagerError};
 use hyper_util::rt::tokio::TokioIo;
 use isolate_ez_service::{IsolateEzBridgeDependencies, IsolateEzBridgeService};
 use isolate_info::{BinaryServicesIndex, IsolateId};
@@ -39,80 +39,8 @@ use tokio::time::{sleep, timeout, Duration};
 use tonic::transport::{Channel, Endpoint, Server};
 use tower::service_fn;
 
-#[derive(Debug)]
-struct TestHarness {
-    isolate_id: IsolateId,
-    client: IsolateEzBridgeClient<Channel>,
-}
-
-impl TestHarness {
-    async fn new_with_shared_components(
-        isolate_id: IsolateId,
-        fileshare_manager: FileshareManager,
-    ) -> Result<Self> {
-        let mock_junction = FakeJunction::default();
-        let service_mapper = IsolateServiceMapper::default();
-
-        let (tx, _container_manager_rx) = mpsc::channel(1);
-        let container_manager_requester = ContainerManagerRequester::new(tx);
-        let data_scope_requester = DataScopeRequester::new(0);
-
-        let manifest_validator = ManifestValidator::default();
-        let isolate_state_manager = IsolateStateManager::new(
-            data_scope_requester.clone(),
-            container_manager_requester.clone(),
-        );
-        let shared_memory_manager = SharedMemManager::new(container_manager_requester, 0, 0);
-        let interceptor_instance = interceptor::Interceptor::new(service_mapper.clone());
-
-        let deps = IsolateEzBridgeDependencies {
-            isolate_id,
-            isolate_junction: Box::new(mock_junction),
-            isolate_state_manager,
-            shared_memory_manager,
-            fileshare_manager,
-            external_proxy_connector: None,
-            isolate_service_mapper: service_mapper,
-            data_scope_requester,
-            manifest_validator,
-            ez_to_ez_outbound_handler: None,
-            interceptor: interceptor_instance,
-            shm_payload_threshold: 100 * 1024 * 1024, // 100MiB
-        };
-        let isolate_ez_bridge_service = IsolateEzBridgeService::new(deps);
-        let client = spawn_test_server(isolate_ez_bridge_service).await;
-
-        Ok(Self { isolate_id, client })
-    }
-}
-
-async fn spawn_test_server(service: IsolateEzBridgeService) -> IsolateEzBridgeClient<Channel> {
-    let (client_io, server_io) = tokio::io::duplex(1024);
-
-    tokio::spawn(async move {
-        Server::builder()
-            .add_service(IsolateEzBridgeServer::new(service))
-            .serve_with_incoming(tokio_stream::once(Ok::<_, std::io::Error>(server_io)))
-            .await
-    });
-
-    let mut client_conn = Some(client_io);
-    Endpoint::try_from("http://in-memory.test")
-        .expect("Endpoint should be valid")
-        .connect_with_connector(service_fn(move |_| {
-            let client = client_conn.take();
-            async move {
-                if let Some(client) = client {
-                    Ok(TokioIo::new(client))
-                } else {
-                    Err(std::io::Error::other("Client already taken"))
-                }
-            }
-        }))
-        .await
-        .map(IsolateEzBridgeClient::new)
-        .expect("Should connect client")
-}
+const INVALID_HANDLE: &str = "not-a-number";
+const MISSING_HANDLE: &str = "999999999";
 
 #[tokio::test]
 async fn test_fileshare_event_propagation() {
@@ -201,4 +129,228 @@ async fn test_fileshare_event_propagation() {
     let payload = event.payload.expect("Missing payload");
     let StreamPayload::FileshareEvent(fileshare_event) = payload;
     assert_eq!(fileshare_event.event_type, fileshare_event::FileshareEventType::FileUpdated as i32);
+}
+
+#[tokio::test]
+async fn test_fileshare_share_scope_and_validation_errors() {
+    let (cm_tx, mut cm_rx) = mpsc::channel(4);
+    let fileshare_manager = FileshareManager::new(ContainerManagerRequester::new(cm_tx));
+    let cm_task = tokio::spawn(async move {
+        while let Some(req) = cm_rx.recv().await {
+            match req {
+                ContainerManagerRequest::MountWritableDirectory { resp, .. }
+                | ContainerManagerRequest::MountReadOnlyDirectory { resp, .. } => {
+                    let _ = resp.send(Ok(container_manager_request::MountDirectoryResponse {}));
+                }
+                _ => panic!("Unexpected ContainerManagerRequest"),
+            }
+        }
+    });
+    let owner_id = IsolateId::new(BinaryServicesIndex::new(false));
+    let receiver_id = IsolateId::new(BinaryServicesIndex::new(false));
+    let other_id = IsolateId::new(BinaryServicesIndex::new(false));
+    let pub_handle = fileshare_manager
+        .create_fileshare(owner_id, DataScopeType::Public)
+        .await
+        .expect("create public fileshare");
+    let priv_handle = fileshare_manager
+        .create_fileshare(owner_id, DataScopeType::UserPrivate)
+        .await
+        .expect("create user-private fileshare");
+    let strictest = fileshare_manager
+        .share_scope(owner_id, receiver_id, &[pub_handle.clone(), priv_handle])
+        .expect("share_scope should succeed");
+    assert_eq!(strictest, DataScopeType::UserPrivate);
+    assert!(matches!(
+        fileshare_manager.share_scope(owner_id, owner_id, std::slice::from_ref(&pub_handle)),
+        Err(FileshareManagerError::DestinationSameAsOwner)
+    ));
+    assert!(matches!(
+        fileshare_manager.share_file(&pub_handle, owner_id, owner_id).await,
+        Err(FileshareManagerError::DestinationSameAsOwner)
+    ));
+    let invalid_handle_slice = [INVALID_HANDLE.to_string()];
+    assert!(matches!(
+        fileshare_manager.share_scope(owner_id, receiver_id, &invalid_handle_slice),
+        Err(FileshareManagerError::InvalidHandle)
+    ));
+    assert!(matches!(
+        fileshare_manager.share_file(INVALID_HANDLE, owner_id, receiver_id).await,
+        Err(FileshareManagerError::InvalidHandle)
+    ));
+    assert!(matches!(
+        fileshare_manager
+            .notify_event(
+                INVALID_HANDLE,
+                fileshare_event::FileshareEventType::FileUpdated,
+                owner_id
+            )
+            .await,
+        Err(FileshareManagerError::InvalidHandle)
+    ));
+    let missing_handle_slice = [MISSING_HANDLE.to_string()];
+    assert!(matches!(
+        fileshare_manager.share_scope(owner_id, receiver_id, &missing_handle_slice),
+        Err(FileshareManagerError::HandleNotFound)
+    ));
+    assert!(matches!(
+        fileshare_manager.share_file(MISSING_HANDLE, owner_id, receiver_id).await,
+        Err(FileshareManagerError::HandleNotFound)
+    ));
+    assert!(matches!(
+        fileshare_manager
+            .notify_event(
+                MISSING_HANDLE,
+                fileshare_event::FileshareEventType::FileUpdated,
+                owner_id
+            )
+            .await,
+        Err(FileshareManagerError::HandleNotFound)
+    ));
+    assert!(matches!(
+        fileshare_manager.share_scope(other_id, receiver_id, std::slice::from_ref(&pub_handle)),
+        Err(FileshareManagerError::UnauthorizedNotifyEvent)
+    ));
+    assert!(matches!(
+        fileshare_manager.share_file(&pub_handle, other_id, receiver_id).await,
+        Err(FileshareManagerError::UnauthorizedNotifyEvent)
+    ));
+    assert!(matches!(
+        fileshare_manager
+            .notify_event(&pub_handle, fileshare_event::FileshareEventType::FileUpdated, other_id)
+            .await,
+        Err(FileshareManagerError::UnauthorizedNotifyEvent)
+    ));
+    cm_task.abort();
+    let _ = cm_task.await;
+    assert!(matches!(
+        fileshare_manager.create_fileshare(owner_id, DataScopeType::Public).await,
+        Err(FileshareManagerError::MountFailed(_))
+    ));
+    assert!(matches!(
+        fileshare_manager.share_file(&pub_handle, owner_id, receiver_id).await,
+        Err(FileshareManagerError::MountFailed(_))
+    ));
+}
+
+#[tokio::test]
+async fn test_fileshare_notify_unshared_closed_stream_and_remove_isolate() {
+    let (cm_tx, mut cm_rx) = mpsc::channel(4);
+    let fileshare_manager = FileshareManager::new(ContainerManagerRequester::new(cm_tx));
+    tokio::spawn(async move {
+        while let Some(req) = cm_rx.recv().await {
+            match req {
+                ContainerManagerRequest::MountWritableDirectory { resp, .. }
+                | ContainerManagerRequest::MountReadOnlyDirectory { resp, .. } => {
+                    let _ = resp.send(Ok(container_manager_request::MountDirectoryResponse {}));
+                }
+                _ => panic!("Unexpected ContainerManagerRequest"),
+            }
+        }
+    });
+    let owner_id = IsolateId::new(BinaryServicesIndex::new(false));
+    let receiver_id = IsolateId::new(BinaryServicesIndex::new(false));
+    let handle = fileshare_manager
+        .create_fileshare(owner_id, DataScopeType::DomainOwned)
+        .await
+        .expect("create fileshare");
+    assert!(fileshare_manager
+        .notify_event(&handle, fileshare_event::FileshareEventType::FileUpdated, owner_id)
+        .await
+        .is_ok());
+    fileshare_manager.share_file(&handle, owner_id, receiver_id).await.expect("share_file");
+    let (sub_tx, sub_rx) = mpsc::channel(1);
+    fileshare_manager.register_event_stream(receiver_id, sub_tx);
+    drop(sub_rx);
+    assert!(fileshare_manager
+        .notify_event(&handle, fileshare_event::FileshareEventType::FileUpdated, owner_id)
+        .await
+        .is_ok());
+    fileshare_manager.remove_isolate(receiver_id).await.expect("remove receiver");
+    assert_eq!(
+        fileshare_manager
+            .share_scope(owner_id, receiver_id, std::slice::from_ref(&handle))
+            .expect("owner handle must remain valid"),
+        DataScopeType::DomainOwned
+    );
+    fileshare_manager.remove_isolate(owner_id).await.expect("remove owner");
+    assert!(matches!(
+        fileshare_manager.share_scope(owner_id, receiver_id, std::slice::from_ref(&handle)),
+        Err(FileshareManagerError::HandleNotFound)
+    ));
+}
+
+#[derive(Debug)]
+struct TestHarness {
+    isolate_id: IsolateId,
+    client: IsolateEzBridgeClient<Channel>,
+}
+
+impl TestHarness {
+    async fn new_with_shared_components(
+        isolate_id: IsolateId,
+        fileshare_manager: FileshareManager,
+    ) -> Result<Self> {
+        let mock_junction = FakeJunction::default();
+        let service_mapper = IsolateServiceMapper::default();
+
+        let (tx, _container_manager_rx) = mpsc::channel(1);
+        let container_manager_requester = ContainerManagerRequester::new(tx);
+        let data_scope_requester = DataScopeRequester::new(0);
+
+        let manifest_validator = ManifestValidator::default();
+        let isolate_state_manager = IsolateStateManager::new(
+            data_scope_requester.clone(),
+            container_manager_requester.clone(),
+        );
+        let shared_memory_manager = SharedMemManager::new(container_manager_requester, 0, 0);
+        let interceptor_instance = interceptor::Interceptor::new(service_mapper.clone());
+
+        let deps = IsolateEzBridgeDependencies {
+            isolate_id,
+            isolate_junction: Box::new(mock_junction),
+            isolate_state_manager,
+            shared_memory_manager,
+            fileshare_manager,
+            external_proxy_connector: None,
+            isolate_service_mapper: service_mapper,
+            data_scope_requester,
+            manifest_validator,
+            ez_to_ez_outbound_handler: None,
+            interceptor: interceptor_instance,
+            shm_payload_threshold: 100 * 1024 * 1024, // 100MiB
+        };
+        let isolate_ez_bridge_service = IsolateEzBridgeService::new(deps);
+        let client = spawn_test_server(isolate_ez_bridge_service).await;
+
+        Ok(Self { isolate_id, client })
+    }
+}
+
+async fn spawn_test_server(service: IsolateEzBridgeService) -> IsolateEzBridgeClient<Channel> {
+    let (client_io, server_io) = tokio::io::duplex(1024);
+
+    tokio::spawn(async move {
+        Server::builder()
+            .add_service(IsolateEzBridgeServer::new(service))
+            .serve_with_incoming(tokio_stream::once(Ok::<_, std::io::Error>(server_io)))
+            .await
+    });
+
+    let mut client_conn = Some(client_io);
+    Endpoint::try_from("http://in-memory.test")
+        .expect("Endpoint should be valid")
+        .connect_with_connector(service_fn(move |_| {
+            let client = client_conn.take();
+            async move {
+                if let Some(client) = client {
+                    Ok(TokioIo::new(client))
+                } else {
+                    Err(std::io::Error::other("Client already taken"))
+                }
+            }
+        }))
+        .await
+        .map(IsolateEzBridgeClient::new)
+        .expect("Should connect client")
 }

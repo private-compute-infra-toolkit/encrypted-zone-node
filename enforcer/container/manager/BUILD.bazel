@@ -165,6 +165,7 @@ rust_test(
         ":container_manager",
         ":container_manager_request",
         ":container_manager_test_utils",
+        "//enforcer/container",
         "//enforcer/container:container_test_utils",
         "//enforcer/data_scope",
         "//enforcer/interceptor",

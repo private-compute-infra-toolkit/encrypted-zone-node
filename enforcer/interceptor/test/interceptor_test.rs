@@ -13,8 +13,9 @@
 // limitations under the License.
 
 use anyhow::Result;
+use enforcer_proto::enforcer::v1::{ControlPlaneMetadata, InvokeEzRequest};
 use ez_service_proto::enforcer::v1::CallRequest;
-use interceptor::{Interceptor, RequestType};
+use interceptor::{Interceptor, RequestType, TargetableRequest};
 use isolate_info::IsolateServiceInfo;
 use isolate_service_mapper::IsolateServiceMapper;
 use manifest_proto::enforcer::v1::InterceptingServices;
@@ -27,74 +28,14 @@ const ANOTHER_RATIFIED_DOMAIN: &str = "another.ratified.domain";
 const ANOTHER_RATIFIED_SERVICE: &str = "AnotherRatifiedService";
 const UNARY: &str = "unary";
 const STREAMING: &str = "streaming";
-
-async fn setup_interceptor_with_populated_mapper() -> Result<Interceptor> {
-    let mapper = IsolateServiceMapper::default();
-    mapper
-        .new_binary_index(
-            vec![IsolateServiceInfo {
-                operator_domain: OPAQUE_DOMAIN.to_string(),
-                service_name: OPAQUE_SERVICE.to_string(),
-                ..Default::default()
-            }],
-            false, // is_ratified
-            "publisher_id".to_string(),
-            "isolate_name".to_string(),
-        )
-        .await?;
-    mapper
-        .new_binary_index(
-            vec![IsolateServiceInfo {
-                operator_domain: RATIFIED_INTERCEPTOR_DOMAIN.to_string(),
-                service_name: RATIFIED_INTERCEPTOR_SERVICE.to_string(),
-                ..Default::default()
-            }],
-            true, // is_ratified
-            "ratified_publisher_id".to_string(),
-            "ratified_isolate_name".to_string(),
-        )
-        .await?;
-    mapper
-        .new_binary_index(
-            vec![IsolateServiceInfo {
-                operator_domain: ANOTHER_RATIFIED_DOMAIN.to_string(),
-                service_name: ANOTHER_RATIFIED_SERVICE.to_string(),
-                ..Default::default()
-            }],
-            true, // is_ratified
-            "another_publisher_id".to_string(),
-            "another_isolate_name".to_string(),
-        )
-        .await?;
-    mapper
-        .new_binary_index(
-            vec![IsolateServiceInfo {
-                operator_domain: "qualified.opaque.domain".to_string(),
-                service_name: "QualifiedOpaqueService".to_string(),
-                isolate_name: "opaque_iso".to_string(),
-                publisher_id: "opaque_pub".to_string(),
-            }],
-            false, // is_ratified
-            "opaque_pub".to_string(),
-            "opaque_iso".to_string(),
-        )
-        .await?;
-    mapper
-        .new_binary_index(
-            vec![IsolateServiceInfo {
-                operator_domain: "qualified.ratified.domain".to_string(),
-                service_name: "QualifiedRatifiedService".to_string(),
-                isolate_name: "ratified_iso".to_string(),
-                publisher_id: "ratified_pub".to_string(),
-            }],
-            true, // is_ratified
-            "ratified_pub".to_string(),
-            "ratified_iso".to_string(),
-        )
-        .await?;
-
-    Ok(Interceptor::new(mapper))
-}
+const QUALIFIED_OPAQUE_DOMAIN: &str = "qualified.opaque.domain";
+const QUALIFIED_OPAQUE_SERVICE: &str = "QualifiedOpaqueService";
+const QUALIFIED_OPAQUE_ISOLATE: &str = "opaque_iso";
+const QUALIFIED_OPAQUE_PUBLISHER: &str = "opaque_pub";
+const QUALIFIED_RATIFIED_DOMAIN: &str = "qualified.ratified.domain";
+const QUALIFIED_RATIFIED_SERVICE: &str = "QualifiedRatifiedService";
+const QUALIFIED_RATIFIED_ISOLATE: &str = "ratified_iso";
+const QUALIFIED_RATIFIED_PUBLISHER: &str = "ratified_pub";
 
 #[tokio::test]
 async fn test_add_interceptor_success() {
@@ -340,4 +281,233 @@ async fn test_replace_with_interceptor_with_qualifiers() {
     assert_eq!(call_request.isolate_name, "ratified_iso");
     assert_eq!(call_request.publisher_id, "ratified_pub");
     assert_eq!(call_request.method_name, UNARY);
+}
+
+#[tokio::test]
+async fn test_replace_invoke_ez_request_unary_and_streaming() {
+    let interceptor =
+        setup_interceptor_with_populated_mapper().await.expect("Failed to setup Interceptor");
+    interceptor
+        .add_interceptor(InterceptingServices {
+            intercepting_operator_domain: QUALIFIED_OPAQUE_DOMAIN.to_string(),
+            intercepting_service_name: QUALIFIED_OPAQUE_SERVICE.to_string(),
+            intercepting_isolate_name: QUALIFIED_OPAQUE_ISOLATE.to_string(),
+            intercepting_publisher_id: QUALIFIED_OPAQUE_PUBLISHER.to_string(),
+            interceptor_operator_domain: QUALIFIED_RATIFIED_DOMAIN.to_string(),
+            interceptor_service_name: QUALIFIED_RATIFIED_SERVICE.to_string(),
+            interceptor_isolate_name: QUALIFIED_RATIFIED_ISOLATE.to_string(),
+            interceptor_publisher_id: QUALIFIED_RATIFIED_PUBLISHER.to_string(),
+            interceptor_method_for_unary: UNARY.to_string(),
+            interceptor_method_for_streaming: STREAMING.to_string(),
+        })
+        .await
+        .unwrap();
+    let mut unary_req = InvokeEzRequest {
+        control_plane_metadata: Some(ControlPlaneMetadata {
+            destination_operator_domain: QUALIFIED_OPAQUE_DOMAIN.to_string(),
+            destination_service_name: QUALIFIED_OPAQUE_SERVICE.to_string(),
+            destination_isolate_name: QUALIFIED_OPAQUE_ISOLATE.to_string(),
+            destination_publisher_id: QUALIFIED_OPAQUE_PUBLISHER.to_string(),
+            destination_method_name: "OriginalUnary".to_string(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    interceptor.replace_with_interceptor(&mut unary_req, RequestType::Unary).await;
+    let unary_meta = unary_req.control_plane_metadata.unwrap();
+    assert_eq!(unary_meta.destination_operator_domain, QUALIFIED_RATIFIED_DOMAIN);
+    assert_eq!(unary_meta.destination_service_name, QUALIFIED_RATIFIED_SERVICE);
+    assert_eq!(unary_meta.destination_isolate_name, QUALIFIED_RATIFIED_ISOLATE);
+    assert_eq!(unary_meta.destination_publisher_id, QUALIFIED_RATIFIED_PUBLISHER);
+    assert_eq!(unary_meta.destination_method_name, UNARY);
+
+    let mut stream_req = InvokeEzRequest {
+        control_plane_metadata: Some(ControlPlaneMetadata {
+            destination_operator_domain: QUALIFIED_OPAQUE_DOMAIN.to_string(),
+            destination_service_name: QUALIFIED_OPAQUE_SERVICE.to_string(),
+            destination_isolate_name: QUALIFIED_OPAQUE_ISOLATE.to_string(),
+            destination_publisher_id: QUALIFIED_OPAQUE_PUBLISHER.to_string(),
+            destination_method_name: "OriginalStreaming".to_string(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    interceptor.replace_with_interceptor(&mut stream_req, RequestType::Streaming).await;
+    let stream_meta = stream_req.control_plane_metadata.unwrap();
+    assert_eq!(stream_meta.destination_operator_domain, QUALIFIED_RATIFIED_DOMAIN);
+    assert_eq!(stream_meta.destination_service_name, QUALIFIED_RATIFIED_SERVICE);
+    assert_eq!(stream_meta.destination_isolate_name, QUALIFIED_RATIFIED_ISOLATE);
+    assert_eq!(stream_meta.destination_publisher_id, QUALIFIED_RATIFIED_PUBLISHER);
+    assert_eq!(stream_meta.destination_method_name, STREAMING);
+}
+
+#[tokio::test]
+async fn test_replace_invoke_ez_request_qualifier_matching() {
+    let interceptor =
+        setup_interceptor_with_populated_mapper().await.expect("Failed to setup Interceptor");
+    interceptor
+        .add_interceptor(InterceptingServices {
+            intercepting_operator_domain: OPAQUE_DOMAIN.to_string(),
+            intercepting_service_name: OPAQUE_SERVICE.to_string(),
+            interceptor_operator_domain: RATIFIED_INTERCEPTOR_DOMAIN.to_string(),
+            interceptor_service_name: RATIFIED_INTERCEPTOR_SERVICE.to_string(),
+            interceptor_method_for_unary: UNARY.to_string(),
+            interceptor_method_for_streaming: STREAMING.to_string(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    interceptor
+        .add_interceptor(InterceptingServices {
+            intercepting_operator_domain: QUALIFIED_OPAQUE_DOMAIN.to_string(),
+            intercepting_service_name: QUALIFIED_OPAQUE_SERVICE.to_string(),
+            intercepting_isolate_name: QUALIFIED_OPAQUE_ISOLATE.to_string(),
+            intercepting_publisher_id: QUALIFIED_OPAQUE_PUBLISHER.to_string(),
+            interceptor_operator_domain: QUALIFIED_RATIFIED_DOMAIN.to_string(),
+            interceptor_service_name: QUALIFIED_RATIFIED_SERVICE.to_string(),
+            interceptor_isolate_name: QUALIFIED_RATIFIED_ISOLATE.to_string(),
+            interceptor_publisher_id: QUALIFIED_RATIFIED_PUBLISHER.to_string(),
+            interceptor_method_for_unary: UNARY.to_string(),
+            interceptor_method_for_streaming: STREAMING.to_string(),
+        })
+        .await
+        .unwrap();
+    let mut fallback_req_a = InvokeEzRequest {
+        control_plane_metadata: Some(ControlPlaneMetadata {
+            destination_operator_domain: QUALIFIED_OPAQUE_DOMAIN.to_string(),
+            destination_service_name: QUALIFIED_OPAQUE_SERVICE.to_string(),
+            destination_method_name: "OrigA".to_string(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    interceptor.replace_with_interceptor(&mut fallback_req_a, RequestType::Unary).await;
+    assert_eq!(
+        fallback_req_a.control_plane_metadata.unwrap().destination_service_name,
+        QUALIFIED_RATIFIED_SERVICE
+    );
+
+    let mut fallback_req_b = InvokeEzRequest {
+        control_plane_metadata: Some(ControlPlaneMetadata {
+            destination_operator_domain: OPAQUE_DOMAIN.to_string(),
+            destination_service_name: OPAQUE_SERVICE.to_string(),
+            destination_method_name: "OrigB".to_string(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    interceptor.replace_with_interceptor(&mut fallback_req_b, RequestType::Unary).await;
+    assert_eq!(
+        fallback_req_b.control_plane_metadata.unwrap().destination_service_name,
+        RATIFIED_INTERCEPTOR_SERVICE
+    );
+
+    let mut mismatched_req = InvokeEzRequest {
+        control_plane_metadata: Some(ControlPlaneMetadata {
+            destination_operator_domain: QUALIFIED_OPAQUE_DOMAIN.to_string(),
+            destination_service_name: QUALIFIED_OPAQUE_SERVICE.to_string(),
+            destination_isolate_name: "different_isolate".to_string(),
+            destination_method_name: "UnchangedMethod".to_string(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    interceptor.replace_with_interceptor(&mut mismatched_req, RequestType::Unary).await;
+    let meta = mismatched_req.control_plane_metadata.unwrap();
+    assert_eq!(meta.destination_service_name, QUALIFIED_OPAQUE_SERVICE);
+    assert_eq!(meta.destination_isolate_name, "different_isolate");
+    assert_eq!(meta.destination_method_name, "UnchangedMethod");
+}
+
+#[test]
+fn test_invoke_ez_request_targetable_without_metadata() {
+    let empty_req = InvokeEzRequest::default();
+    assert!(empty_req.operator_domain().is_empty());
+    assert!(empty_req.service_name().is_empty());
+    assert!(empty_req.isolate_name().is_empty());
+    assert!(empty_req.publisher_id().is_empty());
+
+    let mut req_domain = InvokeEzRequest::default();
+    req_domain.set_operator_domain("dom.test".to_string());
+    assert_eq!(req_domain.operator_domain(), "dom.test");
+    let mut req_svc = InvokeEzRequest::default();
+    req_svc.set_service_name("SvcTest".to_string());
+    assert_eq!(req_svc.service_name(), "SvcTest");
+    let mut req_method = InvokeEzRequest::default();
+    req_method.set_method_name("MethodTest".to_string());
+    assert_eq!(req_method.control_plane_metadata.unwrap().destination_method_name, "MethodTest");
+    let mut req_iso = InvokeEzRequest::default();
+    req_iso.set_isolate_name("IsoTest".to_string());
+    assert_eq!(req_iso.isolate_name(), "IsoTest");
+    let mut req_pub = InvokeEzRequest::default();
+    req_pub.set_publisher_id("PubTest".to_string());
+    assert_eq!(req_pub.publisher_id(), "PubTest");
+}
+
+async fn setup_interceptor_with_populated_mapper() -> Result<Interceptor> {
+    let mapper = IsolateServiceMapper::default();
+    mapper
+        .new_binary_index(
+            vec![IsolateServiceInfo {
+                operator_domain: OPAQUE_DOMAIN.to_string(),
+                service_name: OPAQUE_SERVICE.to_string(),
+                ..Default::default()
+            }],
+            false, // is_ratified
+            "publisher_id".to_string(),
+            "isolate_name".to_string(),
+        )
+        .await?;
+    mapper
+        .new_binary_index(
+            vec![IsolateServiceInfo {
+                operator_domain: RATIFIED_INTERCEPTOR_DOMAIN.to_string(),
+                service_name: RATIFIED_INTERCEPTOR_SERVICE.to_string(),
+                ..Default::default()
+            }],
+            true, // is_ratified
+            "ratified_publisher_id".to_string(),
+            "ratified_isolate_name".to_string(),
+        )
+        .await?;
+    mapper
+        .new_binary_index(
+            vec![IsolateServiceInfo {
+                operator_domain: ANOTHER_RATIFIED_DOMAIN.to_string(),
+                service_name: ANOTHER_RATIFIED_SERVICE.to_string(),
+                ..Default::default()
+            }],
+            true, // is_ratified
+            "another_publisher_id".to_string(),
+            "another_isolate_name".to_string(),
+        )
+        .await?;
+    mapper
+        .new_binary_index(
+            vec![IsolateServiceInfo {
+                operator_domain: "qualified.opaque.domain".to_string(),
+                service_name: "QualifiedOpaqueService".to_string(),
+                isolate_name: "opaque_iso".to_string(),
+                publisher_id: "opaque_pub".to_string(),
+            }],
+            false, // is_ratified
+            "opaque_pub".to_string(),
+            "opaque_iso".to_string(),
+        )
+        .await?;
+    mapper
+        .new_binary_index(
+            vec![IsolateServiceInfo {
+                operator_domain: "qualified.ratified.domain".to_string(),
+                service_name: "QualifiedRatifiedService".to_string(),
+                isolate_name: "ratified_iso".to_string(),
+                publisher_id: "ratified_pub".to_string(),
+            }],
+            true, // is_ratified
+            "ratified_pub".to_string(),
+            "ratified_iso".to_string(),
+        )
+        .await?;
+
+    Ok(Interceptor::new(mapper))
 }

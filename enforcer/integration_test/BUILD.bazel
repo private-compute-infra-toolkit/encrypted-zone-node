@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("@rules_rust//rust:defs.bzl", "rust_binary")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_test")
 
 # Keep this rust_binary instead of rust_test otherwise bazel would run this as an
 # independent test See: https://github.com/bazelbuild/rules_rust/discussions/913
@@ -30,5 +30,28 @@ rust_binary(
         "@crates//:tokio",
         "@crates//:users",
         "@rules_rust//tools/runfiles",
+    ],
+)
+
+rust_test(
+    name = "isolate_lifecycle_integration_test",
+    size = "small",
+    srcs = ["isolate_lifecycle_integration_test.rs"],
+    deps = [
+        "//enforcer/container/manager:container_manager_request",
+        "//enforcer/data_scope",
+        "//enforcer/interceptor",
+        "//enforcer/isolate:isolate_ez_service",
+        "//enforcer/isolate:isolate_info",
+        "//enforcer/isolate:isolate_test_utils",
+        "//enforcer/junction:junction_test_utils",
+        "//enforcer/v1:data_scope_rust",
+        "//enforcer/v1:enforcer_rust",
+        "//enforcer/v1:payload_rust",
+        "@crates//:hyper-util",
+        "@crates//:tokio",
+        "@crates//:tokio-stream",
+        "@crates//:tonic",
+        "@crates//:tower",
     ],
 )

@@ -35,7 +35,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 use tonic::Request;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct ShmResponseIsolate;
 
 #[tonic::async_trait]
@@ -71,7 +71,7 @@ impl isolate_test_utils::FakeIsolate for ShmResponseIsolate {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct DroppingIsolate;
 
 #[tonic::async_trait]

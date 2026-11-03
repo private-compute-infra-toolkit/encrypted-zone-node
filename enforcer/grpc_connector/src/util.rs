@@ -69,24 +69,13 @@ impl GrpcChannelPool {
 
     /// Creates a new GrpcChannelPool by reading retry configuration from environment variables.
     pub async fn new_from_env(address: &str) -> Result<Self> {
-        let retry_delay_ms = std::env::var(ENV_PROXY_CONNECT_RETRY_DELAY_MS)
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_CONNECT_RETRY_DELAY_MS);
-        let retry_count = std::env::var(ENV_PROXY_CONNECT_RETRY_COUNT)
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_CONNECT_RETRY_COUNT);
-        let retry_scaling = std::env::var(ENV_PROXY_CONNECT_RETRY_SCALING)
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_CONNECT_RETRY_SCALING);
+        let retry = retry_config_from_env();
         Self::new(
             address.to_string(),
             DEFAULT_POOL_SIZE,
-            retry_count,
-            retry_delay_ms,
-            retry_scaling,
+            retry.retry_count,
+            retry.retry_delay_ms,
+            retry.retry_scaling,
         )
         .await
     }
@@ -127,24 +116,13 @@ impl GrpcChannelPool {
         ssl_connector: SslConnector,
         sni: String,
     ) -> Result<Self> {
-        let retry_delay_ms = std::env::var(ENV_PROXY_CONNECT_RETRY_DELAY_MS)
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_CONNECT_RETRY_DELAY_MS);
-        let retry_count = std::env::var(ENV_PROXY_CONNECT_RETRY_COUNT)
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_CONNECT_RETRY_COUNT);
-        let retry_scaling = std::env::var(ENV_PROXY_CONNECT_RETRY_SCALING)
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_CONNECT_RETRY_SCALING);
+        let retry = retry_config_from_env();
         Self::new_tls(
             address.to_string(),
             DEFAULT_POOL_SIZE,
-            retry_count,
-            retry_scaling,
-            retry_delay_ms,
+            retry.retry_count,
+            retry.retry_scaling,
+            retry.retry_delay_ms,
             ssl_connector,
             sni,
         )
@@ -184,6 +162,47 @@ async fn connect(
 
     log::info!("Successfully connected to gRPC service at {}.", address);
     Ok(channel)
+}
+
+struct RetryConfig {
+    retry_count: usize,
+    retry_delay_ms: u64,
+    retry_scaling: u64,
+}
+
+fn retry_config_from_env() -> RetryConfig {
+    let retry_delay_ms = std::env::var(ENV_PROXY_CONNECT_RETRY_DELAY_MS)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_CONNECT_RETRY_DELAY_MS);
+    let retry_count = std::env::var(ENV_PROXY_CONNECT_RETRY_COUNT)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_CONNECT_RETRY_COUNT);
+    let retry_scaling = std::env::var(ENV_PROXY_CONNECT_RETRY_SCALING)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_CONNECT_RETRY_SCALING);
+    RetryConfig { retry_count, retry_delay_ms, retry_scaling }
+}
+
+/// Establishes a single TLS-enabled connection to a gRPC service by reading retry configuration
+/// from environment variables.
+pub async fn connect_tls_from_env(
+    address: &str,
+    ssl_connector: SslConnector,
+    sni: String,
+) -> Result<Channel> {
+    let retry = retry_config_from_env();
+    connect_tls(
+        address.to_string(),
+        retry.retry_count,
+        retry.retry_scaling,
+        retry.retry_delay_ms,
+        ssl_connector,
+        sni,
+    )
+    .await
 }
 
 /// Establishes a TLS-enabled connection to a gRPC service and returns the channel.

@@ -26,8 +26,9 @@ import "enforcer/v2/isolate_metrics_policy.proto";
 message BinaryManifest {
   // Unique identification of the isolate by name and publisher.
   IsolateType isolate_type = 1;
-  // Lowercase hex SHA-256 of the package file. Unused for the Setup Isolate.
-  string package_digest_sha256 = 2;
+  // Digests of the package file. Required for Ratified and Opaque Isolates;
+  // unused for the Setup Isolate.
+  IsolateDigest isolate_digest = 2;
   // Filename of this executable binary file
   string binary_filename = 3;
   // Specifications for any services this binary implements (not all services
@@ -36,16 +37,27 @@ message BinaryManifest {
   // Specifications for backend services or endpoints outside or inside EZ
   // that this isolate depends on and is permitted to communicate with.
   repeated EzBackendDependency ez_backend_dependencies = 5;
+  // Command line arguments to be passed to the binary.
+  repeated string command_line_arguments = 6;
+  // Environment variables to be set for the binary.
+  repeated string environment_variables = 7;
 
   // Kind-specific settings. Exactly one must be set.
   oneof isolate_kind {
     // The Setup Isolate.
-    SetupControls setup = 6;
+    SetupControls setup = 8;
     // A Ratified Isolate.
-    RatifiedControls ratified = 7;
+    RatifiedControls ratified = 9;
     // An Opaque Isolate.
-    OpaqueControls opaque = 8;
+    OpaqueControls opaque = 10;
   }
+}
+
+// Digest/Hash of the Isolate's package (tar file). The provided Isolate
+// package's digest must match these digests.
+message IsolateDigest {
+  // Lowercase hex SHA-256 of the package file.
+  string package_sha256 = 1;
 }
 
 // Settings specific to the Setup Isolate.

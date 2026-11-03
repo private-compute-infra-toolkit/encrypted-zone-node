@@ -50,7 +50,7 @@ pub const ERROR_ISOLATE_SERVICE_NAME: &str = "error_isolate_service";
 
 #[tonic::async_trait]
 // Implement custom Isolate logic
-pub trait FakeIsolate: Send + Sync + DynClone {
+pub trait FakeIsolate: Send + Sync + DynClone + std::fmt::Debug {
     /// Processes incoming Isolate requests from the client and sends responses back to the client.
     async fn process_isolate_requests(
         &self,
@@ -66,11 +66,6 @@ pub trait FakeIsolate: Send + Sync + DynClone {
     ) -> InvokeIsolateResponse;
 }
 dyn_clone::clone_trait_object!(FakeIsolate);
-impl core::fmt::Debug for Box<dyn FakeIsolate> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Box<dyn FakeIsolate>")
-    }
-}
 
 #[derive(Debug, Clone)]
 pub enum ScopeDragInstruction {
@@ -82,7 +77,7 @@ pub enum ScopeDragInstruction {
 
 // Default Isolate used for testing
 // Echos back InvokeIsolateResponse with Ok status
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DefaultEchoIsolate {
     scope_drag_instruction: ScopeDragInstruction,
     delay: Option<tokio::time::Duration>,
@@ -93,7 +88,9 @@ impl DefaultEchoIsolate {
         scope_drag_instruction: ScopeDragInstruction,
         delay: Option<tokio::time::Duration>,
     ) -> Self {
-        Self { scope_drag_instruction, delay }
+        let isolate = Self { scope_drag_instruction, delay };
+        let _ = format!("{isolate:?}");
+        isolate
     }
 }
 
@@ -101,26 +98,19 @@ fn drag_scope_by_one(
     input_scope: DataScopeType,
     instruction: &ScopeDragInstruction,
 ) -> DataScopeType {
-    match instruction {
-        ScopeDragInstruction::KeepSame => input_scope,
-        ScopeDragInstruction::IncreaseByOne => match input_scope {
-            DataScopeType::Unspecified => DataScopeType::Unspecified,
-            DataScopeType::Public => DataScopeType::DomainOwned,
-            DataScopeType::DomainOwned => DataScopeType::UserPrivate,
-            DataScopeType::UserPrivate => DataScopeType::MultiUserPrivate,
-            DataScopeType::MultiUserPrivate => DataScopeType::Sealed,
-            DataScopeType::Sealed => DataScopeType::Sealed,
-        },
-        ScopeDragInstruction::DecreaseByOne => match input_scope {
-            DataScopeType::Unspecified => DataScopeType::Unspecified,
-            DataScopeType::Public => DataScopeType::Public,
-            DataScopeType::DomainOwned => DataScopeType::Public,
-            DataScopeType::UserPrivate => DataScopeType::DomainOwned,
-            DataScopeType::MultiUserPrivate => DataScopeType::UserPrivate,
-            DataScopeType::Sealed => DataScopeType::MultiUserPrivate,
-        },
-        ScopeDragInstruction::KeepUnspecified => DataScopeType::Unspecified,
+    if input_scope == DataScopeType::Unspecified {
+        return DataScopeType::Unspecified;
     }
+    let step = match instruction {
+        ScopeDragInstruction::KeepSame => return input_scope,
+        ScopeDragInstruction::KeepUnspecified => return DataScopeType::Unspecified,
+        ScopeDragInstruction::IncreaseByOne => 1,
+        ScopeDragInstruction::DecreaseByOne => -1,
+    };
+    let min_scope = DataScopeType::Public as i32;
+    let max_scope = DataScopeType::Sealed as i32;
+    DataScopeType::try_from((input_scope as i32 + step).clamp(min_scope, max_scope))
+        .unwrap_or(DataScopeType::Unspecified)
 }
 
 fn adjust_scope(instruction: &ScopeDragInstruction, response: &mut InvokeIsolateResponse) {

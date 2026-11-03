@@ -13,6 +13,7 @@
 // limitations under the License.
 use container_manager_requester::ContainerManagerRequester;
 use data_scope::requester::DataScopeRequester;
+use data_scope_proto::enforcer::v1::{DataScopeType, EzDataScope, EzStaticScopeInfo};
 use error_detail_proto::enforcer::v1::ez_error_detail::ErrorSource;
 use error_detail_proto::enforcer::v1::{ez_error_detail::ErrorReason, EzErrorDetail};
 use error_details_proto::google::rpc::BadRequest;
@@ -20,13 +21,15 @@ use ez_service_proto::enforcer::v1::{
     ez_public_api_client::EzPublicApiClient, ez_public_api_server::EzPublicApiServer,
 };
 use ez_service_proto::enforcer::v1::{
-    CallParameters, CallRequest, CallResponse, GetHealthReportRequest, SessionMetadata,
+    CallParameters, CallRequest, CallResponse, EncryptedField, GetHealthReportRequest,
+    SessionMetadata,
 };
 use googleapis_tonic_google_rpc::google::rpc::Status as RpcStatus;
 use health_manager::HealthManager;
 use interceptor::Interceptor;
 use isolate_info::IsolateServiceInfo;
 use isolate_service_mapper::IsolateServiceMapper;
+use isolate_test_utils::{TEST_ERROR_CODE, TEST_ERROR_MESSAGE, TEST_ERROR_SERVICE_NAME};
 use junction_test_utils::FakeJunction;
 use junction_test_utils::UNKNOWN_ISOLATE_DOMAIN;
 use manifest_proto::enforcer::v1::InterceptingServices;
@@ -38,6 +41,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
+use tokio::time::timeout;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::metadata::MetadataValue;
 use tonic::transport::Server;
@@ -51,6 +55,9 @@ const RATIFIED_INTERCEPTOR_DOMAIN: &str = "ratified.interceptor.domain";
 const RATIFIED_INTERCEPTOR_SERVICE: &str = "RatifiedInterceptorService";
 const RATIFIED_INTERCEPTOR_UNARY: &str = "unary";
 const RATIFIED_INTERCEPTOR_STREAMING: &str = "streaming";
+const TEST_DOMAIN: &str = "test_domain";
+const TEST_SERVICE: &str = "test_service";
+const TEST_METHOD: &str = "test_method";
 
 #[tokio::test]
 async fn test_call_error_missing_session_metadata() {
@@ -755,4 +762,260 @@ async fn test_extensions_propagated() {
 
     assert_eq!(cpm.extensions, ext_bytes);
     assert_eq!(response_result.response_extensions, ext_bytes);
+}
+
+#[tokio::test]
+async fn test_call_error_missing_input_params() {
+    let (port, shutdown_tx, _) = start_api_server().await;
+    let invalid_request = CallRequest {
+        operator_domain: TEST_DOMAIN.to_string(),
+        service_name: TEST_SERVICE.to_string(),
+        method_name: TEST_METHOD.to_string(),
+        session_metadata: Some(SessionMetadata { session_id: port as u64, ..Default::default() }),
+        input_params: None,
+        ..Default::default()
+    };
+    let response_result = tokio::spawn(async move {
+        let mut client = EzPublicApiClient::connect(format!("http://localhost:{}", port))
+            .await
+            .expect("failed to connect to EzPublicApi");
+        client.call(invalid_request).await
+    })
+    .await
+    .unwrap();
+    let _ = shutdown_tx.send(());
+    verify_missing_field_error(response_result.unwrap_err(), "input_params");
+}
+
+#[tokio::test]
+async fn test_stream_call_validation_errors() {
+    let (port, shutdown_tx, _) = start_api_server().await;
+    let mut client = EzPublicApiClient::connect(format!("http://localhost:{}", port))
+        .await
+        .expect("failed to connect to EzPublicApi");
+    // 1. Empty stream closed before initial request.
+    let (empty_tx, empty_rx) = tokio::sync::mpsc::channel(EZ_PUBLIC_API_RESPONSE_TEST_CHANNEL_SIZE);
+    drop(empty_tx);
+    let mut empty_stream = client
+        .stream_call(tokio_stream::wrappers::ReceiverStream::new(empty_rx))
+        .await
+        .unwrap()
+        .into_inner();
+    let empty_err = timeout(Duration::from_secs(5), empty_stream.message())
+        .await
+        .expect("empty stream should not time out")
+        .expect_err("empty stream should return error");
+    assert_eq!(empty_err.code(), Code::Unavailable);
+    // 2. Missing service_name, method_name, session_metadata, and initial input_params.
+    let base_req = CallRequest {
+        operator_domain: TEST_DOMAIN.to_string(),
+        service_name: TEST_SERVICE.to_string(),
+        method_name: TEST_METHOD.to_string(),
+        session_metadata: Some(SessionMetadata { session_id: port as u64, ..Default::default() }),
+        input_params: Some(CallParameters::default()),
+        ..Default::default()
+    };
+    let cases = [
+        (CallRequest { service_name: String::new(), ..base_req.clone() }, "service_name"),
+        (CallRequest { method_name: String::new(), ..base_req.clone() }, "method_name"),
+        (CallRequest { session_metadata: None, ..base_req.clone() }, "session_metadata"),
+        (CallRequest { input_params: None, ..base_req.clone() }, "input_params"),
+    ];
+    for (bad_req, expected_field) in cases {
+        let (tx, rx) = tokio::sync::mpsc::channel(EZ_PUBLIC_API_RESPONSE_TEST_CHANNEL_SIZE);
+        tx.send(bad_req).await.unwrap();
+        drop(tx);
+        let mut resp_stream = client
+            .stream_call(tokio_stream::wrappers::ReceiverStream::new(rx))
+            .await
+            .unwrap()
+            .into_inner();
+        let status = timeout(Duration::from_secs(5), resp_stream.message())
+            .await
+            .expect("validation error should arrive within timeout")
+            .expect_err("expected missing field status");
+        verify_missing_field_error(status, expected_field);
+    }
+    // 3. Subsequent stream request missing input_params fails cleanly.
+    let (tx, rx) = tokio::sync::mpsc::channel(EZ_PUBLIC_API_RESPONSE_TEST_CHANNEL_SIZE);
+    let mut resp_stream = client
+        .stream_call(tokio_stream::wrappers::ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+    tx.send(base_req.clone()).await.unwrap();
+    let first = timeout(Duration::from_secs(5), resp_stream.message())
+        .await
+        .expect("first message should arrive")
+        .expect("first message should succeed");
+    assert!(first.is_some());
+    tx.send(CallRequest { input_params: None, ..Default::default() }).await.unwrap();
+    drop(tx);
+    let second_err = timeout(Duration::from_secs(5), resp_stream.message())
+        .await
+        .expect("second message error should arrive")
+        .expect_err("second message without input_params should fail");
+    verify_missing_field_error(second_err, "input_params");
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn test_stream_call_propagates_isolate_error() {
+    let (port, shutdown_tx, _) = start_api_server().await;
+    let mut client = EzPublicApiClient::connect(format!("http://localhost:{}", port))
+        .await
+        .expect("failed to connect to EzPublicApi");
+    let (client_tx, client_rx) =
+        tokio::sync::mpsc::channel(EZ_PUBLIC_API_RESPONSE_TEST_CHANNEL_SIZE);
+    let mut response_stream = client
+        .stream_call(tokio_stream::wrappers::ReceiverStream::new(client_rx))
+        .await
+        .unwrap()
+        .into_inner();
+    client_tx
+        .send(CallRequest {
+            operator_domain: TEST_DOMAIN.to_string(),
+            service_name: TEST_ERROR_SERVICE_NAME.to_string(),
+            method_name: TEST_METHOD.to_string(),
+            session_metadata: Some(SessionMetadata {
+                session_id: port as u64,
+                ..Default::default()
+            }),
+            input_params: Some(CallParameters::default()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    drop(client_tx);
+    let err_status = timeout(Duration::from_secs(5), response_stream.message())
+        .await
+        .expect("isolate error should arrive before timeout")
+        .expect_err("expected isolate error status");
+    assert_eq!(err_status.code(), TEST_ERROR_CODE.into());
+    assert!(err_status.message().contains(TEST_ERROR_MESSAGE));
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn test_call_and_stream_encrypted_input_and_trace_headers() {
+    const DOMAIN_SECRET_CIPHERTEXT: &[u8] = b"domain-secret";
+    const UNTYPED_SCOPE_CIPHERTEXT: &[u8] = b"untyped-scope";
+    const MISSING_SCOPE_CIPHERTEXT: &[u8] = b"missing-scope";
+    const UNARY_PUBLIC_PAYLOAD: &[u8] = b"unary-pub";
+    const STREAM_PUBLIC_PAYLOAD_1: &[u8] = b"stream-pub-1";
+    const STREAM_PUBLIC_PAYLOAD_2: &[u8] = b"stream-pub-2";
+    const TRACEPARENT_HEADER: &str = "traceparent";
+    const TRACEPARENT_VALUE: &[u8] = b"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+    const TRACESTATE_HEADER: &str = "tracestate";
+    const TRACESTATE_VALUE: &[u8] = b"vendor=state1";
+    const CUSTOM_HEADER: &str = "x-custom";
+    const CUSTOM_HEADER_VALUE: &[u8] = b"custom-val";
+
+    let (port, shutdown_tx, fake_junction) = start_api_server().await;
+    let mut client = EzPublicApiClient::connect(format!("http://localhost:{}", port))
+        .await
+        .expect("failed to connect to EzPublicApi");
+
+    let make_params = |pub_bytes: &[u8]| CallParameters {
+        public_input: pub_bytes.to_vec(),
+        encrypted_input: vec![
+            EncryptedField {
+                scope: Some(EzDataScope {
+                    static_info: Some(EzStaticScopeInfo {
+                        scope_type: DataScopeType::DomainOwned.into(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ciphertext: DOMAIN_SECRET_CIPHERTEXT.to_vec(),
+            },
+            EncryptedField {
+                scope: Some(EzDataScope { static_info: None, ..Default::default() }),
+                ciphertext: UNTYPED_SCOPE_CIPHERTEXT.to_vec(),
+            },
+            EncryptedField { scope: None, ciphertext: MISSING_SCOPE_CIPHERTEXT.to_vec() },
+        ],
+        request_metadata: HashMap::from([
+            (TRACEPARENT_HEADER.to_string(), TRACEPARENT_VALUE.to_vec()),
+            (TRACESTATE_HEADER.to_string(), TRACESTATE_VALUE.to_vec()),
+            (CUSTOM_HEADER.to_string(), CUSTOM_HEADER_VALUE.to_vec()),
+        ]),
+        request_extensions: vec![],
+    };
+
+    let unary_resp = client
+        .call(CallRequest {
+            operator_domain: TEST_DOMAIN.to_string(),
+            service_name: TEST_SERVICE.to_string(),
+            method_name: TEST_METHOD.to_string(),
+            session_metadata: Some(SessionMetadata {
+                session_id: port as u64,
+                ..Default::default()
+            }),
+            input_params: Some(make_params(UNARY_PUBLIC_PAYLOAD)),
+            ..Default::default()
+        })
+        .await
+        .expect("unary call should succeed")
+        .into_inner();
+    assert_eq!(unary_resp.public_output, UNARY_PUBLIC_PAYLOAD);
+    assert_eq!(unary_resp.encrypted_output.len(), 3);
+    assert_eq!(unary_resp.encrypted_output[0].ciphertext, DOMAIN_SECRET_CIPHERTEXT);
+    assert_eq!(
+        unary_resp.encrypted_output[0]
+            .scope
+            .as_ref()
+            .unwrap()
+            .static_info
+            .as_ref()
+            .unwrap()
+            .scope_type,
+        i32::from(DataScopeType::DomainOwned)
+    );
+    assert_eq!(unary_resp.encrypted_output[1].ciphertext, UNTYPED_SCOPE_CIPHERTEXT);
+    assert_eq!(unary_resp.encrypted_output[2].ciphertext, MISSING_SCOPE_CIPHERTEXT);
+
+    let (tx, rx) = tokio::sync::mpsc::channel(EZ_PUBLIC_API_RESPONSE_TEST_CHANNEL_SIZE);
+    let mut stream = client
+        .stream_call(tokio_stream::wrappers::ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+    tx.send(CallRequest {
+        operator_domain: TEST_DOMAIN.to_string(),
+        service_name: TEST_SERVICE.to_string(),
+        method_name: TEST_METHOD.to_string(),
+        session_metadata: Some(SessionMetadata { session_id: port as u64, ..Default::default() }),
+        input_params: Some(make_params(STREAM_PUBLIC_PAYLOAD_1)),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    tx.send(CallRequest {
+        input_params: Some(make_params(STREAM_PUBLIC_PAYLOAD_2)),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    drop(tx);
+
+    let first_stream_resp =
+        timeout(Duration::from_secs(5), stream.message()).await.unwrap().unwrap().unwrap();
+    let second_stream_resp =
+        timeout(Duration::from_secs(5), stream.message()).await.unwrap().unwrap().unwrap();
+    assert_eq!(first_stream_resp.public_output, STREAM_PUBLIC_PAYLOAD_1);
+    assert_eq!(first_stream_resp.encrypted_output.len(), 3);
+    assert_eq!(second_stream_resp.public_output, STREAM_PUBLIC_PAYLOAD_2);
+    assert_eq!(second_stream_resp.encrypted_output.len(), 3);
+
+    let invoked_requests = fake_junction.invoked_isolate_requests.lock().unwrap();
+    assert_eq!(invoked_requests.len(), 3);
+    for req in invoked_requests.iter() {
+        let cpm = req.control_plane_metadata.as_ref().unwrap();
+        assert_eq!(cpm.request_metadata.get(TRACEPARENT_HEADER).unwrap(), TRACEPARENT_VALUE);
+        assert_eq!(cpm.request_metadata.get(TRACESTATE_HEADER).unwrap(), TRACESTATE_VALUE);
+        assert_eq!(cpm.request_metadata.get(CUSTOM_HEADER).unwrap(), CUSTOM_HEADER_VALUE);
+    }
+
+    let _ = shutdown_tx.send(());
 }

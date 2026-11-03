@@ -12,9 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use container::{Container, ContainerRunStatus};
 use container_manager::sanitize_path_component;
 use container_manager_request::{
-    MountReadOnlyFile, MountWritableFile, ResetIsolateRequest, ResetType,
+    GetRunStatusRequest, MountReadOnlyDirectory, MountReadOnlyFile, MountWritableDirectory,
+    MountWritableFile, ResetIsolateRequest, ResetType,
 };
 use container_manager_test_utils::*;
 use container_test_utils::{FakeContainer, Status};
@@ -28,6 +30,164 @@ use manifest_proto::enforcer::v1::IsolateRuntimeConfigs;
 use opentelemetry_proto::tonic::common::v1::any_value::Value;
 use tokio::time::Duration;
 
+const TEST_ENFORCER_WRITE_DIR: &str = "test_enforcer_write_dir";
+const TEST_CONTAINER_WRITE_DIR: &str = "/container/test_write_dir";
+const TEST_ENFORCER_READ_DIR: &str = "test_enforcer_read_dir";
+const TEST_CONTAINER_READ_DIR: &str = "/container/test_read_dir";
+const TEST_OPERATOR_ROLE: &str = "test_operator_role";
+const TEST_OPERATOR_ROLE_ENV: &str = "EZ_OPERATOR_ROLE=test_operator_role";
+const EMPTY_OPERATOR_ROLE_ENV: &str = "EZ_OPERATOR_ROLE=";
+
+#[tokio::test]
+async fn test_mount_directories() {
+    let mut harness = TestHarness::new(
+        JSON_MANIFEST_PATH_ONE_ISOLATE,
+        &IsolateRuntimeConfigs::default(),
+        /* otel_endpoint= */ None,
+        /* operator_role= */ "".to_string(),
+    )
+    .await
+    .expect("TestHarness::new should succeed");
+    let isolate_and_uds_vec =
+        check_container_started(vec![HELLOWORLD_BINARY]).await.expect("Container should start");
+    assert_eq!(isolate_and_uds_vec.len(), 1);
+    let (fake_container_id, isolate_ez_bridge_enforcer_side_uds_path) =
+        isolate_and_uds_vec[0].clone();
+    let isolate_id = *harness.isolate_junction.connected_isolates.iter().next().unwrap().key();
+    ensure_isolate_ready(&mut harness, isolate_ez_bridge_enforcer_side_uds_path, isolate_id)
+        .await
+        .expect("Isolate should be ready");
+    let host_write_dir = format!("{DEV_SHM_PATH}{TEST_ENFORCER_WRITE_DIR}");
+    let host_read_dir = format!("{DEV_SHM_PATH}{TEST_ENFORCER_READ_DIR}");
+    let _ = std::fs::remove_dir_all(&host_write_dir);
+    assert!(harness
+        .container_manager_requester
+        .mount_writable_directory(MountWritableDirectory {
+            isolate_id,
+            enforcer_dir_name: TEST_ENFORCER_WRITE_DIR.to_string(),
+            container_dir_name: TEST_CONTAINER_WRITE_DIR.to_string(),
+        })
+        .await
+        .is_ok());
+    assert!(std::path::Path::new(&host_write_dir).is_dir());
+    assert!(harness
+        .container_manager_requester
+        .mount_read_only_directory(MountReadOnlyDirectory {
+            isolate_id,
+            enforcer_dir_name: TEST_ENFORCER_READ_DIR.to_string(),
+            container_dir_name: TEST_CONTAINER_READ_DIR.to_string(),
+        })
+        .await
+        .is_ok());
+    {
+        let tracker = FakeContainer::get_tracker();
+        let tracked_container = tracker.get(&fake_container_id).expect("Should have isolate");
+        assert_eq!(
+            tracked_container.value().mounts.get(&host_write_dir).map(String::as_str),
+            Some(TEST_CONTAINER_WRITE_DIR)
+        );
+        assert_eq!(
+            tracked_container.value().readonly_mounts.get(&host_read_dir).map(String::as_str),
+            Some(TEST_CONTAINER_READ_DIR)
+        );
+    }
+    let unrecognized_id = IsolateId::new(isolate_id.get_binary_services_index());
+    assert!(harness
+        .container_manager_requester
+        .mount_writable_directory(MountWritableDirectory {
+            isolate_id: unrecognized_id,
+            enforcer_dir_name: TEST_ENFORCER_WRITE_DIR.to_string(),
+            container_dir_name: TEST_CONTAINER_WRITE_DIR.to_string(),
+        })
+        .await
+        .is_err());
+    assert!(harness
+        .container_manager_requester
+        .mount_read_only_directory(MountReadOnlyDirectory {
+            isolate_id: unrecognized_id,
+            enforcer_dir_name: TEST_ENFORCER_READ_DIR.to_string(),
+            container_dir_name: TEST_CONTAINER_READ_DIR.to_string(),
+        })
+        .await
+        .is_err());
+    harness.stop().await;
+    ensure_isolate_stopped(fake_container_id).await.expect("Container should stop");
+    let _ = std::fs::remove_dir_all(&host_write_dir);
+}
+
+#[tokio::test]
+async fn test_get_run_status_and_restart_count() {
+    let mut harness = TestHarness::new(
+        JSON_MANIFEST_PATH_ONE_ISOLATE,
+        &IsolateRuntimeConfigs::default(),
+        /* otel_endpoint= */ None,
+        /* operator_role= */ "".to_string(),
+    )
+    .await
+    .expect("TestHarness::new should succeed");
+    let isolate_and_uds_vec =
+        check_container_started(vec![HELLOWORLD_BINARY]).await.expect("Container should start");
+    assert_eq!(isolate_and_uds_vec.len(), 1);
+    let (fake_container_id, isolate_ez_bridge_enforcer_side_uds_path) =
+        isolate_and_uds_vec[0].clone();
+    let isolate_id = *harness.isolate_junction.connected_isolates.iter().next().unwrap().key();
+    ensure_isolate_ready(&mut harness, isolate_ez_bridge_enforcer_side_uds_path, isolate_id)
+        .await
+        .expect("Isolate should be ready");
+    let expected_mem = FakeContainer { fake_container_id }
+        .get_memory_stats()
+        .expect("get_memory_stats should succeed")
+        .expect("FakeContainer should report memory stats");
+    let initial_status = harness
+        .container_manager_requester
+        .get_run_status(GetRunStatusRequest { isolate_id })
+        .await
+        .expect("get_run_status should succeed for running isolate");
+    assert_eq!(initial_status.status, ContainerRunStatus::Running);
+    assert_eq!(initial_status.rss_bytes, Some(expected_mem.rss_bytes));
+    assert_eq!(initial_status.peak_rss_bytes, expected_mem.peak_rss_bytes);
+    assert_eq!(initial_status.virt_bytes, Some(expected_mem.virt_bytes));
+    assert_eq!(initial_status.shared_bytes, Some(expected_mem.shared_bytes));
+    assert_eq!(initial_status.data_bytes, Some(expected_mem.data_bytes));
+    assert_eq!(initial_status.restart_count, 0);
+    assert!(harness
+        .container_manager_requester
+        .reset_container(ResetIsolateRequest { isolate_id, reset_type: ResetType::Full })
+        .await
+        .is_ok());
+    assert!(harness
+        .container_manager_requester
+        .get_run_status(GetRunStatusRequest { isolate_id })
+        .await
+        .is_err());
+    let replacement_uds = {
+        let tracker = FakeContainer::get_tracker();
+        let entry = tracker
+            .iter()
+            .find(|c| *c.key() != fake_container_id && c.value().status == Status::Started)
+            .expect("Replacement container should start");
+        entry.value().isolate_ez_bridge_enforcer_side_uds_path.clone().unwrap()
+    };
+    let _client =
+        notify_isolate_ready(replacement_uds).await.expect("Replacement isolate should be ready");
+    let replacement_isolate_id = *harness
+        .isolate_junction
+        .connected_isolates
+        .iter()
+        .find(|entry| *entry.key() != isolate_id)
+        .expect("Replacement isolate should connect to junction")
+        .key();
+    let restarted_status = harness
+        .container_manager_requester
+        .get_run_status(GetRunStatusRequest { isolate_id: replacement_isolate_id })
+        .await
+        .expect("get_run_status should succeed after reset");
+    assert_eq!(restarted_status.status, ContainerRunStatus::Running);
+    assert_eq!(restarted_status.restart_count, 1);
+    harness.stop().await;
+    ensure_isolate_stopped(fake_container_id).await.expect("Original container should stop");
+}
+
 // This test checks that:
 // 1. A container is started up correctly.
 // 2. The Isolate is added to the Junction.
@@ -40,7 +200,7 @@ async fn test_start_one_isolate() {
         JSON_MANIFEST_PATH_ONE_ISOLATE,
         &IsolateRuntimeConfigs::default(),
         /* otel_endpoint= */ None,
-        /* operator_role= */ "test_operator_role".to_string(),
+        /* operator_role= */ TEST_OPERATOR_ROLE.to_string(),
     )
     .await
     .expect("TestHarness::new should succeed");
@@ -813,7 +973,7 @@ async fn test_backend_dependencies_env_var() {
         JSON_MANIFEST_PATH_ONE_ISOLATE,
         &IsolateRuntimeConfigs::default(),
         /* otel_endpoint= */ None,
-        /* operator_role= */ "test_operator_role".to_string(),
+        /* operator_role= */ TEST_OPERATOR_ROLE.to_string(),
     )
     .await
     .expect("TestHarness::new should succeed");
@@ -832,14 +992,13 @@ async fn test_backend_dependencies_env_var() {
 
     // Verify that the EZ_BACKEND_DEPENDENCIES environment variable is set and matches the textproto
     let expected_env = "EZ_BACKEND_DEPENDENCIES=ez_backend_dependencies:[{operator_domain:\"helloworld_domain\",service_name:\"Greeter\",method_name:\"SayHello\"}]";
-    let expected_operator_role_env = "EZ_OPERATOR_ROLE=test_operator_role";
     assert!(
         tracked_container.env.iter().any(|e| e == expected_env),
         "EZ_BACKEND_DEPENDENCIES env var not found or incorrect. Actual env: {:?}",
         tracked_container.env
     );
     assert!(
-        tracked_container.env.iter().any(|e| e == expected_operator_role_env),
+        tracked_container.env.iter().any(|e| e == TEST_OPERATOR_ROLE_ENV),
         "EZ_OPERATOR_ROLE env var not found or incorrect. Actual env: {:?}",
         tracked_container.env
     );
@@ -974,7 +1133,7 @@ async fn test_ratified_isolate_operator_role_env_var() {
         JSON_MANIFEST_PATH_RATIFIED_ISOLATE,
         &IsolateRuntimeConfigs::default(),
         /* otel_endpoint= */ None,
-        /* operator_role= */ "test_operator_role".to_string(),
+        /* operator_role= */ TEST_OPERATOR_ROLE.to_string(),
     )
     .await
     .expect("TestHarness::new should succeed");
@@ -992,9 +1151,8 @@ async fn test_ratified_isolate_operator_role_env_var() {
     let tracked_container = tracker.get(&fake_container_id).unwrap();
 
     // Verify that the EZ_OPERATOR_ROLE environment variable is set
-    let expected_env = "EZ_OPERATOR_ROLE=test_operator_role";
     assert!(
-        tracked_container.env.iter().any(|e| e == expected_env),
+        tracked_container.env.iter().any(|e| e == TEST_OPERATOR_ROLE_ENV),
         "EZ_OPERATOR_ROLE env var not found or incorrect. Actual env: {:?}",
         tracked_container.env
     );
@@ -1028,9 +1186,8 @@ async fn test_ratified_isolate_missing_operator_role() {
     let tracker = FakeContainer::get_tracker();
     let tracked_container = tracker.get(&fake_container_id).unwrap();
 
-    let expected_env = "EZ_OPERATOR_ROLE=";
     assert!(
-        tracked_container.env.iter().any(|e| e == expected_env),
+        tracked_container.env.iter().any(|e| e == EMPTY_OPERATOR_ROLE_ENV),
         "EZ_OPERATOR_ROLE env var not found or incorrect. Actual env: {:?}",
         tracked_container.env
     );
@@ -1064,9 +1221,8 @@ async fn test_non_ratified_isolate_missing_operator_role() {
     let tracker = FakeContainer::get_tracker();
     let tracked_container = tracker.get(&fake_container_id).unwrap();
 
-    let expected_env = "EZ_OPERATOR_ROLE=";
     assert!(
-        tracked_container.env.iter().any(|e| e == expected_env),
+        tracked_container.env.iter().any(|e| e == EMPTY_OPERATOR_ROLE_ENV),
         "EZ_OPERATOR_ROLE env var not found or incorrect. Actual env: {:?}",
         tracked_container.env
     );

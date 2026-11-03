@@ -131,10 +131,21 @@ message RatifiedIsolateManifestPayload {
   bytes manifest_endorsements = 2;
 }
 
-// The endorsed BinaryManifests of the Ratified and Opaque Isolates to load.
+// EzManifest containing information about the Isolates.
+message EzManifest {
+  // The manifest payload.
+  oneof manifest {
+    // A list of manifests.
+    BundleManifest bundle_manifest = 1;
+    // A BinaryManifest and its endorsements.
+    EndorsedBinaryManifest binary_manifest = 2;
+  }
+}
+
+// A list of EzManifests.
 message BundleManifest {
-  // One entry per Isolate.
-  repeated EndorsedBinaryManifest binary_manifests = 1;
+  // The manifests in the bundle.
+  repeated EzManifest manifests = 1;
 }
 
 // A BinaryManifest and its endorsements.
@@ -205,7 +216,7 @@ enum LoadIsolatesError {
   LOAD_ISOLATES_ERROR_DEPENDENCY_PROCESSING_FAILURE = 4;
   // Endorsement validation failed. More details in attached ValidateIsolateEndorsementResponse.
   LOAD_ISOLATES_ERROR_VALIDATION_FAILURE = 5;
-  // A package does not match the package_digest_sha256 of its BinaryManifest.
+  // A package does not match the isolate_digest of its BinaryManifest.
   LOAD_ISOLATES_ERROR_PACKAGE_DIGEST_MISMATCH = 6;
   // TODO: b/545375949 - Add error cases for Manifest endorsements.
 }
