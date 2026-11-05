@@ -20,13 +20,16 @@ use container::{
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 static FAKE_CONTAINER_TRACKER: Lazy<Arc<DashMap<u64, FakeContainerData>>> =
     Lazy::new(|| Arc::new(DashMap::new()));
+static FAIL_NEXT_START: AtomicBool = AtomicBool::new(false);
 // UDS name for Isolate -> EZ Bridge. This will exist under [SHARING_DIR_NAME] for Container.
 const ISOLATE_EZ_BRIDGE_ENFORCER_UDS: &str = "/isolate-ez-bridge-uds";
+const OTLP_METRICS_ENFORCER_UDS: &str = "otlp-metrics-uds";
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum Status {
@@ -67,6 +70,12 @@ impl FakeContainer {
     /// Clears all containers from the tracker. Useful for test isolation.
     pub fn clear_tracker() {
         FAKE_CONTAINER_TRACKER.clear();
+        FAIL_NEXT_START.store(false, Ordering::SeqCst);
+    }
+
+    /// Configures the next `FakeContainer::start` call to return an error.
+    pub fn set_fail_next_start(fail: bool) {
+        FAIL_NEXT_START.store(fail, Ordering::SeqCst);
     }
 }
 
@@ -101,15 +110,34 @@ impl Container for FakeContainer {
     }
 
     async fn start(&mut self, options: &ContainerOptions) -> Result<()> {
+        let uds_path = get_isolate_ez_bridge_enforcer_side_uds_path(
+            options.mounts[0].source.to_str().unwrap(),
+        );
+        if FAIL_NEXT_START.swap(false, Ordering::SeqCst) {
+            let otlp_uds_path = options.mounts[0].source.join(OTLP_METRICS_ENFORCER_UDS);
+            for _ in 0..500 {
+                if Path::new(&uds_path).exists() && otlp_uds_path.exists() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
+            let probe_uds_path =
+                format!("/dev/shm/fake-container-failed-uds-{}", self.fake_container_id);
+            let _ = std::fs::remove_file(&probe_uds_path);
+            let _ = std::fs::hard_link(&uds_path, &probe_uds_path);
+            let mut container_data = FAKE_CONTAINER_TRACKER
+                .get_mut(&self.fake_container_id)
+                .context("Container should be present")?;
+            container_data.binary_filename = Some(options.binary_filename.clone());
+            container_data.isolate_ez_bridge_enforcer_side_uds_path = Some(probe_uds_path);
+            anyhow::bail!("Simulated FakeContainer::start failure");
+        }
         let mut container_data = FAKE_CONTAINER_TRACKER
             .get_mut(&self.fake_container_id)
             .context("Container should be present")?;
         container_data.status = Status::Started;
         container_data.binary_filename = Some(options.binary_filename.clone());
-        container_data.isolate_ez_bridge_enforcer_side_uds_path =
-            Some(get_isolate_ez_bridge_enforcer_side_uds_path(
-                options.mounts[0].source.to_str().unwrap(),
-            ));
+        container_data.isolate_ez_bridge_enforcer_side_uds_path = Some(uds_path);
         container_data.command_line_arguments = options.command_line_arguments.clone();
         container_data.env = options.env.clone();
         container_data.boot_mounts = options.mounts.clone();

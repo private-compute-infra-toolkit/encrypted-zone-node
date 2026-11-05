@@ -110,6 +110,7 @@ rust_library(
         "//enforcer/v2:common_rust_proto",
         "@crates//:dashmap",
         "@crates//:log",
+        "@crates//:nix",
         "@crates//:opentelemetry-proto",
         "@crates//:tokio",
         "@crates//:tokio-stream",

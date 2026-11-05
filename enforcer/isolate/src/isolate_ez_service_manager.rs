@@ -29,7 +29,10 @@ use opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_server::
 use outbound_ez_to_ez_client::OutboundEzToEzClient;
 use shared_memory_manager::SharedMemManager;
 use state_manager::IsolateStateManager;
-use std::sync::Arc;
+use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::unix::fs::OpenOptionsExt;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::net::UnixListener;
 use tokio::task::{self, JoinHandle};
 use tokio_stream::wrappers::UnixListenerStream;
@@ -57,6 +60,21 @@ pub struct IsolateEzServiceManagerDependencies {
 struct IsolateServerHandles {
     isolate_ez_handle: JoinHandle<()>,
     otel_metrics_handle: JoinHandle<()>,
+    isolate_address: String,
+    otel_metrics_address: String,
+    ready_fifo_cancelled: Arc<AtomicBool>,
+    ready_fifo_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+    isolate_fifo_path: String,
+    fifo_opath_fd: Option<Arc<OwnedFd>>,
+}
+
+fn bind_uds_listener(address: &str) -> std::io::Result<UnixListenerStream> {
+    match std::fs::remove_file(address) {
+        Ok(()) => log::warn!("Removed pre-existing UDS socket file before bind: {address}"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => log::warn!("Failed to remove pre-existing UDS socket file {address}: {e:?}"),
+    }
+    Ok(UnixListenerStream::new(UnixListener::bind(address)?))
 }
 
 /// Manager to maintain IsolateEzService servers for each Isolate. Enforcer has
@@ -83,15 +101,44 @@ impl IsolateEzServiceManager {
     }
 
     /// Start a new IsolateEzService on the provided UDS address.
-    pub async fn start_isolate_ez_server(&self, args: StartIsolateEzServerArgs) {
+    pub async fn start_isolate_ez_server(
+        &self,
+        args: StartIsolateEzServerArgs,
+    ) -> std::io::Result<()> {
+        let isolate_uds_stream = bind_uds_listener(&args.isolate_address)?;
+
+        let metrics_uds_stream = match bind_uds_listener(&args.otel_metrics_address) {
+            Ok(uds_stream) => uds_stream,
+            Err(e) => {
+                let _ = std::fs::remove_file(&args.isolate_address);
+                return Err(e);
+            }
+        };
+
+        let ready_fifo_cancelled = Arc::new(AtomicBool::new(false));
+        let ready_fifo_handle = Arc::new(Mutex::new(None));
+        let fifo_opath_fd = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_PATH | nix::libc::O_CLOEXEC)
+            .open(&args.isolate_fifo_path)
+            .ok()
+            .map(|file| Arc::new(OwnedFd::from(file)));
+
         let service_mngr_clone = self.clone();
         let shm_payload_threshold = self.deps.shm_payload_threshold;
+        let cancelled_for_task = Arc::clone(&ready_fifo_cancelled);
+        let fifo_handle_for_task = Arc::clone(&ready_fifo_handle);
+        let fifo_opath_for_task = fifo_opath_fd.clone();
+        let fifo_path_for_task = args.isolate_fifo_path.clone();
         let isolate_ez_handle = tokio::spawn(async move {
             service_mngr_clone
                 .create_isolate_ez_server(
                     args.isolate_id,
-                    args.isolate_address,
-                    args.isolate_fifo_path,
+                    isolate_uds_stream,
+                    fifo_path_for_task,
+                    fifo_opath_for_task,
+                    cancelled_for_task,
+                    fifo_handle_for_task,
                     shm_payload_threshold,
                 )
                 .await;
@@ -102,7 +149,7 @@ impl IsolateEzServiceManager {
         let otel_metrics_handle = tokio::spawn(async move {
             service_mngr_clone
                 .create_otel_metrics_server(
-                    args.otel_metrics_address,
+                    metrics_uds_stream,
                     args.metrics_policy,
                     args.isolate_type.isolate_name,
                     args.isolate_type.publisher_id,
@@ -112,42 +159,84 @@ impl IsolateEzServiceManager {
                 .await;
         });
 
-        let handles = IsolateServerHandles { isolate_ez_handle, otel_metrics_handle };
+        let handles = IsolateServerHandles {
+            isolate_ez_handle,
+            otel_metrics_handle,
+            isolate_address: args.isolate_address,
+            otel_metrics_address: args.otel_metrics_address,
+            ready_fifo_cancelled,
+            ready_fifo_handle,
+            isolate_fifo_path: args.isolate_fifo_path,
+            fifo_opath_fd,
+        };
         self.isolate_server_map.insert(args.isolate_id, handles);
+        Ok(())
     }
 
     /// Stops the IsolateEzService server for the provided Isolate.
     pub async fn stop_isolate_servers(&self, isolate_id: IsolateId) {
         let server_handles_option = self.isolate_server_map.remove(&isolate_id);
         if let Some((_isolate_id, server_handles)) = server_handles_option {
+            server_handles.ready_fifo_cancelled.store(true, Ordering::SeqCst);
             server_handles.isolate_ez_handle.abort();
             let _ = server_handles.isolate_ez_handle.await;
+            let _ = std::fs::remove_file(&server_handles.isolate_address);
+
+            let fifo_handle_opt =
+                server_handles.ready_fifo_handle.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if let Some(fifo_handle) = fifo_handle_opt {
+                let _reader_guard = if !fifo_handle.is_finished() {
+                    let open_target = server_handles
+                        .fifo_opath_fd
+                        .as_ref()
+                        .map(|fd| format!("/proc/self/fd/{}", fd.as_raw_fd()))
+                        .unwrap_or_else(|| server_handles.isolate_fifo_path.clone());
+                    std::fs::OpenOptions::new()
+                        .read(true)
+                        .custom_flags(nix::libc::O_NONBLOCK)
+                        .open(open_target)
+                        .ok()
+                } else {
+                    None
+                };
+                let _ = fifo_handle.await;
+            }
 
             server_handles.otel_metrics_handle.abort();
             let _ = server_handles.otel_metrics_handle.await;
+            let _ = std::fs::remove_file(&server_handles.otel_metrics_address);
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn create_isolate_ez_server(
         &self,
         isolate_id: IsolateId,
-        isolate_address: String,
+        uds_stream: UnixListenerStream,
         isolate_fifo_path: String,
+        fifo_opath_fd: Option<Arc<OwnedFd>>,
+        ready_fifo_cancelled: Arc<AtomicBool>,
+        ready_fifo_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
         shm_payload_threshold: u64,
     ) {
-        let uds_result = UnixListener::bind(&isolate_address);
-        let uds = uds_result
-            .unwrap_or_else(|_| panic!("Failed to bind to Isolate EZ UDS: {}", isolate_address));
-        let uds_stream = UnixListenerStream::new(uds);
-
         // Once the UDS server is listening, the client can connect. In a separate task,
         // open the fifo for write which blocks until the read end is opened by the Isolate.
         // No need to await on this blocking call because the server can continue to start-up.
-        task::spawn_blocking(move || {
-            if let Err(e) = std::fs::OpenOptions::new().write(true).open(isolate_fifo_path) {
-                log::error!("IsolateEzBridgeService Server signaling failed {:?}", e);
-            }
-        });
+        if !ready_fifo_cancelled.load(Ordering::SeqCst) {
+            let handle = task::spawn_blocking(move || {
+                if ready_fifo_cancelled.load(Ordering::SeqCst) {
+                    return;
+                }
+                let open_target = fifo_opath_fd
+                    .as_ref()
+                    .map(|fd| format!("/proc/self/fd/{}", fd.as_raw_fd()))
+                    .unwrap_or(isolate_fifo_path);
+                if let Err(e) = std::fs::OpenOptions::new().write(true).open(open_target) {
+                    log::error!("IsolateEzBridgeService Server signaling failed {:?}", e);
+                }
+            });
+            *ready_fifo_handle.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
+        }
 
         let bridge_deps = IsolateEzBridgeDependencies {
             isolate_id,
@@ -179,17 +268,13 @@ impl IsolateEzServiceManager {
 
     async fn create_otel_metrics_server(
         &self,
-        address: String,
+        uds_stream: UnixListenerStream,
         policy: IsolateMetricsPolicy,
         isolate_name: String,
         publisher_id: String,
         is_ratified: bool,
         isolate_instance_id: String,
     ) {
-        let uds_result = UnixListener::bind(&address);
-        let uds = uds_result.expect("Failed to bind to OTel metrics UDS");
-        let uds_stream = UnixListenerStream::new(uds);
-
         let receiver = IsolateMetricsReceiver::new(IsolateMetricsReceiverConfig {
             policy,
             isolate_name,

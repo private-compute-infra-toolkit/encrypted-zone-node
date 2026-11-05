@@ -201,6 +201,7 @@ impl SharedMemManager {
 
     /// Removes all the state associated with the Isolate.
     pub async fn remove_isolate(&self, isolate_id: IsolateId) -> Result<()> {
+        self.isolate_enforcer_shared_dir_index.remove(&isolate_id);
         let (_isolate_id, isolate_file_index) = self
             .isolate_enforcer_file_handle_index
             .remove(&isolate_id)

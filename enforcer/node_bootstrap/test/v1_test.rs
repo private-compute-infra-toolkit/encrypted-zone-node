@@ -249,6 +249,7 @@ async fn test_bootstrap_v1_without_mtls() {
         ez_to_ez_handshake_timeout: Duration::from_secs(5),
         ez_to_ez_max_concurrent_handshakes: 10,
         max_decoding_message_size: MAX_DECODING_SIZE,
+        allowed_peer_identities: vec![],
     };
     let bootstrap =
         NodeBootstrapV1::new(state_manager, container_manager_requester, None, None, config);
@@ -269,6 +270,7 @@ async fn test_bootstrap_v1_mtls_missing_fields_fail() {
         ez_to_ez_handshake_timeout: Duration::from_secs(5),
         ez_to_ez_max_concurrent_handshakes: 10,
         max_decoding_message_size: MAX_DECODING_SIZE,
+        allowed_peer_identities: vec![],
     };
     let bootstrap = NodeBootstrapV1::new(
         state_manager.clone(),
@@ -290,6 +292,7 @@ async fn test_bootstrap_v1_mtls_missing_fields_fail() {
         ez_to_ez_handshake_timeout: Duration::from_secs(5),
         ez_to_ez_max_concurrent_handshakes: 10,
         max_decoding_message_size: MAX_DECODING_SIZE,
+        allowed_peer_identities: vec![],
     };
     let bootstrap = NodeBootstrapV1::new(
         state_manager.clone(),
@@ -311,6 +314,7 @@ async fn test_bootstrap_v1_mtls_missing_fields_fail() {
         ez_to_ez_handshake_timeout: Duration::from_secs(5),
         ez_to_ez_max_concurrent_handshakes: 10,
         max_decoding_message_size: MAX_DECODING_SIZE,
+        allowed_peer_identities: vec![],
     };
     let bootstrap =
         NodeBootstrapV1::new(state_manager, container_manager_requester, None, None, config);
@@ -350,6 +354,7 @@ async fn test_bootstrap_v1_with_mtls_configures_outbound_tls() {
         ez_to_ez_handshake_timeout: Duration::from_secs(5),
         ez_to_ez_max_concurrent_handshakes: 10,
         max_decoding_message_size: MAX_DECODING_SIZE,
+        allowed_peer_identities: vec![],
     };
 
     let fake_outbound = FakeOutboundEzToEzClient::default();
@@ -386,6 +391,7 @@ async fn test_bootstrap_v1_remote_fetch_waits_for_setup_isolate() {
         ez_to_ez_handshake_timeout: Duration::from_secs(5),
         ez_to_ez_max_concurrent_handshakes: 10,
         max_decoding_message_size: MAX_DECODING_SIZE,
+        allowed_peer_identities: vec![],
     };
     let fake_outbound = FakeOutboundEzToEzClient::default();
     let bootstrap = NodeBootstrapV1::new(
@@ -439,6 +445,7 @@ async fn test_bootstrap_v1_remote_fetch_fails_without_setup_isolate() {
         ez_to_ez_handshake_timeout: Duration::from_secs(5),
         ez_to_ez_max_concurrent_handshakes: 10,
         max_decoding_message_size: MAX_DECODING_SIZE,
+        allowed_peer_identities: vec![],
     };
     let bootstrap = NodeBootstrapV1::new(
         harness.state_manager.clone(),
@@ -455,5 +462,56 @@ async fn test_bootstrap_v1_remote_fetch_fails_without_setup_isolate() {
     assert!(
         err.contains("No Setup Isolate is configured"),
         "Expected 'No Setup Isolate is configured' error, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn test_bootstrap_v1_forwards_allowed_peer_identities() {
+    let harness = TestHarness::new().await;
+    harness.mark_setup_isolate_ready().await;
+
+    let valid_config = NodeBootstrapV1Config {
+        enable_mtls: true,
+        enable_tls_cert_remote_fetch: true,
+        mtls_control_plane_uds_path: None,
+        mtls_key_path: None,
+        mtls_leaf_csr_path: None,
+        ez_to_ez_handshake_timeout: Duration::from_secs(5),
+        ez_to_ez_max_concurrent_handshakes: 10,
+        max_decoding_message_size: MAX_DECODING_SIZE,
+        allowed_peer_identities: vec![
+            "spiffe://mesh.example.tca/operator/op/publisher/pub/workload/wl".to_string(),
+        ],
+    };
+    let bootstrap = NodeBootstrapV1::new(
+        harness.state_manager.clone(),
+        harness.container_manager_requester.clone(),
+        None,
+        None,
+        valid_config.clone(),
+    );
+    timeout(CONTACTED_TIMEOUT, bootstrap.run())
+        .await
+        .expect("Bootstrap V1 should not block")
+        .expect("Bootstrap V1 should accept valid peer identities");
+
+    let invalid_config = NodeBootstrapV1Config {
+        allowed_peer_identities: vec!["invalid-spiffe-id".to_string()],
+        ..valid_config
+    };
+    let bootstrap = NodeBootstrapV1::new(
+        harness.state_manager.clone(),
+        harness.container_manager_requester.clone(),
+        None,
+        None,
+        invalid_config,
+    );
+    let err = timeout(CONTACTED_TIMEOUT, bootstrap.run())
+        .await
+        .expect("Bootstrap V1 should fail fast on invalid peer identity")
+        .expect_err("Bootstrap V1 must reject invalid allowed_peer_identities");
+    assert!(
+        format!("{err:#}").contains("Failed to parse allowed peer SPIFFE ID"),
+        "Unexpected error: {err:#}"
     );
 }

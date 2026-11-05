@@ -79,14 +79,18 @@ benchmarks.
     constants so internal refactors require zero test churn. Use real generated `prost` structs over
     hand-built byte stubs, and ratchet up or remove stale per-file exceptions in
     `coverage/thresholds.json` via small per-module CLs once coverage exceeds 90%.
--   Assert explicit post-conditions (`assert!` / `assert_eq!`) in every test -- never rely solely on
-    `.unwrap()` or permissive `a || b` checks. Wrap async stream reads in `tokio::time::timeout`,
-    match `Some(Err(status))` explicitly instead of masking gRPC errors behind EOF panics, and
-    verify concurrent multi-request isolation by recording mock calls in `Vec<...>` and pairing each
-    request's metadata and payload to its exact output.
+-   Assert explicit post-conditions (`assert!` / `assert_eq!`, including the exact error in negative
+    tests) in every test -- never rely solely on `.unwrap()`, generic `is_err()`, or permissive
+    `a || b` checks. Wrap async stream reads in `tokio::time::timeout`, match `Some(Err(status))`
+    explicitly instead of masking gRPC errors behind EOF panics, and verify concurrent multi-request
+    isolation by recording mock calls in `Vec<...>` and pairing each request's metadata and payload
+    to its exact output.
 -   Place unit tests in `test/` directories with all `#[test]` / `#[tokio::test]` functions at the
-    top of the file and helper/mock utilities at the bottom. Delete unused helpers, configure only
-    the non-default options under test, never branch production code for test environments, and run
+    top of the file and helper/mock utilities at the bottom, and combine related tests to verify
+    adjacent behaviors rather than proliferating granular tests or adding decorative section-divider
+    comment banners. Preserve existing blank lines, and add empty lines only after logical code
+    separation so that it improves code readability. Delete unused helpers, configure only the
+    non-default options under test, never branch production code for test environments, and run
     timing-sensitive async tests repeatedly to confirm zero flakes.
 
 ### Rust Idioms, API Design & Performance
@@ -102,8 +106,9 @@ benchmarks.
     clients cheaply `Clone` via internal `Arc` fields.
 -   Group `use` imports at the top of each `.rs` file, extract magic timeouts and strings into
     shared `const` definitions used by both production code and tests, refactor long inline loops
-    into helper functions, and prefer vetted crates (such as cloneable `mpsc::Sender` channels
-    without `Mutex`) over custom primitives.
+    into helper functions, preserve existing blank lines and add empty lines only after logical code
+    separation so that it improves code readability, and prefer vetted crates (such as cloneable
+    `mpsc::Sender` channels without `Mutex`) over custom primitives.
 
 ### Error Handling, Security & TEE Boundaries
 
@@ -126,10 +131,11 @@ benchmarks.
 -   Keep inline comments and docstrings brief (1-2 lines) and strictly limited to non-obvious
     invariants; keep `README.md` docs high-level without internal Rust types (`Arc<RwLock<...>>`,
     crate names); and attach a concrete `TODO(b/...)` bug ID to every `TODO` or temporary flag.
--   Keep `BUILD.bazel` and `MODULE.bazel` minimal and explicit: set `testonly = True` on test helper
-    targets (`genrule`, `pkg_files`), avoid parenthetical suffixes in target names, prune unused
-    crate dependencies, list active `.pem` certs explicitly instead of `glob("**/*.pem")`, and
-    verify feature-gated dependency exclusion with `bazel query 'somepath(...)'`.
+-   Keep target definitions and dependencies in `BUILD.bazel` and `MODULE.bazel` explicit and free
+    of unused entries: set `testonly = True` on test helper targets (`genrule`, `pkg_files`), avoid
+    parenthetical suffixes in target names, prune unused crate dependencies, list active `.pem`
+    certs explicitly instead of `glob("**/*.pem")`, and verify feature-gated dependency exclusion
+    with `bazel query 'somepath(...)'`.
 
 ## Additional Context
 

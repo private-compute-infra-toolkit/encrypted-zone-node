@@ -40,6 +40,8 @@ pub struct NodeBootstrapV1Config {
     pub ez_to_ez_max_concurrent_handshakes: usize,
     /// Maximum expected gRPC message size for the inbound EZ-to-EZ server.
     pub max_decoding_message_size: usize,
+    /// Allowlist of peer EZ node SPIFFE IDs permitted for mTLS communication.
+    pub allowed_peer_identities: Vec<String>,
 }
 
 /// EZ Node Bootstrapper for Manifest V1.
@@ -79,7 +81,10 @@ impl NodeBootstrapV1 {
                     &self.container_manager_requester,
                 )
                 .await?;
-                EzMtlsManagerConfig::new_with_setup_isolate(setup_client)
+                EzMtlsManagerConfig::new_with_setup_isolate(
+                    setup_client,
+                    Some(self.config.allowed_peer_identities.clone()),
+                )
             } else {
                 let proxy_address = self.config.mtls_control_plane_uds_path.as_ref().context(
                     "mTLS enabled but mtls_control_plane_uds_path is missing. mTLS must be properly fetched.",
@@ -98,6 +103,7 @@ impl NodeBootstrapV1 {
                     key_path.clone(),
                     csr_path.clone(),
                     proxy_address.clone(),
+                    Some(self.config.allowed_peer_identities.clone()),
                 )
             };
             let (inbound_tls, outbound_tls) = build_tls_configs(

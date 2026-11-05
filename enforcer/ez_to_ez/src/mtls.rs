@@ -29,6 +29,8 @@ use manifest_proto::enforcer::v1::{ez_manifest::ManifestType, EzManifest};
 use setup_isolate_client::SetupIsolateClient;
 use setup_isolate_proto::enforcer::v2::FetchTlsCertificateRequest;
 use sha2::Digest;
+use std::collections::HashSet;
+use std::sync::Arc;
 
 const HASH_VERSION: &str = "a";
 const ALPN_H2_WIRE: &[u8] = b"\x02h2";
@@ -158,25 +160,37 @@ pub struct EzMtlsManagerConfig {
     /// in memory and fetches the mTLS certificate from the Setup Isolate instead of
     /// reading from disk and proxy.
     pub setup_isolate_client: Option<SetupIsolateClient>,
+    /// Allowlist of peer EZ node SPIFFE IDs permitted for mTLS communication.
+    pub allowed_peer_identities: Vec<String>,
 }
 
 impl EzMtlsManagerConfig {
     // TODO(b/535256367): Deprecate this once static mTLS cert fetching via proxy is removed.
-    pub fn new_with_proxy(mtls_key_path: String, csr_path: String, proxy_address: String) -> Self {
+    pub fn new_with_proxy(
+        mtls_key_path: String,
+        csr_path: String,
+        proxy_address: String,
+        allowed_peer_identities: Option<Vec<String>>,
+    ) -> Self {
         Self {
             mtls_key_path: Some(mtls_key_path),
             csr_path: Some(csr_path),
             proxy_address: Some(proxy_address),
             setup_isolate_client: None,
+            allowed_peer_identities: allowed_peer_identities.unwrap_or_default(),
         }
     }
 
-    pub fn new_with_setup_isolate(setup_isolate_client: SetupIsolateClient) -> Self {
+    pub fn new_with_setup_isolate(
+        setup_isolate_client: SetupIsolateClient,
+        allowed_peer_identities: Option<Vec<String>>,
+    ) -> Self {
         Self {
             mtls_key_path: None,
             csr_path: None,
             proxy_address: None,
             setup_isolate_client: Some(setup_isolate_client),
+            allowed_peer_identities: allowed_peer_identities.unwrap_or_default(),
         }
     }
 }
@@ -192,21 +206,41 @@ pub struct EzMtlsManager {
     // Trust anchors for certificate verification.
     trust_anchors: Vec<X509>,
     // The SPIFFE URI of this manager parsed from the leaf certificate.
-    spiffe_identity: SpiffeUri,
+    self_identity: SpiffeUri,
+    // Allowlist of peer SPIFFE URIs permitted for mTLS communication.
+    allowed_peer_identities: Arc<HashSet<SpiffeUri>>,
 }
 
 impl EzMtlsManager {
     /// Builds and initializes a new `EzMtlsManager`.
     pub async fn build(config: EzMtlsManagerConfig) -> Result<Self> {
+        let allowed_peer_identities =
+            Arc::new(Self::parse_allowed_peer_identities(&config.allowed_peer_identities)?);
         let (leaf_private_key, csr) = Self::load_keys(&config).await?;
         let (cert_chain, trust_anchors) = Self::fetch_certs(&config, &csr).await?;
-        let spiffe_identity = Self::parse_spiffe_id(&cert_chain)?;
-        Ok(Self { leaf_private_key, cert_chain, trust_anchors, spiffe_identity })
+        let self_identity = Self::parse_spiffe_id(&cert_chain)?;
+        Ok(Self {
+            leaf_private_key,
+            cert_chain,
+            trust_anchors,
+            self_identity,
+            allowed_peer_identities,
+        })
+    }
+
+    fn parse_allowed_peer_identities(allowed_peers: &[String]) -> Result<HashSet<SpiffeUri>> {
+        let mut parsed = HashSet::with_capacity(allowed_peers.len());
+        for spiffe_id in allowed_peers {
+            let uri = SpiffeUri::new(spiffe_id)
+                .with_context(|| format!("Failed to parse allowed peer SPIFFE ID: {spiffe_id}"))?;
+            parsed.insert(uri);
+        }
+        Ok(parsed)
     }
 
     /// Returns the SPIFFE identity of this manager.
-    pub fn spiffe_identity(&self) -> SpiffeUri {
-        self.spiffe_identity.clone()
+    pub fn self_identity(&self) -> SpiffeUri {
+        self.self_identity.clone()
     }
 
     /// Loads the leaf private key and CSR from disk, or generates them in memory if
@@ -365,19 +399,29 @@ impl EzMtlsManager {
     }
 
     /// Helper function to verify that a certificate contains exactly one SPIFFE URI
-    /// and that it matches the expected identity.
+    /// and that it matches the manager's self identity or one of the allowed peer identities.
+    /// If `allowed_peer_identities` is empty, fails open with a warning when the peer identity
+    /// does not match `self_identity`.
     fn verify_certificate_spiffe_identity(
         cert: &boring::x509::X509Ref,
-        expected_identity: &SpiffeUri,
+        self_identity: &SpiffeUri,
+        allowed_peer_identities: &HashSet<SpiffeUri>,
     ) -> Result<(), boring::x509::X509VerifyError> {
         match Self::extract_spiffe_uri_from_cert(cert) {
             Ok(parsed) => {
-                if &parsed == expected_identity {
+                if &parsed == self_identity || allowed_peer_identities.contains(&parsed) {
+                    Ok(())
+                } else if allowed_peer_identities.is_empty() {
+                    // TODO(b/545145139): Fail closed once allowlist is configured on all nodes.
+                    log::warn!(
+                        "SPIFFE URI does not match self identity and allowed peer identities is empty; allowing connection"
+                    );
                     Ok(())
                 } else {
-                    // TODO(b/545145139): Define SPIFFE ID matching policy.
-                    log::warn!("SPIFFE URI does not match expected identity");
-                    Ok(())
+                    log::warn!(
+                        "SPIFFE URI does not match self identity or allowed peer identities"
+                    );
+                    Err(boring::x509::X509VerifyError::APPLICATION_VERIFICATION)
                 }
             }
             Err(e) => {
@@ -388,13 +432,13 @@ impl EzMtlsManager {
     }
 
     /// Helper factory that builds a callback verifying if a peer's certificate contains exactly 1 SPIFFE URI SAN
-    /// and if it matches the expected spiffe id.
-    ///
-    /// In the future we may extend this to allow various inputs instead.
+    /// and if it matches the manager's self identity or one of the allowed peer identities.
     fn build_verify_spiffe_uri_callback(
         &self,
-        expected_identity: SpiffeUri,
     ) -> impl Fn(bool, &mut boring::x509::X509StoreContextRef) -> bool + Sync + Send + 'static {
+        let self_identity = self.self_identity.clone();
+        // BoringSSL's set_verify_callback requires a 'static closure, so share via Arc.
+        let allowed_peer_identities = Arc::clone(&self.allowed_peer_identities);
         move |ok: bool, ctx: &mut boring::x509::X509StoreContextRef| -> bool {
             if !ok {
                 return false; // Trust chain or signature failed
@@ -406,7 +450,11 @@ impl EzMtlsManager {
             }
 
             if let Some(cert) = ctx.current_cert() {
-                if let Err(e) = Self::verify_certificate_spiffe_identity(cert, &expected_identity) {
+                if let Err(e) = Self::verify_certificate_spiffe_identity(
+                    cert,
+                    &self_identity,
+                    &allowed_peer_identities,
+                ) {
                     ctx.set_error(Err(e));
                     return false;
                 }
@@ -444,12 +492,8 @@ impl EzMtlsManager {
         let store = self.build_x509_store()?;
         acceptor.set_verify_cert_store(store)?;
 
-        // TODO(b/439073817): In the future, we may have multiple acceptable peer roles for incoming request.
         let verify_mode = SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT;
-        acceptor.set_verify_callback(
-            verify_mode,
-            self.build_verify_spiffe_uri_callback(self.spiffe_identity.clone()),
-        );
+        acceptor.set_verify_callback(verify_mode, self.build_verify_spiffe_uri_callback());
         acceptor.set_alpn_protos(ALPN_H2_WIRE)?;
         acceptor.set_alpn_select_callback(|_ssl, client_protos| {
             select_next_proto(ALPN_H2_WIRE, client_protos).ok_or(AlpnError::NOACK)
@@ -457,11 +501,8 @@ impl EzMtlsManager {
         Ok(acceptor.build())
     }
 
-    /// Creates a TLS connector for outbound client connections with a specific expected identity.
-    async fn create_tls_connector_internal(
-        &self,
-        expected_identity: SpiffeUri,
-    ) -> anyhow::Result<SslConnector> {
+    /// Creates a TLS connector for outbound client connections.
+    async fn create_tls_connector_internal(&self) -> anyhow::Result<SslConnector> {
         let mut connector = SslConnector::builder(SslMethod::tls())?;
         connector.set_private_key(&self.leaf_private_key)?;
 
@@ -477,10 +518,7 @@ impl EzMtlsManager {
         connector.set_verify_cert_store(store)?;
 
         // Same verification as acceptor but without fail_if_no_peer_cert (the server provides it).
-        connector.set_verify_callback(
-            SslVerifyMode::PEER,
-            self.build_verify_spiffe_uri_callback(expected_identity),
-        );
+        connector.set_verify_callback(SslVerifyMode::PEER, self.build_verify_spiffe_uri_callback());
         connector.set_verify_depth(2);
         connector.set_alpn_protos(ALPN_H2_WIRE)?;
         Ok(connector.build())
@@ -499,22 +537,14 @@ pub struct TlsConnectorFactory {
 }
 
 impl TlsConnectorFactory {
-    /// Creates a TLS connector for a specific target operator domain.
-    ///
-    /// TODO(b/439073817): We may add different fields to construct the connector in the future.
-    pub async fn create_connector(&self, operator_domain: &str) -> anyhow::Result<SslConnector> {
-        let expected_identity = SpiffeUri {
-            trust_domain: self.manager.spiffe_identity.trust_domain.clone(),
-            operator_domain: operator_domain.to_string(),
-            publisher_id: self.manager.spiffe_identity.publisher_id.clone(),
-            workload_name: self.manager.spiffe_identity.workload_name.clone(),
-        };
-        self.manager.create_tls_connector_internal(expected_identity).await
+    /// Creates a TLS connector for outbound connections.
+    pub async fn create_connector(&self) -> anyhow::Result<SslConnector> {
+        self.manager.create_tls_connector_internal().await
     }
 }
 
 /// Represents the parsed components of a SPIFFE URI.
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Hash)]
 pub struct SpiffeUri {
     /// The trust domain of the SPIFFE URI.
     pub trust_domain: String,
@@ -570,7 +600,8 @@ impl SpiffeUri {
 impl std::fmt::Debug for EzMtlsManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EzMtlsManager")
-            .field("spiffe_identity", &self.spiffe_identity)
+            .field("self_identity", &self.self_identity)
+            .field("allowed_peer_identities", &self.allowed_peer_identities)
             .field("cert_chain_len", &self.cert_chain.len())
             .field("trust_anchors_len", &self.trust_anchors.len())
             .finish()

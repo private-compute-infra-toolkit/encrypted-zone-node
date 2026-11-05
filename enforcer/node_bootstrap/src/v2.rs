@@ -38,6 +38,8 @@ pub struct NodeBootstrapV2Config {
     pub ez_to_ez_handshake_timeout: Duration,
     /// Maximum concurrent incoming TLS handshakes.
     pub ez_to_ez_max_concurrent_handshakes: usize,
+    /// Allowlist of peer EZ node SPIFFE IDs permitted for mTLS communication.
+    pub allowed_peer_identities: Vec<String>,
 }
 
 /// EZ Node Bootstrapper for Manifest V2.
@@ -106,7 +108,10 @@ impl NodeBootstrapV2 {
 
         let (inbound_tls_config, outbound_tls_config) = if self.config.enable_mtls {
             let (inbound_tls, outbound_tls) = build_tls_configs(
-                EzMtlsManagerConfig::new_with_setup_isolate(setup_client),
+                EzMtlsManagerConfig::new_with_setup_isolate(
+                    setup_client,
+                    Some(self.config.allowed_peer_identities.clone()),
+                ),
                 self.config.ez_to_ez_handshake_timeout,
                 self.config.ez_to_ez_max_concurrent_handshakes,
             )

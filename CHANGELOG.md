@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## 0.31.0 (2026-11-05)
+
+
+### EZ Policy Enforcer
+
+* **enforcer:** Add version_label to v2 BinaryManifest
+* **enforcer:** bind Isolate UDS listeners before spawning servers
+* **enforcer:** unblock pending ready FIFO writer on server stop
+
+
+### Gemini
+
+* **gemini:** clarify blank-line and test rules
+
+
+### mTLS
+
+* **mtls:** implement spiffe id check
+
 ## 0.30.0 (2026-11-03)
 
 

@@ -60,6 +60,237 @@ const ISOLATE_UDS_NAME: &str = "isolate-ez-bridge-uds";
 const TEST_ISOLATE_NAME: &str = "test-isolate";
 const TEST_PUBLISHER_ID: &str = "test-publisher";
 
+#[tokio::test]
+async fn test_stop_isolate_servers_unblocks_pending_ready_fifo_writer() {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let temp_dir = tempfile::Builder::new().prefix("test-ready-fifo-unblock").tempdir().unwrap();
+    let metrics_uds_path = temp_dir.path().join(METRICS_UDS_NAME);
+    let isolate_uds_path = temp_dir.path().join(ISOLATE_UDS_NAME);
+    let fifo_path = temp_dir.path().join("isolate-ez-bridge-uds.ready");
+    nix::unistd::mkfifo(&fifo_path, nix::sys::stat::Mode::S_IRWXU).unwrap();
+
+    let manager = create_test_service_manager();
+    let isolate_id = IsolateId::new(BinaryServicesIndex::new(false));
+
+    manager
+        .start_isolate_ez_server(isolate_ez_service_manager::StartIsolateEzServerArgs {
+            isolate_id,
+            isolate_address: isolate_uds_path.display().to_string(),
+            isolate_fifo_path: fifo_path.display().to_string(),
+            otel_metrics_address: metrics_uds_path.display().to_string(),
+            metrics_policy: IsolateMetricsPolicy::default(),
+            isolate_type: IsolateType {
+                isolate_name: TEST_ISOLATE_NAME.to_string(),
+                publisher_id: TEST_PUBLISHER_ID.to_string(),
+            },
+            isolate_instance_id: "1".to_string(),
+        })
+        .await
+        .expect("should start isolate ez server");
+
+    for _ in 0..100 {
+        if isolate_uds_path.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // Give the spawn_blocking writer task time to enter open(fifo_path, O_WRONLY).
+    tokio::time::sleep(Duration::from_millis(25)).await;
+
+    manager.stop_isolate_servers(isolate_id).await;
+
+    // Open the read end with O_NONBLOCK after stop_isolate_servers returns.
+    // If stop_isolate_servers left the spawn_blocking writer blocked in open(O_WRONLY),
+    // opening probe_reader wakes that leaked writer, which immediately drops its File
+    // and triggers POLLHUP on probe_reader. If stop_isolate_servers already unblocked
+    // and joined the writer before returning, no writer closes after probe_reader opens,
+    // so poll() returns 0 (no POLLHUP).
+    let probe_reader = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NONBLOCK)
+        .open(&fifo_path)
+        .unwrap();
+    let mut pfd = nix::libc::pollfd {
+        fd: probe_reader.as_raw_fd(),
+        events: nix::libc::POLLHUP | nix::libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: `pfd` points to a valid `pollfd` struct for an open file descriptor.
+    let poll_res = unsafe { nix::libc::poll(&mut pfd, 1, 200) };
+    assert!(poll_res >= 0, "poll failed on ready FIFO probe reader");
+    assert_eq!(
+        pfd.revents & nix::libc::POLLHUP,
+        0,
+        "stop_isolate_servers leaked a pending ready FIFO writer task blocked on open(O_WRONLY)"
+    );
+}
+
+#[tokio::test]
+async fn test_start_isolate_ez_server_binds_uds_before_returning() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let temp_dir = tempfile::Builder::new().prefix("test-uds-bound-immediately").tempdir().unwrap();
+    let metrics_uds_path = temp_dir.path().join(METRICS_UDS_NAME);
+    let isolate_uds_path = temp_dir.path().join(ISOLATE_UDS_NAME);
+    let manager = create_test_service_manager();
+    let isolate_id = IsolateId::new(BinaryServicesIndex::new(false));
+
+    manager
+        .start_isolate_ez_server(isolate_ez_service_manager::StartIsolateEzServerArgs {
+            isolate_id,
+            isolate_address: isolate_uds_path.display().to_string(),
+            isolate_fifo_path: "/dev/null".to_string(),
+            otel_metrics_address: metrics_uds_path.display().to_string(),
+            metrics_policy: IsolateMetricsPolicy::default(),
+            isolate_type: IsolateType {
+                isolate_name: TEST_ISOLATE_NAME.to_string(),
+                publisher_id: TEST_PUBLISHER_ID.to_string(),
+            },
+            isolate_instance_id: "1".to_string(),
+        })
+        .await
+        .expect("should start isolate ez server");
+
+    let isolate_stream = std::os::unix::net::UnixStream::connect(&isolate_uds_path);
+    assert!(
+        isolate_stream.is_ok(),
+        "Isolate EZ Bridge UDS was not bound before start_isolate_ez_server returned: {:?}",
+        isolate_stream.err()
+    );
+    let metrics_stream = std::os::unix::net::UnixStream::connect(&metrics_uds_path);
+    assert!(
+        metrics_stream.is_ok(),
+        "OTel metrics UDS was not bound before start_isolate_ez_server returned: {:?}",
+        metrics_stream.err()
+    );
+
+    drop(isolate_stream);
+    drop(metrics_stream);
+    manager.stop_isolate_servers(isolate_id).await;
+}
+
+#[tokio::test]
+async fn test_start_isolate_ez_server_unlinks_preexisting_socket_files() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let temp_dir =
+        tempfile::Builder::new().prefix("test-uds-unlink-preexisting").tempdir().unwrap();
+    let metrics_uds_path = temp_dir.path().join(METRICS_UDS_NAME);
+    let isolate_uds_path = temp_dir.path().join(ISOLATE_UDS_NAME);
+
+    // Leave pre-existing stale socket files on disk before starting the servers.
+    drop(std::os::unix::net::UnixListener::bind(&isolate_uds_path).unwrap());
+    drop(std::os::unix::net::UnixListener::bind(&metrics_uds_path).unwrap());
+    assert!(isolate_uds_path.exists());
+    assert!(metrics_uds_path.exists());
+
+    let manager = create_test_service_manager();
+    let isolate_id = IsolateId::new(BinaryServicesIndex::new(false));
+
+    manager
+        .start_isolate_ez_server(isolate_ez_service_manager::StartIsolateEzServerArgs {
+            isolate_id,
+            isolate_address: isolate_uds_path.display().to_string(),
+            isolate_fifo_path: "/dev/null".to_string(),
+            otel_metrics_address: metrics_uds_path.display().to_string(),
+            metrics_policy: IsolateMetricsPolicy::default(),
+            isolate_type: IsolateType {
+                isolate_name: TEST_ISOLATE_NAME.to_string(),
+                publisher_id: TEST_PUBLISHER_ID.to_string(),
+            },
+            isolate_instance_id: "1".to_string(),
+        })
+        .await
+        .expect("should start isolate ez server after unlinking pre-existing socket files");
+
+    let isolate_stream = std::os::unix::net::UnixStream::connect(&isolate_uds_path);
+    assert!(
+        isolate_stream.is_ok(),
+        "Isolate EZ Bridge UDS failed to replace pre-existing socket file: {:?}",
+        isolate_stream.err()
+    );
+    let metrics_stream = std::os::unix::net::UnixStream::connect(&metrics_uds_path);
+    assert!(
+        metrics_stream.is_ok(),
+        "OTel metrics UDS failed to replace pre-existing socket file: {:?}",
+        metrics_stream.err()
+    );
+
+    drop(isolate_stream);
+    drop(metrics_stream);
+    manager.stop_isolate_servers(isolate_id).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_start_isolate_ez_server_bind_failure_unlinks_isolate_uds() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let temp_dir = tempfile::Builder::new().prefix("test-uds-bind-failure").tempdir().unwrap();
+    let isolate_uds_path = temp_dir.path().join(ISOLATE_UDS_NAME);
+    let metrics_uds_path = temp_dir.path().join(METRICS_UDS_NAME);
+    let missing_dir_socket = temp_dir.path().join("missing_dir").join(METRICS_UDS_NAME);
+    let manager = create_test_service_manager();
+    let isolate_id = IsolateId::new(BinaryServicesIndex::new(false));
+
+    let first_bind_err = manager
+        .start_isolate_ez_server(isolate_ez_service_manager::StartIsolateEzServerArgs {
+            isolate_id,
+            isolate_address: missing_dir_socket.display().to_string(),
+            isolate_fifo_path: "/dev/null".to_string(),
+            otel_metrics_address: metrics_uds_path.display().to_string(),
+            metrics_policy: IsolateMetricsPolicy::default(),
+            isolate_type: IsolateType {
+                isolate_name: TEST_ISOLATE_NAME.to_string(),
+                publisher_id: TEST_PUBLISHER_ID.to_string(),
+            },
+            isolate_instance_id: "1".to_string(),
+        })
+        .await;
+    assert!(first_bind_err.is_err(), "Expected error when isolate_address fails to bind");
+
+    let second_bind_err = manager
+        .start_isolate_ez_server(isolate_ez_service_manager::StartIsolateEzServerArgs {
+            isolate_id,
+            isolate_address: isolate_uds_path.display().to_string(),
+            isolate_fifo_path: "/dev/null".to_string(),
+            otel_metrics_address: missing_dir_socket.display().to_string(),
+            metrics_policy: IsolateMetricsPolicy::default(),
+            isolate_type: IsolateType {
+                isolate_name: TEST_ISOLATE_NAME.to_string(),
+                publisher_id: TEST_PUBLISHER_ID.to_string(),
+            },
+            isolate_instance_id: "1".to_string(),
+        })
+        .await;
+    assert!(second_bind_err.is_err(), "Expected error when otel_metrics_address fails to bind");
+    assert!(
+        !isolate_uds_path.exists(),
+        "isolate_address socket file should be unlinked if binding otel_metrics_address fails"
+    );
+
+    let retry_ok = manager
+        .start_isolate_ez_server(isolate_ez_service_manager::StartIsolateEzServerArgs {
+            isolate_id,
+            isolate_address: isolate_uds_path.display().to_string(),
+            isolate_fifo_path: "/dev/null".to_string(),
+            otel_metrics_address: metrics_uds_path.display().to_string(),
+            metrics_policy: IsolateMetricsPolicy::default(),
+            isolate_type: IsolateType {
+                isolate_name: TEST_ISOLATE_NAME.to_string(),
+                publisher_id: TEST_PUBLISHER_ID.to_string(),
+            },
+            isolate_instance_id: "1".to_string(),
+        })
+        .await;
+    assert!(
+        retry_ok.is_ok(),
+        "Retry after partial bind failure should succeed without EADDRINUSE: {:?}",
+        retry_ok.err()
+    );
+
+    manager.stop_isolate_servers(isolate_id).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_metrics_server_reception() {
     let _ = env_logger::builder().is_test(true).try_init();
@@ -90,7 +321,8 @@ async fn test_metrics_server_reception() {
             },
             isolate_instance_id: "1".to_string(),
         })
-        .await;
+        .await
+        .expect("should start isolate ez server");
 
     let mut attempts = 0;
     while !metrics_uds_path.exists() && attempts < 100 {
@@ -143,7 +375,6 @@ async fn test_metrics_server_reception() {
 
     drop(client); // Close connection
     manager.stop_isolate_servers(isolate_id).await;
-    metrics::global::reset_global_providers();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -289,13 +520,13 @@ async fn test_service_manager_stop_unknown_and_missing_fifo() {
             },
             isolate_instance_id: "2".to_string(),
         })
-        .await;
+        .await
+        .expect("should start isolate ez server");
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(isolate_uds_path.exists(), "Isolate UDS path should exist even if FIFO open fails");
     assert!(metrics_uds_path.exists(), "Metrics UDS path should exist");
     let _channel = connect_uds_channel(isolate_uds_path).await;
     manager.stop_isolate_servers(isolate_id).await;
-    metrics::global::reset_global_providers();
 }
 
 #[derive(Debug)]

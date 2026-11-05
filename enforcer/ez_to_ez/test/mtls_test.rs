@@ -132,19 +132,56 @@ fn test_extract_sni_params_v1() {
 
 #[derive(Clone)]
 struct MockMtlsService {
-    leaf_der: &'static [u8],
-    root_der: &'static [u8],
+    leaf_der: Vec<u8>,
+    root_der: Vec<u8>,
     reported_snis: std::sync::Arc<tokio::sync::Mutex<Vec<Vec<String>>>>,
 }
 
 impl MockMtlsService {
     pub fn new() -> Self {
         Self {
-            leaf_der: include_bytes!("testdata/leaf.der"),
-            root_der: include_bytes!("testdata/root.der"),
+            leaf_der: include_bytes!("testdata/leaf.der").to_vec(),
+            root_der: include_bytes!("testdata/root.der").to_vec(),
             reported_snis: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         }
     }
+
+    pub fn with_leaf_der(leaf_der: Vec<u8>) -> Self {
+        Self {
+            leaf_der,
+            root_der: include_bytes!("testdata/root.der").to_vec(),
+            reported_snis: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        }
+    }
+}
+
+fn generate_leaf_der_with_spiffe_uri(spiffe_uri: &str) -> Vec<u8> {
+    let root_cert = boring::x509::X509::from_der(include_bytes!("testdata/root.der")).unwrap();
+    let root_key_bytes = std::fs::read("enforcer/ez_to_ez/test/testdata/root.key").unwrap();
+    let root_key = boring::pkey::PKey::private_key_from_pem(&root_key_bytes).unwrap();
+    let leaf_key_bytes = std::fs::read("enforcer/ez_to_ez/test/testdata/leaf.key").unwrap();
+    let leaf_key = boring::pkey::PKey::private_key_from_pem(&leaf_key_bytes).unwrap();
+
+    let mut subject_name = boring::x509::X509NameBuilder::new().unwrap();
+    subject_name.append_entry_by_text("CN", "leaf").unwrap();
+    let subject_name = subject_name.build();
+
+    let mut builder = boring::x509::X509::builder().unwrap();
+    builder.set_version(2).unwrap();
+    builder.set_pubkey(&leaf_key).unwrap();
+    builder.set_subject_name(&subject_name).unwrap();
+    builder.set_issuer_name(root_cert.subject_name()).unwrap();
+    let not_before = boring::asn1::Asn1Time::days_from_now(0).unwrap();
+    let not_after = boring::asn1::Asn1Time::days_from_now(365).unwrap();
+    builder.set_not_before(&not_before).unwrap();
+    builder.set_not_after(&not_after).unwrap();
+    let san = boring::x509::extension::SubjectAlternativeName::new()
+        .uri(spiffe_uri)
+        .build(&builder.x509v3_context(Some(&root_cert), None))
+        .unwrap();
+    builder.append_extension(&san).unwrap();
+    builder.sign(&root_key, boring::hash::MessageDigest::sha256()).unwrap();
+    builder.build().to_der().unwrap()
 }
 
 #[tonic::async_trait]
@@ -154,7 +191,7 @@ impl EzMtlsService for MockMtlsService {
         _request: Request<GetCertificateRequest>,
     ) -> Result<Response<GetCertificateResponse>, Status> {
         Ok(Response::new(GetCertificateResponse {
-            certs: vec![self.leaf_der.to_vec(), self.root_der.to_vec()],
+            certs: vec![self.leaf_der.clone(), self.root_der.clone()],
             ..Default::default()
         }))
     }
@@ -189,7 +226,7 @@ async fn test_connect_ez_mtls() {
     let key_path = "enforcer/ez_to_ez/test/testdata/leaf.key".to_string();
     let csr_path = "enforcer/ez_to_ez/test/testdata/leaf.csr".to_string();
 
-    let config = EzMtlsManagerConfig::new_with_proxy(key_path, csr_path, server_addr);
+    let config = EzMtlsManagerConfig::new_with_proxy(key_path, csr_path, server_addr, None);
     let manager_result = EzMtlsManager::build(config).await;
     assert!(
         manager_result.is_ok(),
@@ -262,7 +299,7 @@ async fn test_tls_acceptor_connector() {
     });
     let key_path = "enforcer/ez_to_ez/test/testdata/leaf.key".to_string();
     let csr_path = "enforcer/ez_to_ez/test/testdata/leaf.csr".to_string();
-    let config = EzMtlsManagerConfig::new_with_proxy(key_path, csr_path, server_addr);
+    let config = EzMtlsManagerConfig::new_with_proxy(key_path, csr_path, server_addr, None);
     let server_manager =
         EzMtlsManager::build(config.clone()).await.expect("Failed to initialize server manager");
     let client_manager =
@@ -273,7 +310,7 @@ async fn test_tls_acceptor_connector() {
 
     let connector = client_manager
         .get_connector_factory()
-        .create_connector(&client_manager.spiffe_identity().operator_domain)
+        .create_connector()
         .await
         .expect("Failed to create TLS connector");
 
@@ -327,7 +364,7 @@ async fn test_boring_tls_stream_duplex() {
             .unwrap();
     });
 
-    let config = EzMtlsManagerConfig::new_with_proxy(key_path, csr_path, server_addr);
+    let config = EzMtlsManagerConfig::new_with_proxy(key_path, csr_path, server_addr, None);
     // Create a mTLS manager to fetch the certificates from the mock server and load certificates from testdata.
     let server_manager =
         EzMtlsManager::build(config.clone()).await.expect("Failed to initialize server manager");
@@ -341,7 +378,7 @@ async fn test_boring_tls_stream_duplex() {
 
     let connector = client_manager
         .get_connector_factory()
-        .create_connector(&client_manager.spiffe_identity().operator_domain)
+        .create_connector()
         .await
         .expect("Failed to create TLS connector");
 
@@ -426,7 +463,7 @@ async fn create_test_context() -> TestContext {
             .unwrap();
     });
 
-    let config = EzMtlsManagerConfig::new_with_proxy(key_path, csr_path, server_addr);
+    let config = EzMtlsManagerConfig::new_with_proxy(key_path, csr_path, server_addr, None);
 
     let server_manager = EzMtlsManager::build(config.clone()).await.unwrap();
     let client_manager = EzMtlsManager::build(config).await.unwrap();
@@ -462,7 +499,7 @@ async fn create_test_context() -> TestContext {
 
     let outbound_tls_config = OutboundTlsConfig {
         factory: client_manager.get_connector_factory(),
-        trust_domain: client_manager.spiffe_identity().trust_domain.clone(),
+        trust_domain: client_manager.self_identity().trust_domain.clone(),
     };
 
     let outbound_handler = OutboundEzToEzHandler::new(
@@ -514,7 +551,7 @@ async fn test_e2e_mtls() {
     assert!(no_meta_err.to_string().contains("Missing ControlPlaneMetadata for TLS routing"));
 
     let meta = ControlPlaneMetadata {
-        destination_operator_domain: ctx.client_manager.spiffe_identity().operator_domain.clone(),
+        destination_operator_domain: ctx.client_manager.self_identity().operator_domain.clone(),
         ..Default::default()
     };
 
@@ -561,7 +598,7 @@ async fn test_e2e_mtls_streaming() {
     let ctx = create_test_context().await;
 
     let meta = ControlPlaneMetadata {
-        destination_operator_domain: ctx.client_manager.spiffe_identity().operator_domain.clone(),
+        destination_operator_domain: ctx.client_manager.self_identity().operator_domain.clone(),
         ..Default::default()
     };
 
@@ -591,18 +628,113 @@ async fn test_e2e_mtls_streaming() {
     ctx.server_task.abort(); // Stop server task
 }
 
-/// Tests that the outbound handler fails to connect when the peer identity does not match the expected identity.
+/// Tests that the outbound handler fails to connect when the peer identity does not match
+/// `self_identity` or `allowed_peer_identities`.
 /// This verifies that SPIFFE identity verification is working.
 #[tokio::test]
-#[ignore = "b/545145139"]
 async fn test_e2e_mtls_wrong_identity() {
     // Set retry count to 1 to fail fast in test
     std::env::set_var("PROXY_CONNECT_RETRY_COUNT", "1");
 
-    let ctx = create_test_context().await;
+    let key_path = "enforcer/ez_to_ez/test/testdata/leaf.key".to_string();
+    let csr_path = "enforcer/ez_to_ez/test/testdata/leaf.csr".to_string();
 
-    // The server side doesn't have "wrong_domain" as its operator domain in SPIFFE ID.
-    // The server returned certificate must match the outbound request destination_operator_domain.
+    // Server uses a certificate with a different SPIFFE URI than the client's self_identity.
+    let (server_tx, server_rx) = tokio::sync::oneshot::channel();
+    let server_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server_mtls_addr = format!("http://{}", server_listener.local_addr().unwrap());
+    let wrong_leaf_der = generate_leaf_der_with_spiffe_uri(
+        "spiffe://avs.tca.fakeca/operator/wrong_domain/publisher/release@google.com/workload/encrypted-zone",
+    );
+    let server_service = MockMtlsService::with_leaf_der(wrong_leaf_der);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(EzMtlsServiceServer::new(server_service))
+            .serve_with_incoming_shutdown(TcpListenerStream::new(server_listener), async {
+                server_rx.await.ok();
+            })
+            .await
+            .unwrap();
+    });
+
+    let (client_tx, client_rx) = tokio::sync::oneshot::channel();
+    let client_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client_mtls_addr = format!("http://{}", client_listener.local_addr().unwrap());
+    let client_service = MockMtlsService::new();
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(EzMtlsServiceServer::new(client_service))
+            .serve_with_incoming_shutdown(TcpListenerStream::new(client_listener), async {
+                client_rx.await.ok();
+            })
+            .await
+            .unwrap();
+    });
+
+    let server_config = EzMtlsManagerConfig::new_with_proxy(
+        key_path.clone(),
+        csr_path.clone(),
+        server_mtls_addr,
+        None,
+    );
+    let client_config = EzMtlsManagerConfig::new_with_proxy(
+        key_path,
+        csr_path,
+        client_mtls_addr,
+        Some(vec![
+            "spiffe://avs.tca.fakeca/operator/allowed_domain/publisher/release@google.com/workload/encrypted-zone"
+                .to_string(),
+        ]),
+    );
+
+    let server_manager = EzMtlsManager::build(server_config).await.unwrap();
+    let client_manager = EzMtlsManager::build(client_config).await.unwrap();
+
+    let acceptor = server_manager.create_tls_acceptor().await.unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let socket_path = dir.path().join("test.sock");
+    let server_address = format!("unix:{}", socket_path.to_str().unwrap());
+
+    let fake_junction = junction_test_utils::FakeJunction::default();
+    let handler =
+        inbound_ez_to_ez_handler::InboundEzToEzHandler::new(Box::new(fake_junction.clone()));
+
+    let tls_config = inbound_ez_to_ez_handler::InboundTlsConfig {
+        acceptor,
+        handshake_timeout: std::time::Duration::from_secs(2),
+        max_concurrent_handshakes: 5,
+    };
+
+    let server_addr_clone = server_address.clone();
+    let server_task = tokio::spawn(async move {
+        inbound_ez_to_ez_handler::launch_server(
+            handler,
+            &server_addr_clone,
+            4 * 1024 * 1024,
+            Some(tls_config),
+        )
+        .await;
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let outbound_tls_config = OutboundTlsConfig {
+        factory: client_manager.get_connector_factory(),
+        trust_domain: client_manager.self_identity().trust_domain.clone(),
+    };
+
+    let outbound_handler = OutboundEzToEzHandler::new(
+        server_address,
+        TestMetrics::default(),
+        Some(outbound_tls_config),
+        /* expect_tls_config= */ false,
+        /* enable_per_unary_tls_channel= */ true,
+        4 * 1024 * 1024,
+    )
+    .await
+    .unwrap();
+
     let meta = ControlPlaneMetadata {
         destination_operator_domain: "wrong_domain".to_string(),
         ..Default::default()
@@ -618,18 +750,19 @@ async fn test_e2e_mtls_wrong_identity() {
         ..Default::default()
     };
 
-    let response = ctx.outbound_handler.remote_invoke(request, None).await;
+    let response = outbound_handler.remote_invoke(request, None).await;
 
     assert!(response.is_err(), "Expected remote invoke to fail due to identity mismatch");
-    let err = response.err().unwrap();
+    let err = response.unwrap_err();
     assert!(
         format!("{:?}", err).contains("CERTIFICATE_VERIFY_FAILED"),
         "Expected error to contain 'CERTIFICATE_VERIFY_FAILED', got: {:?}",
         err
     );
 
-    let _ = ctx.mock_service_tx.send(()); // Stop mock service
-    ctx.server_task.abort(); // Stop server task
+    let _ = server_tx.send(());
+    let _ = client_tx.send(());
+    server_task.abort();
 }
 
 /// Tests that the inbound handler correctly propagates errors from the junction back to the client.
@@ -639,7 +772,7 @@ async fn test_e2e_mtls_junction_error() {
     let ctx = create_test_context().await;
 
     let meta = ControlPlaneMetadata {
-        destination_operator_domain: ctx.client_manager.spiffe_identity().operator_domain.clone(),
+        destination_operator_domain: ctx.client_manager.self_identity().operator_domain.clone(),
         // "ErrorService" triggers FakeJunction to return an error, as defined in junction/test_utils.rs
         destination_service_name: "ErrorService".to_string(),
         ..Default::default()
@@ -684,7 +817,7 @@ async fn test_outbound_pending_then_set_tls_config_works() {
     .unwrap();
 
     let meta = ControlPlaneMetadata {
-        destination_operator_domain: ctx.client_manager.spiffe_identity().operator_domain.clone(),
+        destination_operator_domain: ctx.client_manager.self_identity().operator_domain.clone(),
         ..Default::default()
     };
     let request = enforcer_proto::enforcer::v1::InvokeEzRequest {
@@ -770,10 +903,10 @@ async fn test_ez_mtls_manager_build_with_setup_isolate() {
         "SetupService".to_string(),
     );
 
-    let config = EzMtlsManagerConfig::new_with_setup_isolate(setup_client);
+    let config = EzMtlsManagerConfig::new_with_setup_isolate(setup_client, None);
 
     let manager = EzMtlsManager::build(config).await.expect("Failed to build EzMtlsManager");
-    assert_eq!(manager.spiffe_identity().trust_domain, "avs.tca.fakeca");
+    assert_eq!(manager.self_identity().trust_domain, "avs.tca.fakeca");
 
     let invoked_req = last_request.lock().unwrap().clone().expect("No request invoked");
     let cpm = invoked_req.control_plane_metadata.expect("Missing metadata");
@@ -796,6 +929,7 @@ async fn test_ez_mtls_manager_build_missing_key_file() {
         "nonexistent/leaf.key".to_string(),
         "enforcer/ez_to_ez/test/testdata/leaf.csr".to_string(),
         "http://127.0.0.1:1".to_string(),
+        None,
     );
     let err = EzMtlsManager::build(config).await.unwrap_err();
     assert!(err.to_string().contains("Failed to read leaf private key from path"));
@@ -807,6 +941,7 @@ async fn test_ez_mtls_manager_build_missing_csr_file() {
         "enforcer/ez_to_ez/test/testdata/leaf.key".to_string(),
         "nonexistent/leaf.csr".to_string(),
         "http://127.0.0.1:1".to_string(),
+        None,
     );
     let err = EzMtlsManager::build(config).await.unwrap_err();
     assert!(err.to_string().contains("Failed to read leaf CSR from path"));
@@ -822,7 +957,7 @@ async fn test_ez_mtls_manager_build_setup_isolate_rpc_failure() {
         "SetupService".to_string(),
     );
 
-    let config = EzMtlsManagerConfig::new_with_setup_isolate(setup_client);
+    let config = EzMtlsManagerConfig::new_with_setup_isolate(setup_client, None);
     let err = EzMtlsManager::build(config).await.unwrap_err();
     assert!(err.to_string().contains("Failed to fetch certificate from Setup Isolate"));
 }
@@ -842,7 +977,7 @@ async fn test_ez_mtls_manager_build_with_setup_isolate_empty_trust_anchors_err()
         "SetupService".to_string(),
     );
 
-    let config = EzMtlsManagerConfig::new_with_setup_isolate(setup_client);
+    let config = EzMtlsManagerConfig::new_with_setup_isolate(setup_client, None);
     let err = EzMtlsManager::build(config).await.unwrap_err();
     assert!(err
         .to_string()
@@ -859,13 +994,186 @@ async fn test_ez_mtls_manager_build_missing_config_fields() {
 }
 
 #[tokio::test]
+async fn test_ez_mtls_manager_build_invalid_allowed_peer_identity() {
+    let config = EzMtlsManagerConfig::new_with_proxy(
+        "enforcer/ez_to_ez/test/testdata/leaf.key".to_string(),
+        "enforcer/ez_to_ez/test/testdata/leaf.csr".to_string(),
+        "http://127.0.0.1:1".to_string(),
+        Some(vec!["invalid-spiffe-id".to_string()]),
+    );
+    let err = EzMtlsManager::build(config).await.unwrap_err();
+    assert!(err.to_string().contains("Failed to parse allowed peer SPIFFE ID"));
+}
+
+#[tokio::test]
+async fn test_tls_handshake_succeeds_with_allowed_peer_identity() {
+    let server_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server_addr = format!("http://{}", server_listener.local_addr().unwrap());
+
+    let server_service = MockMtlsService::new();
+    let (server_tx, server_rx) = oneshot::channel();
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(EzMtlsServiceServer::new(server_service))
+            .serve_with_incoming_shutdown(TcpListenerStream::new(server_listener), async {
+                server_rx.await.ok();
+            })
+            .await
+            .unwrap();
+    });
+
+    let client_spiffe_id =
+        "spiffe://avs.tca.fakeca/operator/other-op/publisher/other-pub/workload/other-wl";
+    let client_leaf_der = generate_leaf_der_with_spiffe_uri(client_spiffe_id);
+    let client_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client_addr = format!("http://{}", client_listener.local_addr().unwrap());
+    let client_service = MockMtlsService::with_leaf_der(client_leaf_der);
+    let (client_tx, client_rx) = oneshot::channel();
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(EzMtlsServiceServer::new(client_service))
+            .serve_with_incoming_shutdown(TcpListenerStream::new(client_listener), async {
+                client_rx.await.ok();
+            })
+            .await
+            .unwrap();
+    });
+
+    let key_path = "enforcer/ez_to_ez/test/testdata/leaf.key".to_string();
+    let csr_path = "enforcer/ez_to_ez/test/testdata/leaf.csr".to_string();
+
+    let server_config = EzMtlsManagerConfig::new_with_proxy(
+        key_path.clone(),
+        csr_path.clone(),
+        server_addr,
+        Some(vec![client_spiffe_id.to_string()]),
+    );
+    let server_manager = EzMtlsManager::build(server_config).await.unwrap();
+    let server_spiffe = server_manager.self_identity();
+    let server_spiffe_id = format!(
+        "spiffe://{}/operator/{}/publisher/{}/workload/{}",
+        server_spiffe.trust_domain,
+        server_spiffe.operator_domain,
+        server_spiffe.publisher_id,
+        server_spiffe.workload_name
+    );
+
+    let client_config = EzMtlsManagerConfig::new_with_proxy(
+        key_path,
+        csr_path,
+        client_addr,
+        Some(vec![server_spiffe_id]),
+    );
+    let client_manager = EzMtlsManager::build(client_config).await.unwrap();
+
+    let acceptor = server_manager.create_tls_acceptor().await.unwrap();
+    let connector = client_manager.get_connector_factory().create_connector().await.unwrap();
+
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+
+    let server_task = tokio::spawn(async move {
+        tokio_boring::accept(&acceptor, server_stream)
+            .await
+            .expect("Server should accept peer via allowed_peer_identities");
+    });
+
+    let client_task = tokio::spawn(async move {
+        tokio_boring::connect(
+            connector.configure().unwrap().verify_hostname(false),
+            "localhost",
+            client_stream,
+        )
+        .await
+        .expect("Client should accept peer via allowed_peer_identities");
+    });
+
+    let (server_res, client_res) = tokio::join!(server_task, client_task);
+    server_res.unwrap();
+    client_res.unwrap();
+    let _ = server_tx.send(());
+    let _ = client_tx.send(());
+}
+
+#[tokio::test]
+async fn test_tls_handshake_fails_open_when_allowed_peer_identities_empty() {
+    let server_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server_addr = format!("http://{}", server_listener.local_addr().unwrap());
+
+    let server_service = MockMtlsService::new();
+    let (server_tx, server_rx) = oneshot::channel();
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(EzMtlsServiceServer::new(server_service))
+            .serve_with_incoming_shutdown(TcpListenerStream::new(server_listener), async {
+                server_rx.await.ok();
+            })
+            .await
+            .unwrap();
+    });
+
+    let client_spiffe_id =
+        "spiffe://avs.tca.fakeca/operator/other-op/publisher/other-pub/workload/other-wl";
+    let client_leaf_der = generate_leaf_der_with_spiffe_uri(client_spiffe_id);
+    let client_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client_addr = format!("http://{}", client_listener.local_addr().unwrap());
+    let client_service = MockMtlsService::with_leaf_der(client_leaf_der);
+    let (client_tx, client_rx) = oneshot::channel();
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(EzMtlsServiceServer::new(client_service))
+            .serve_with_incoming_shutdown(TcpListenerStream::new(client_listener), async {
+                client_rx.await.ok();
+            })
+            .await
+            .unwrap();
+    });
+
+    let key_path = "enforcer/ez_to_ez/test/testdata/leaf.key".to_string();
+    let csr_path = "enforcer/ez_to_ez/test/testdata/leaf.csr".to_string();
+
+    let server_config =
+        EzMtlsManagerConfig::new_with_proxy(key_path.clone(), csr_path.clone(), server_addr, None);
+    let server_manager = EzMtlsManager::build(server_config).await.unwrap();
+
+    let client_config = EzMtlsManagerConfig::new_with_proxy(key_path, csr_path, client_addr, None);
+    let client_manager = EzMtlsManager::build(client_config).await.unwrap();
+
+    let acceptor = server_manager.create_tls_acceptor().await.unwrap();
+    let connector = client_manager.get_connector_factory().create_connector().await.unwrap();
+
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+
+    let server_task = tokio::spawn(async move {
+        tokio_boring::accept(&acceptor, server_stream)
+            .await
+            .expect("Server should fail open when allowed_peer_identities is empty");
+    });
+
+    let client_task = tokio::spawn(async move {
+        tokio_boring::connect(
+            connector.configure().unwrap().verify_hostname(false),
+            "localhost",
+            client_stream,
+        )
+        .await
+        .expect("Client should fail open when allowed_peer_identities is empty");
+    });
+
+    let (server_res, client_res) = tokio::join!(server_task, client_task);
+    server_res.unwrap();
+    client_res.unwrap();
+    let _ = server_tx.send(());
+    let _ = client_tx.send(());
+}
+
+#[tokio::test]
 async fn test_outbound_per_unary_tls_channel_enabled_vs_disabled() {
     let ctx = create_test_context().await;
     let counting_sock = ctx._dir.path().join("counting.sock");
     let (addr, tls_handshakes, counting_task) =
         start_counting_tls_uds_server(&counting_sock, ctx.acceptor.clone());
     let meta = ControlPlaneMetadata {
-        destination_operator_domain: ctx.client_manager.spiffe_identity().operator_domain.clone(),
+        destination_operator_domain: ctx.client_manager.self_identity().operator_domain.clone(),
         ..Default::default()
     };
     let make_req = |msg: &str| enforcer_proto::enforcer::v1::InvokeEzRequest {

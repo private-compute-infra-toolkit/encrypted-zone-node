@@ -37,6 +37,33 @@ const BUNDLE_PATH: &str = "enforcer/container/test_data/test_bundle.tar";
 const BINARY_FILENAME: &str = "/usr/local/bin/main";
 const INSTANCE_NAME: &str = "test_ez1";
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn container_start_does_not_starve_spawned_uds_server() {
+    let (uds_dir, uds_listener) = setup();
+    let spawned_task_polled_during_start = Arc::new(AtomicBool::new(false));
+    let polled_clone = Arc::clone(&spawned_task_polled_during_start);
+    let opts = default_container_opts("send-uds", Some(uds_dir.path().to_path_buf()));
+    let mut container = default_container();
+    tokio::spawn(async move {
+        let server_task = tokio::spawn(async move {
+            polled_clone.store(true, Ordering::SeqCst);
+            handle(uds_listener, 100).await.unwrap()
+        });
+        container.start(&opts).await.unwrap();
+        // TODO(b/580019861): Inverted assertion; flip to
+        // `assert!(spawned_task_polled_during_start.load(Ordering::SeqCst), ...)` once
+        // `ContainerCustom::start` awaits setup pipes asynchronously.
+        assert!(
+            !spawned_task_polled_during_start.load(Ordering::SeqCst),
+            "Expected synchronous pipe reads in ContainerCustom::start to block the Tokio worker thread"
+        );
+        let data = server_task.await.unwrap();
+        assert_eq!(data, b"EZ is cool");
+    })
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn container_run_successful() {
     let (uds_dir, uds_listener) = setup();

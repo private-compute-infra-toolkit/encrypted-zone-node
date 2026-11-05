@@ -869,33 +869,66 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
                 container::SeccompProfile::Unconfined
             },
         };
-        self.isolate_ez_service_mngr
-            .start_isolate_ez_server(isolate_ez_service_manager::StartIsolateEzServerArgs {
+        let mut sharing_dir = Some(sharing_dir);
+        let launch_result: Result<()> = async {
+            self.isolate_ez_service_mngr
+                .start_isolate_ez_server(isolate_ez_service_manager::StartIsolateEzServerArgs {
+                    isolate_id,
+                    isolate_address: isolate_ez_bridge_enforcer_side_uds_path.clone(),
+                    isolate_fifo_path: isolate_ez_bridge_ready_enforcer_side_fifo_path,
+                    otel_metrics_address: otlp_metrics_enforcer_side_uds_path,
+                    metrics_policy: container_startup_args.metrics_policy,
+                    isolate_type: IsolateType {
+                        isolate_name: container_startup_args.isolate_name.clone(),
+                        publisher_id: container_startup_args.publisher_id,
+                    },
+                    isolate_instance_id: InstanceIdGenerator::generate().into(),
+                })
+                .await?;
+
+            container.start(&opts).await?;
+
+            self.isolate_container_map.insert(
                 isolate_id,
-                isolate_address: isolate_ez_bridge_enforcer_side_uds_path.clone(),
-                isolate_fifo_path: isolate_ez_bridge_ready_enforcer_side_fifo_path,
-                otel_metrics_address: otlp_metrics_enforcer_side_uds_path,
-                metrics_policy: container_startup_args.metrics_policy,
-                isolate_type: IsolateType {
-                    isolate_name: container_startup_args.isolate_name.clone(),
-                    publisher_id: container_startup_args.publisher_id,
+                IsolateContainer {
+                    container,
+                    _sharing_dir: sharing_dir.take().expect("sharing_dir should be present"),
+                    restart_count,
                 },
-                isolate_instance_id: InstanceIdGenerator::generate().into(),
-            })
-            .await;
+            );
+            self.add_isolate_to_state_mngr(isolate_id, request.allowed_data_scope_type).await?;
+            self.add_isolate_to_junction(isolate_id, ez_isolate_bridge_enforcer_side_uds_path)
+                .await
+                .context("IsolateJunction addIsolate failed")?;
+            self.state_manager.mark_channel_connected(isolate_id).await?;
+            Ok(())
+        }
+        .await;
 
-        container.start(&opts).await?;
-
-        self.isolate_container_map.insert(
-            isolate_id,
-            IsolateContainer { container, _sharing_dir: sharing_dir, restart_count },
-        );
-        self.add_isolate_to_state_mngr(isolate_id, request.allowed_data_scope_type).await?;
-        self.add_isolate_to_junction(isolate_id, ez_isolate_bridge_enforcer_side_uds_path)
-            .await
-            .context("IsolateJunction addIsolate failed")?;
-        self.state_manager.mark_channel_connected(isolate_id).await?;
+        if let Err(err) = launch_result {
+            self.cleanup_failed_isolate(isolate_id).await;
+            drop(sharing_dir);
+            return Err(err);
+        }
         Ok(())
+    }
+
+    async fn cleanup_failed_isolate(&self, isolate_id: IsolateId) {
+        let mut removed_container = self.isolate_container_map.remove(&isolate_id);
+        if let Some((_id, ref mut isolate_container)) = removed_container {
+            if let Err(e) = isolate_container.container.stop().await {
+                log::warn!(
+                    "Failed to stop container during add_new_isolate cleanup for {:?}: {:?}",
+                    isolate_id,
+                    e
+                );
+            }
+        }
+        let _ = self.state_manager.remove_isolate(RemoveIsolateRequest { isolate_id }).await;
+        self.isolate_ez_service_mngr.stop_isolate_servers(isolate_id).await;
+        let _ = self.shared_mem_manager.remove_isolate(isolate_id).await;
+        let _ = self.fileshare_manager.remove_isolate(isolate_id).await;
+        drop(removed_container);
     }
 
     async fn add_isolate_to_junction(

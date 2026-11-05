@@ -158,8 +158,7 @@ impl<MetricsImpl: ServiceMetrics> OutboundEzToEzHandler<MetricsImpl> {
         );
 
         if for_unary && self.enable_per_unary_tls_channel {
-            let connector =
-                tls_config.factory.create_connector(&meta.destination_operator_domain).await?;
+            let connector = tls_config.factory.create_connector().await?;
             return grpc_connector::connect_tls_from_env(&self.proxy_address, connector, sni).await;
         }
 
@@ -184,7 +183,6 @@ impl<MetricsImpl: ServiceMetrics> OutboundEzToEzHandler<MetricsImpl> {
 
         let tls_config_clone = tls_config.clone();
         let sni_clone = sni.clone();
-        let operator_domain = meta.destination_operator_domain.clone();
         let proxy_address = self.proxy_address.clone();
 
         // When OnceCell is empty, it'll execute the closure and store the result in the OnceCell.
@@ -192,7 +190,7 @@ impl<MetricsImpl: ServiceMetrics> OutboundEzToEzHandler<MetricsImpl> {
         // This prevents multiple concurrent channel creation calls from race condition.
         let pool = cell
             .get_or_try_init(|| async move {
-                let connector = tls_config_clone.factory.create_connector(&operator_domain).await?;
+                let connector = tls_config_clone.factory.create_connector().await?;
                 grpc_connector::GrpcChannelPool::new_tls_from_env(
                     &proxy_address,
                     connector,

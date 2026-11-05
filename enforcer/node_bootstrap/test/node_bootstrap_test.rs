@@ -255,6 +255,7 @@ async fn test_bootstrap_launches_inbound_ez_to_ez_server() {
             enable_mtls: false,
             ez_to_ez_handshake_timeout: Duration::from_secs(5),
             ez_to_ez_max_concurrent_handshakes: 10,
+            allowed_peer_identities: vec![],
         },
     )
     .await
@@ -289,6 +290,7 @@ async fn test_bootstrap_with_mtls_configures_outbound_tls() {
             enable_mtls: true,
             ez_to_ez_handshake_timeout: Duration::from_secs(5),
             ez_to_ez_max_concurrent_handshakes: 10,
+            allowed_peer_identities: vec![],
         },
     )
     .await
@@ -319,6 +321,62 @@ async fn test_bootstrap_with_mtls_configures_outbound_tls() {
 }
 
 #[tokio::test]
+async fn test_bootstrap_with_mtls_forwards_allowed_peer_identities() {
+    let harness = TestHarness::new().await;
+    harness.mark_setup_isolate_ready().await;
+
+    let valid_bootstrap = NodeBootstrapV2::new(
+        harness.state_manager.clone(),
+        harness.container_manager_requester.clone(),
+        None,
+        None,
+        NodeBootstrapV2Config {
+            ez_management_address: harness.ez_management_address.clone(),
+            max_decoding_message_size: MAX_DECODING_SIZE,
+            enable_mtls: true,
+            ez_to_ez_handshake_timeout: Duration::from_secs(5),
+            ez_to_ez_max_concurrent_handshakes: 10,
+            allowed_peer_identities: vec![
+                "spiffe://mesh.example.tca/operator/op/publisher/pub/workload/wl".to_string(),
+            ],
+        },
+    )
+    .await
+    .expect("NodeBootstrapV2 should connect to EzManagementService");
+    timeout(CONTACTED_TIMEOUT, valid_bootstrap.run())
+        .await
+        .expect("Bootstrap should not block")
+        .expect("Bootstrap should accept valid allowed_peer_identities");
+
+    let invalid_harness = TestHarness::new().await;
+    invalid_harness.mark_setup_isolate_ready().await;
+    let invalid_bootstrap = NodeBootstrapV2::new(
+        invalid_harness.state_manager.clone(),
+        invalid_harness.container_manager_requester.clone(),
+        None,
+        None,
+        NodeBootstrapV2Config {
+            ez_management_address: invalid_harness.ez_management_address.clone(),
+            max_decoding_message_size: MAX_DECODING_SIZE,
+            enable_mtls: true,
+            ez_to_ez_handshake_timeout: Duration::from_secs(5),
+            ez_to_ez_max_concurrent_handshakes: 10,
+            allowed_peer_identities: vec!["invalid-spiffe-id".to_string()],
+        },
+    )
+    .await
+    .expect("NodeBootstrapV2 should connect to EzManagementService");
+    let err = timeout(CONTACTED_TIMEOUT, invalid_bootstrap.run())
+        .await
+        .expect("Bootstrap should fail fast on invalid peer identity")
+        .expect_err("Bootstrap must reject invalid allowed_peer_identities");
+    assert!(
+        format!("{err:#}").contains("Failed to parse allowed peer SPIFFE ID"),
+        "Unexpected error: {err:#}"
+    );
+}
+
+#[tokio::test]
 async fn test_bootstrap_does_not_contact_management_service_when_mtls_fetch_fails() {
     let harness =
         TestHarness::new_with_setup_response(Err("setup isolate cert fetch failed".to_string()))
@@ -336,6 +394,7 @@ async fn test_bootstrap_does_not_contact_management_service_when_mtls_fetch_fail
             enable_mtls: true,
             ez_to_ez_handshake_timeout: Duration::from_secs(5),
             ez_to_ez_max_concurrent_handshakes: 10,
+            allowed_peer_identities: vec![],
         },
     )
     .await
@@ -376,6 +435,7 @@ async fn test_bootstrap_fails_without_a_setup_isolate() {
             enable_mtls: false,
             ez_to_ez_handshake_timeout: Duration::from_secs(5),
             ez_to_ez_max_concurrent_handshakes: 10,
+            allowed_peer_identities: vec![],
         },
     )
     .await
@@ -556,6 +616,7 @@ impl TestHarness {
                 enable_mtls: false,
                 ez_to_ez_handshake_timeout: Duration::from_secs(5),
                 ez_to_ez_max_concurrent_handshakes: 10,
+                allowed_peer_identities: vec![],
             },
         )
         .await

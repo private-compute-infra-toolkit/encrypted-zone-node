@@ -44,7 +44,7 @@ use shared_memory_manager::SharedMemManager;
 use state_manager::IsolateStateManager;
 use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc, Mutex,
 };
 use tokio::sync::mpsc::channel;
@@ -72,6 +72,8 @@ pub struct FakeJunction {
     pub call_count: Arc<AtomicUsize>,
     pub stream_call_count: Arc<AtomicUsize>,
     pub invoked_isolate_requests: Arc<Mutex<Vec<InvokeIsolateRequest>>>,
+    pub fail_connect_isolate: Arc<AtomicBool>,
+    pub last_connect_isolate_id: Arc<Mutex<Option<IsolateId>>>,
 }
 
 #[tonic::async_trait]
@@ -117,6 +119,10 @@ impl Junction for FakeJunction {
         isolate_id: IsolateId,
         isolate_address: String,
     ) -> anyhow::Result<()> {
+        *self.last_connect_isolate_id.lock().unwrap() = Some(isolate_id);
+        if self.fail_connect_isolate.swap(false, Ordering::SeqCst) {
+            anyhow::bail!("Simulated FakeJunction::connect_isolate failure");
+        }
         self.connected_isolates.insert(isolate_id, isolate_address);
         Ok(())
     }
@@ -160,6 +166,14 @@ impl FakeJunction {
     // Note: All Isolates connected to this FakeJunction will share the same behavior (default is to echo back requests)
     pub fn set_fake_isolate(&mut self, fake_isolate: Box<dyn FakeIsolate>) {
         self.fake_isolate = fake_isolate;
+    }
+
+    pub fn set_fail_connect_isolate(&self, fail: bool) {
+        self.fail_connect_isolate.store(fail, Ordering::SeqCst);
+    }
+
+    pub fn last_connect_isolate_id(&self) -> Option<IsolateId> {
+        *self.last_connect_isolate_id.lock().unwrap()
     }
 }
 

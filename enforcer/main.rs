@@ -207,7 +207,6 @@ struct EnforcerInputs {
 
     // SPIFFE ID follows the SPIFFE SPEC https://spiffe.io/docs/latest/spiffe-specs/spiffe-id/#2-spiffe-identity
     // Example: spiffe://prod.google.com.tca.staging.aws.pcit.goog/operator/prod.google.com/prober-staging/publisher/google.com/pcit-release-bot/workload/attestation-verification-service-prober-staging
-    #[allow(dead_code)]
     #[arg(
         long,
         value_delimiter = ',',
@@ -521,6 +520,9 @@ fn main() -> anyhow::Result<()> {
                         ),
                         ez_to_ez_max_concurrent_handshakes: enforcer_inputs
                             .ez_to_ez_max_concurrent_handshakes,
+                        allowed_peer_identities: enforcer_inputs
+                            .allowlisted_peer_node_spiffe_id
+                            .clone(),
                     },
                 )
                 .await?,
@@ -599,6 +601,7 @@ fn main() -> anyhow::Result<()> {
                     ez_to_ez_max_concurrent_handshakes: enforcer_inputs
                         .ez_to_ez_max_concurrent_handshakes,
                     max_decoding_message_size,
+                    allowed_peer_identities: enforcer_inputs.allowlisted_peer_node_spiffe_id,
                 },
             );
             node_bootstrap.run().await.context("EZ Node bootstrap failed")?;

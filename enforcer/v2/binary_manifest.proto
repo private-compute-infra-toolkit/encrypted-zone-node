@@ -31,25 +31,29 @@ message BinaryManifest {
   IsolateDigest isolate_digest = 2;
   // Filename of this executable binary file
   string binary_filename = 3;
+  // Label identifying the exact version of the binary used. EZ does not
+  // use or enforce anything on this field, though it may be logged for
+  // transparency purposes.
+  string version_label = 4;
   // Specifications for any services this binary implements (not all services
   // may be active at runtime)
-  repeated EzServiceSpec service_specs = 4;
+  repeated EzServiceSpec service_specs = 5;
   // Specifications for backend services or endpoints outside or inside EZ
   // that this isolate depends on and is permitted to communicate with.
-  repeated EzBackendDependency ez_backend_dependencies = 5;
+  repeated EzBackendDependency ez_backend_dependencies = 6;
   // Command line arguments to be passed to the binary.
-  repeated string command_line_arguments = 6;
+  repeated string command_line_arguments = 7;
   // Environment variables to be set for the binary.
-  repeated string environment_variables = 7;
+  repeated string environment_variables = 8;
 
   // Kind-specific settings. Exactly one must be set.
   oneof isolate_kind {
     // The Setup Isolate.
-    SetupControls setup = 8;
+    SetupControls setup = 9;
     // A Ratified Isolate.
-    RatifiedControls ratified = 9;
+    RatifiedControls ratified = 10;
     // An Opaque Isolate.
-    OpaqueControls opaque = 10;
+    OpaqueControls opaque = 11;
   }
 }
 

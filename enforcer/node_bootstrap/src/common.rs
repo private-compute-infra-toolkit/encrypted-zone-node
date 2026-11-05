@@ -70,7 +70,7 @@ pub(crate) async fn build_tls_configs(
     };
     let outbound_tls_config = OutboundTlsConfig {
         factory: mtls_manager.get_connector_factory(),
-        trust_domain: mtls_manager.spiffe_identity().trust_domain.clone(),
+        trust_domain: mtls_manager.self_identity().trust_domain.clone(),
     };
     log::info!("Successfully bootstrapped EzMtlsManager.");
     Ok((inbound_tls_config, outbound_tls_config))

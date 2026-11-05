@@ -1397,3 +1397,130 @@ async fn test_otel_traces_uds_not_mounted_for_opaque_isolate() {
     harness.stop().await;
     ensure_isolate_stopped(fake_container_id).await.expect("Container should stop");
 }
+
+#[tokio::test]
+async fn test_add_new_isolate_rolls_back_on_container_start_failure() {
+    let mut harness = TestHarness::new(
+        JSON_MANIFEST_PATH_ONE_ISOLATE,
+        &IsolateRuntimeConfigs::default(),
+        /* otel_endpoint= */ None,
+        /* operator_role= */ "".to_string(),
+    )
+    .await
+    .expect("TestHarness::new should succeed");
+
+    let isolate_and_uds_vec =
+        check_container_started(vec![HELLOWORLD_BINARY]).await.expect("Container should start");
+    assert_eq!(isolate_and_uds_vec.len(), 1);
+    let (initial_container_id, initial_uds_path) = isolate_and_uds_vec[0].clone();
+    let initial_isolate_id =
+        *harness.isolate_junction.connected_isolates.iter().next().unwrap().key();
+    ensure_isolate_ready(&mut harness, initial_uds_path, initial_isolate_id)
+        .await
+        .expect("Initial isolate should be ready");
+
+    FakeContainer::set_fail_next_start(true);
+    let reset_res = harness
+        .container_manager_requester
+        .reset_container(ResetIsolateRequest {
+            isolate_id: initial_isolate_id,
+            reset_type: ResetType::Full,
+        })
+        .await;
+    assert!(reset_res.is_err(), "reset_container should fail when FakeContainer::start fails");
+
+    let failed_uds_path = FakeContainer::get_tracker()
+        .iter()
+        .find(|entry| *entry.key() != initial_container_id)
+        .and_then(|entry| entry.value().isolate_ez_bridge_enforcer_side_uds_path.clone())
+        .expect("Failed container attempt should record probe UDS path");
+
+    let probe_connect = tokio::net::UnixStream::connect(&failed_uds_path).await;
+    let _ = std::fs::remove_file(&failed_uds_path);
+    assert!(
+        probe_connect.is_err(),
+        "IsolateEzBridge UDS server was leaked running after container.start failed"
+    );
+
+    harness.stop().await;
+    ensure_isolate_stopped(initial_container_id).await.expect("Initial container should stop");
+}
+
+#[tokio::test]
+async fn test_add_new_isolate_rolls_back_on_junction_connect_failure() {
+    let mut harness = TestHarness::new(
+        JSON_MANIFEST_PATH_ONE_ISOLATE,
+        &IsolateRuntimeConfigs::default(),
+        /* otel_endpoint= */ None,
+        /* operator_role= */ "".to_string(),
+    )
+    .await
+    .expect("TestHarness::new should succeed");
+
+    let isolate_and_uds_vec =
+        check_container_started(vec![HELLOWORLD_BINARY]).await.expect("Container should start");
+    assert_eq!(isolate_and_uds_vec.len(), 1);
+    let (initial_container_id, initial_uds_path) = isolate_and_uds_vec[0].clone();
+    let initial_isolate_id =
+        *harness.isolate_junction.connected_isolates.iter().next().unwrap().key();
+    ensure_isolate_ready(&mut harness, initial_uds_path, initial_isolate_id)
+        .await
+        .expect("Initial isolate should be ready");
+
+    harness.isolate_junction.set_fail_connect_isolate(true);
+    let reset_res = harness
+        .container_manager_requester
+        .reset_container(ResetIsolateRequest {
+            isolate_id: initial_isolate_id,
+            reset_type: ResetType::Full,
+        })
+        .await;
+    assert!(
+        reset_res.is_err(),
+        "reset_container should fail when FakeJunction::connect_isolate fails"
+    );
+
+    let failed_isolate_id = harness
+        .isolate_junction
+        .last_connect_isolate_id()
+        .expect("connect_isolate should have been called for the replacement isolate");
+    let failed_container = FakeContainer::get_tracker()
+        .iter()
+        .find(|entry| *entry.key() != initial_container_id)
+        .map(|entry| entry.value().clone())
+        .expect("Replacement FakeContainer should exist in tracker");
+    let failed_uds_path = failed_container
+        .isolate_ez_bridge_enforcer_side_uds_path
+        .clone()
+        .expect("Replacement FakeContainer should have UDS path");
+
+    assert_eq!(
+        failed_container.status,
+        Status::Stopped,
+        "Container was not stopped when add_isolate_to_junction failed"
+    );
+    assert!(
+        harness
+            .container_manager_requester
+            .get_run_status(GetRunStatusRequest { isolate_id: failed_isolate_id })
+            .await
+            .is_err(),
+        "Failed isolate was not removed from isolate_container_map"
+    );
+    assert_eq!(
+        harness.isolate_state_manager.get_isolate_state(failed_isolate_id),
+        None,
+        "Failed isolate was not removed from IsolateStateManager"
+    );
+    assert!(
+        harness.shared_memory_manager.write_to_isolate(failed_isolate_id, b"probe").await.is_err(),
+        "Failed isolate bridge buffers were not removed from SharedMemManager"
+    );
+    assert!(
+        tokio::net::UnixStream::connect(&failed_uds_path).await.is_err(),
+        "IsolateEzBridge UDS server was not stopped when add_isolate_to_junction failed"
+    );
+
+    harness.stop().await;
+    ensure_isolate_stopped(initial_container_id).await.expect("Initial container should stop");
+}
