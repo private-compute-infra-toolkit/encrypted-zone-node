@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use data_scope_proto::enforcer::v1::DataScopeType;
 use enforcer_proto::enforcer::v1::{InvokeIsolateRequest, InvokeIsolateResponse};
 use ez_error::EzError;

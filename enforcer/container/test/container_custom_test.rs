@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 mod llvm_profile;
 
 use container::{
@@ -50,18 +52,122 @@ async fn container_start_does_not_starve_spawned_uds_server() {
             handle(uds_listener, 100).await.unwrap()
         });
         container.start(&opts).await.unwrap();
-        // TODO(b/580019861): Inverted assertion; flip to
-        // `assert!(spawned_task_polled_during_start.load(Ordering::SeqCst), ...)` once
-        // `ContainerCustom::start` awaits setup pipes asynchronously.
         assert!(
-            !spawned_task_polled_during_start.load(Ordering::SeqCst),
-            "Expected synchronous pipe reads in ContainerCustom::start to block the Tokio worker thread"
+            spawned_task_polled_during_start.load(Ordering::SeqCst),
+            "ContainerCustom::start blocked the Tokio worker thread without yielding to the spawned UDS server task"
         );
         let data = server_task.await.unwrap();
         assert_eq!(data, b"EZ is cool");
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn container_does_not_leak_non_cloexec_host_fd_across_exec() {
+    let (uds_dir, uds_listener) = setup();
+    let server_handle = handle(uds_listener, 100);
+
+    let (reader, mut writer) = std::io::pipe().unwrap();
+    let leaked_fd = std::os::fd::AsRawFd::as_raw_fd(&reader);
+    // Clear FD_CLOEXEC to simulate an Enforcer file descriptor opened without O_CLOEXEC.
+    // SAFETY: `leaked_fd` is a valid open file descriptor owned by `reader`.
+    let fcntl_res = unsafe { libc::fcntl(leaked_fd, libc::F_SETFD, 0) };
+    assert_eq!(fcntl_res, 0);
+    writer.write_all(b"enforcer-secret").unwrap();
+    drop(writer);
+
+    let mut opts = default_container_opts("read-inherited-fd", Some(uds_dir.path().to_path_buf()));
+    opts.command_line_arguments.push("--inherited-fd".to_string());
+    opts.command_line_arguments.push(leaked_fd.to_string());
+
+    let mut container = default_container();
+    container.start(&opts).await.unwrap();
+    drop(reader);
+
+    let data = server_handle.await.unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&data),
+        "EBADF",
+        "Container process read from an inherited non-CLOEXEC Enforcer FD across clone + exec"
+    );
+}
+
+#[test]
+fn close_range_and_procfs_fallback_set_cloexec_and_close_fds() {
+    assert!(container_custom::close_range(10, 5, 0).is_err());
+    assert!(container_custom::close_range(3, 5, -1).is_err());
+    assert!(container_custom::close_range_procfs_fallback(10, 5, 0).is_err());
+    assert!(container_custom::close_range_procfs_fallback(3, 5, -1).is_err());
+
+    let (reader, _writer) = std::io::pipe().unwrap();
+    let fd = std::os::fd::AsRawFd::as_raw_fd(&reader);
+    let fd_u32 = fd as libc::c_uint;
+
+    // Clear FD_CLOEXEC and verify `close_range_procfs_fallback` sets it back.
+    // SAFETY: `fd` is a valid open file descriptor owned by `reader`.
+    assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFD, 0) }, 0);
+    assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC, 0);
+    container_custom::close_range_procfs_fallback(
+        fd_u32,
+        fd_u32,
+        libc::CLOSE_RANGE_CLOEXEC as libc::c_int,
+    )
+    .unwrap();
+    // SAFETY: `fd` is a valid open file descriptor owned by `reader`.
+    assert_ne!(unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC, 0);
+
+    // Clear FD_CLOEXEC again and verify `close_range` (syscall or fallback) sets it back.
+    // SAFETY: `fd` is a valid open file descriptor owned by `reader`.
+    assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFD, 0) }, 0);
+    container_custom::close_range(fd_u32, fd_u32, libc::CLOSE_RANGE_CLOEXEC as libc::c_int)
+        .unwrap();
+    // SAFETY: `fd` is a valid open file descriptor owned by `reader`.
+    assert_ne!(unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC, 0);
+
+    // Verify `flags == 0` closes the target descriptor in `close_range_procfs_fallback`.
+    // SAFETY: `fd` is a valid open file descriptor; `dup` allocates a new descriptor.
+    let dup_fd = unsafe { libc::dup(fd) };
+    assert!(dup_fd >= 0);
+    let dup_fd_u32 = dup_fd as libc::c_uint;
+    std::thread::spawn(move || {
+        container_custom::close_range_procfs_fallback(
+            dup_fd_u32,
+            dup_fd_u32,
+            libc::CLOSE_RANGE_UNSHARE as libc::c_int,
+        )
+        .unwrap();
+    })
+    .join()
+    .unwrap();
+    container_custom::close_range_procfs_fallback(dup_fd_u32, dup_fd_u32, 0).unwrap();
+    // SAFETY: `dup_fd` was just closed, so `fcntl(F_GETFD)` must return -1 with EBADF.
+    assert_eq!(unsafe { libc::fcntl(dup_fd, libc::F_GETFD) }, -1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn container_concurrent_starts_do_not_leak_pipe_fds() {
+    let root = Arc::new(utils::unpack_file_system(BUNDLE_PATH).unwrap());
+    let mut join_set = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let root_clone = Arc::clone(&root);
+        join_set.spawn(async move {
+            let (uds_dir, uds_listener) = setup();
+            let server_handle = handle(uds_listener, 100);
+            let opts = default_container_opts("send-uds", Some(uds_dir.path().to_path_buf()));
+            let mut container =
+                ContainerCustom::new(ContainerRoot::ReadOnlyRoot(root_clone), None).unwrap();
+            container.start(&opts).await.unwrap();
+            let data = server_handle.await.unwrap();
+            assert_eq!(data, b"EZ is cool");
+        });
+    }
+    while let Some(res) = time::timeout(Duration::from_secs(5), join_set.join_next())
+        .await
+        .expect("Concurrent container starts timed out due to leaked pipe FDs")
+    {
+        res.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -639,7 +745,7 @@ async fn container_missing_binary_reports_exec_failure() {
     for (opts, expected) in [
         (
             ContainerOptions { name: "bad\0name".into(), ..default_container_opts("sleep", None) },
-            "Failed to read from pipe",
+            "nul byte found in provided data",
         ),
         (
             ContainerOptions {

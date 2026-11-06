@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use binary_manifest_proto::enforcer::v2::{
     binary_manifest, BinaryManifest, IsolateDigest, RatifiedControls, SetupControls,
 };

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use fake_opentelemetry_collector::ExportedMetric;
 use std::collections::HashMap;
 

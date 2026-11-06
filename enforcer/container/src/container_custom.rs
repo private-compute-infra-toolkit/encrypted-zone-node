@@ -27,12 +27,16 @@ use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::{self, ForkResult, Pid};
 use std::ffi::NulError;
 use std::fs::OpenOptions;
-use std::io::{pipe, PipeWriter, Read, Write};
+use std::io::{pipe, PipeWriter, Write};
+use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::process::exit;
-use std::sync::{Arc, Once};
+use std::sync::{Arc, Mutex, Once};
+use std::time::Duration;
 use std::{ffi::CString, fs};
 use tempfile::TempDir;
+use tokio::io::AsyncReadExt;
+use tokio::net::unix::pipe::Receiver as AsyncPipeReceiver;
 
 pub mod seccomp;
 
@@ -44,8 +48,10 @@ const UNPRIVILEGED_UID: u32 = 1000;
 const UNPRIVILEGED_GID: u32 = 1000;
 
 const BYTES_PER_KIB: u64 = 1024;
+const CONTAINER_START_TIMEOUT: Duration = Duration::from_secs(30);
 
 static INIT_AS_SUBREAPER: Once = Once::new();
+static FORK_LOCK: Mutex<()> = Mutex::new(());
 
 enum Status {
     New,
@@ -392,9 +398,25 @@ impl ContainerCustom {
                                 format!("Failed to create dest file {}", current.display())
                             })?;
                     } else {
-                        fs::create_dir(&current).with_context(|| {
-                            format!("Failed to create dest directory {}", current.display())
-                        })?;
+                        match fs::create_dir(&current) {
+                            Ok(()) => {}
+                            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                                let meta = fs::symlink_metadata(&current).with_context(|| {
+                                    format!("Failed to read metadata for {}", current.display())
+                                })?;
+                                if meta.is_symlink() || !meta.is_dir() {
+                                    anyhow::bail!(
+                                        "Symlink or non-directory detected in mount destination at {}",
+                                        current.display()
+                                    );
+                                }
+                            }
+                            Err(err) => {
+                                return Err(err).with_context(|| {
+                                    format!("Failed to create dest directory {}", current.display())
+                                });
+                            }
+                        }
                     }
                 }
                 Err(e) => anyhow::bail!("Failed to read metadata for {}: {}", current.display(), e),
@@ -487,46 +509,86 @@ impl Container for ContainerCustom {
                     let checkpoint_dir = self.root_dir.path().join(FSR_STATE_DIR);
                     fs::create_dir_all(&checkpoint_dir)?;
                 }
-                let (mut pid_reader, pid_writer) = pipe()?;
-                let (mut status_reader, status_writer) = pipe()?;
-                return match unsafe { unistd::fork() } {
-                    Ok(ForkResult::Child) => {
-                        drop(pid_reader);
-                        drop(status_reader);
-                        let mut status_writer = status_writer;
-                        if let Err(e) = self.containerize(opts, pid_writer) {
-                            eprintln!("Error containerizing: {}", e);
-                            let _ = status_writer.write_all(e.to_string().as_bytes());
-                            std::process::exit(1);
+                let (child_pid, mut async_pid_reader, mut async_status_reader) = {
+                    // Serialize pipe creation + fork + write-end drop so concurrent
+                    // ContainerCustom::start calls do not leak open pipe write FDs into
+                    // sibling child processes (which would prevent EOF on status_reader).
+                    let fork_guard = FORK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                    let (pid_reader, pid_writer) = pipe()?;
+                    let (status_reader, status_writer) = pipe()?;
+                    match unsafe { unistd::fork() } {
+                        Ok(ForkResult::Child) => {
+                            drop(pid_reader);
+                            drop(status_reader);
+                            let mut status_writer = status_writer;
+                            // Mark all inherited descriptors >= 3 as close-on-exec so no
+                            // non-CLOEXEC host file descriptor leaks into the exec'd Isolate
+                            // binary, while keeping pid_writer, status_writer, and coverage
+                            // profile descriptors open until execve.
+                            if let Err(e) = close_range(
+                                3,
+                                libc::c_uint::MAX,
+                                libc::CLOSE_RANGE_CLOEXEC as libc::c_int,
+                            ) {
+                                eprintln!("Error marking inherited FDs close-on-exec: {}", e);
+                                let _ = status_writer.write_all(e.to_string().as_bytes());
+                                std::process::exit(1);
+                            }
+                            if let Err(e) = self.containerize(opts, pid_writer) {
+                                eprintln!("Error containerizing: {}", e);
+                                let _ = status_writer.write_all(e.to_string().as_bytes());
+                                std::process::exit(1);
+                            }
+                            if let Err(e) = self.run(opts) {
+                                eprintln!("Error running binary in container: {}", e);
+                                let _ = status_writer.write_all(e.to_string().as_bytes());
+                                std::process::exit(1);
+                            }
+                            unreachable!();
                         }
-                        if let Err(e) = self.run(opts) {
-                            eprintln!("Error running binary in container: {}", e);
-                            let _ = status_writer.write_all(e.to_string().as_bytes());
-                            std::process::exit(1);
+                        Ok(ForkResult::Parent { child }) => {
+                            drop(pid_writer);
+                            drop(status_writer);
+                            drop(fork_guard);
+                            (
+                                child,
+                                AsyncPipeReceiver::from_owned_fd(OwnedFd::from(pid_reader))?,
+                                AsyncPipeReceiver::from_owned_fd(OwnedFd::from(status_reader))?,
+                            )
                         }
-                        unreachable!();
+                        Err(e) => return Err(anyhow::anyhow!("Containerize fork failed: {}", e)),
                     }
-                    Ok(ForkResult::Parent { child: _ }) => {
-                        drop(pid_writer);
-                        drop(status_writer);
-                        // TODO(b/434355837).
-                        // Read the grandchild PID from the pipe. This is necessary since the child process
-                        // from the fork here will also fork after it creates the new namespaces.
-                        let mut buffer = [0; 4];
-                        pid_reader
-                            .read_exact(&mut buffer)
-                            .map_err(|e| anyhow::anyhow!("Failed to read from pipe: {}", e))?;
-                        self.pid = Some(Pid::from_raw(i32::from_ne_bytes(buffer)));
-                        let mut status_buf = String::new();
-                        status_reader.read_to_string(&mut status_buf)?;
-                        if !status_buf.is_empty() {
-                            return Err(anyhow::anyhow!("Child process failed: {}", status_buf));
-                        }
-                        self.status = Status::Started;
-                        Ok(())
-                    }
-                    Err(e) => Err(anyhow::anyhow!("Containerize fork failed: {}", e)),
                 };
+                let read_pipes_res = tokio::time::timeout(CONTAINER_START_TIMEOUT, async {
+                    // TODO(b/434355837).
+                    // Read the grandchild PID from the pipe. This is necessary since the child
+                    // process from the fork here will also fork after it creates the new
+                    // namespaces.
+                    let mut buffer = [0; 4];
+                    let pid_read_res = async_pid_reader.read_exact(&mut buffer).await;
+                    let mut status_buf = String::new();
+                    async_status_reader.read_to_string(&mut status_buf).await?;
+                    if !status_buf.is_empty() {
+                        return Err(anyhow::anyhow!("Child process failed: {}", status_buf));
+                    }
+                    pid_read_res.context("Failed to read from pipe")?;
+                    Ok(Pid::from_raw(i32::from_ne_bytes(buffer)))
+                })
+                .await;
+                match read_pipes_res {
+                    Ok(Ok(pid)) => {
+                        self.pid = Some(pid);
+                        self.status = Status::Started;
+                        return Ok(());
+                    }
+                    Ok(Err(e)) => return Err(e),
+                    Err(_) => {
+                        let _ = signal::kill(child_pid, Signal::SIGKILL);
+                        return Err(anyhow::anyhow!(
+                            "Timed out waiting for container child setup pipes"
+                        ));
+                    }
+                }
             }
             _ => Err(anyhow::anyhow!("Can only start a new container")),
         }
@@ -701,4 +763,106 @@ impl Container for ContainerCustom {
             _ => Err(anyhow::anyhow!("Can only reset a started container")),
         }
     }
+}
+
+/// Marks or closes file descriptors in `[first, last]` using the `close_range(2)` syscall
+/// when supported by the running kernel and seccomp filter, falling back to `/proc/self/fd`
+/// enumeration otherwise.
+// TODO(b/580019861): Use the `close_range(2)` syscall (`libc::close_range`) exclusively and
+// remove `close_range_procfs_fallback` once all build, test, and production host kernels and
+// container seccomp profiles support `close_range` with `CLOSE_RANGE_CLOEXEC` (Linux 5.11+).
+pub fn close_range(
+    first: libc::c_uint,
+    last: libc::c_uint,
+    flags: libc::c_int,
+) -> anyhow::Result<()> {
+    let supported_flags = (libc::CLOSE_RANGE_CLOEXEC | libc::CLOSE_RANGE_UNSHARE) as libc::c_int;
+    if first > last || (flags & !supported_flags) != 0 {
+        anyhow::bail!("Invalid arguments to close_range: {}", Errno::EINVAL);
+    }
+
+    // SAFETY: `libc::close_range` only modifies file descriptor table state for `[first, last]`.
+    if unsafe { libc::close_range(first, last, flags) } == 0 {
+        return Ok(());
+    }
+
+    match Errno::last() {
+        // Fall back to user-space `/proc/self/fd` traversal if the kernel or container seccomp
+        // profile does not support `close_range(2)` (`ENOSYS`/`EPERM`) or `CLOSE_RANGE_CLOEXEC`
+        // (`EINVAL` on Linux 5.9-5.10, since `first <= last` and `flags` were validated above).
+        Errno::ENOSYS | Errno::EPERM | Errno::EINVAL => {
+            close_range_procfs_fallback(first, last, flags)
+        }
+        err => anyhow::bail!("close_range syscall failed: {}", err),
+    }
+}
+
+/// User-space implementation of the `close_range(2)` syscall interface using `/proc/self/fd`.
+///
+/// Supports `flags == 0` (closes descriptors in `[first, last]`), `libc::CLOSE_RANGE_CLOEXEC`
+/// (sets `FD_CLOEXEC` on descriptors in `[first, last]` without closing them immediately), and
+/// `libc::CLOSE_RANGE_UNSHARE` (unshares the file descriptor table before acting).
+// TODO(b/580019861): Remove this fallback once `libc::close_range` with `CLOSE_RANGE_CLOEXEC` is
+// available across all environments.
+pub fn close_range_procfs_fallback(
+    first: libc::c_uint,
+    last: libc::c_uint,
+    flags: libc::c_int,
+) -> anyhow::Result<()> {
+    let supported_flags = (libc::CLOSE_RANGE_CLOEXEC | libc::CLOSE_RANGE_UNSHARE) as libc::c_int;
+    if first > last || (flags & !supported_flags) != 0 {
+        anyhow::bail!("Invalid arguments to close_range: {}", Errno::EINVAL);
+    }
+
+    if (flags & (libc::CLOSE_RANGE_UNSHARE as libc::c_int)) != 0 {
+        sched::unshare(CloneFlags::CLONE_FILES)
+            .map_err(|e| anyhow::anyhow!("Failed to unshare files in close_range: {}", e))?;
+    }
+
+    // Collect open FDs from `/proc/self/fd` first so the temporary `ReadDir` descriptor
+    // is closed before we mutate or close descriptors in `[first, last]`.
+    let mut target_fds = Vec::new();
+    for entry in
+        fs::read_dir("/proc/self/fd").context("Failed to read /proc/self/fd in close_range")?
+    {
+        let entry = entry.context("Failed to read /proc/self/fd entry in close_range")?;
+        if let Some(fd) = entry.file_name().to_str().and_then(|s| s.parse::<libc::c_uint>().ok()) {
+            if fd >= first && fd <= last {
+                target_fds.push(fd);
+            }
+        }
+    }
+
+    let set_cloexec = (flags & (libc::CLOSE_RANGE_CLOEXEC as libc::c_int)) != 0;
+    for fd in target_fds {
+        let raw_fd = fd as libc::c_int;
+        if set_cloexec {
+            // SAFETY: `fcntl(F_GETFD)` reads descriptor flags without side effects.
+            let fd_flags = unsafe { libc::fcntl(raw_fd, libc::F_GETFD) };
+            if fd_flags < 0 {
+                let err = Errno::last();
+                if err == Errno::EBADF {
+                    continue;
+                }
+                anyhow::bail!("fcntl(F_GETFD) failed on fd {}: {}", raw_fd, err);
+            }
+            // SAFETY: `fcntl(F_SETFD)` sets `FD_CLOEXEC` on an open file descriptor.
+            if unsafe { libc::fcntl(raw_fd, libc::F_SETFD, fd_flags | libc::FD_CLOEXEC) } < 0 {
+                let err = Errno::last();
+                if err != Errno::EBADF {
+                    anyhow::bail!("fcntl(F_SETFD) failed on fd {}: {}", raw_fd, err);
+                }
+            }
+        } else {
+            // SAFETY: `close` closes the descriptor in `[first, last]` as requested by `flags == 0`.
+            if unsafe { libc::close(raw_fd) } < 0 {
+                let err = Errno::last();
+                if err != Errno::EBADF {
+                    anyhow::bail!("close failed on fd {}: {}", raw_fd, err);
+                }
+            }
+        }
+    }
+
+    Ok(())
 }

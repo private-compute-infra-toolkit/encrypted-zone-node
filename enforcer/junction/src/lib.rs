@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// TODO(b/581995848): Replace unwrap with non-panicking error handling.
+#![allow(clippy::unwrap_used)]
+
 use data_scope::error::DataScopeError;
 use data_scope::manifest_validator::ManifestValidator;
 use data_scope::request::{
@@ -38,6 +41,7 @@ use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{metadata::MetadataValue, Request, Status, Streaming};
 use traces::context::inject_trace_context;
+#[deny(clippy::unwrap_used)]
 pub mod error;
 use dashmap::DashMap;
 use data_scope::data_scope_validator::{

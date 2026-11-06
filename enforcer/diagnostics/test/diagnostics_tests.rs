@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use console_helper::ConsoleHelperService;
 use diagnostics::{EnforcerDiagnosticService, EnforcerPprofService, TokioDiagnosticService};
 use diagnostics_proto::enforcer::diagnostics::v1::diagnostic_service_client::DiagnosticServiceClient;

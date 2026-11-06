@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use external_proxy_connector::ExternalProxyChannel;
 use fake_opentelemetry_collector::FakeCollectorServer;
 use isolate_info::{BinaryServicesIndex, IsolateId};

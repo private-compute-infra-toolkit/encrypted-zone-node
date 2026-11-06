@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// TODO(b/581995848): Replace expect with non-panicking error handling.
+#![allow(clippy::expect_used)]
+
 use anyhow::{Context, Result};
 use manifest_proto::enforcer::v1::ez_manifest::ManifestType;
 use manifest_proto::enforcer::v1::{

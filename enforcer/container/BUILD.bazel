@@ -113,8 +113,6 @@ rust_test(
         "test/container_custom_test.rs",
         "test/llvm_profile.rs",
     ],
-    # Serialize tests to avoid leaking open write file descriptors across concurrent fork calls.
-    args = ["--test-threads=1"],
     data = ["//enforcer/container/test_data:test_bundle"],
     tags = ["require_privileged"],
     deps = [

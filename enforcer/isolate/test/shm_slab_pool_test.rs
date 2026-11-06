@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use payload_proto::enforcer::v1::ShmSlotReference;
 use shm_slab_pool::{ShmSlabPool, ShmSlabPoolError, ShmSlabPoolOptions};
 use std::os::unix::fs::FileExt;

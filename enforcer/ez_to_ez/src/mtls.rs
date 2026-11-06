@@ -519,7 +519,6 @@ impl EzMtlsManager {
 
         // Same verification as acceptor but without fail_if_no_peer_cert (the server provides it).
         connector.set_verify_callback(SslVerifyMode::PEER, self.build_verify_spiffe_uri_callback());
-        connector.set_verify_depth(2);
         connector.set_alpn_protos(ALPN_H2_WIRE)?;
         Ok(connector.build())
     }

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use enforcer_proto::enforcer::v1::{
     ControlPlaneMetadata, InvokeIsolateRequest, InvokeIsolateResponse,
 };
@@ -132,24 +134,24 @@ fn test_extract_sni_params_v1() {
 
 #[derive(Clone)]
 struct MockMtlsService {
-    leaf_der: Vec<u8>,
-    root_der: Vec<u8>,
+    certs: Vec<Vec<u8>>,
     reported_snis: std::sync::Arc<tokio::sync::Mutex<Vec<Vec<String>>>>,
 }
 
 impl MockMtlsService {
     pub fn new() -> Self {
         Self {
-            leaf_der: include_bytes!("testdata/leaf.der").to_vec(),
-            root_der: include_bytes!("testdata/root.der").to_vec(),
+            certs: vec![
+                include_bytes!("testdata/leaf.der").to_vec(),
+                include_bytes!("testdata/root.der").to_vec(),
+            ],
             reported_snis: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         }
     }
 
     pub fn with_leaf_der(leaf_der: Vec<u8>) -> Self {
         Self {
-            leaf_der,
-            root_der: include_bytes!("testdata/root.der").to_vec(),
+            certs: vec![leaf_der, include_bytes!("testdata/root.der").to_vec()],
             reported_snis: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         }
     }
@@ -191,7 +193,7 @@ impl EzMtlsService for MockMtlsService {
         _request: Request<GetCertificateRequest>,
     ) -> Result<Response<GetCertificateResponse>, Status> {
         Ok(Response::new(GetCertificateResponse {
-            certs: vec![self.leaf_der.clone(), self.root_der.clone()],
+            certs: self.certs.clone(),
             ..Default::default()
         }))
     }
@@ -1246,6 +1248,60 @@ async fn test_outbound_per_unary_tls_channel_enabled_vs_disabled() {
     ctx.server_task.abort();
 }
 
+#[tokio::test]
+async fn test_tls_acceptor_connector_deep_cert_chain() {
+    let mut certs: Vec<Vec<u8>> =
+        boring::x509::X509::stack_from_pem(DEEP_CERT_CHAIN_PEM.as_bytes())
+            .expect("Failed to parse DEEP_CERT_CHAIN_PEM")
+            .into_iter()
+            .map(|c| c.to_der().expect("Failed to convert certificate to DER"))
+            .collect();
+    certs.push(include_bytes!("testdata/root.der").to_vec());
+
+    let (tx, rx) = oneshot::channel();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server_addr = format!("http://{}", listener.local_addr().unwrap());
+    let service = MockMtlsService { certs, ..MockMtlsService::new() };
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(EzMtlsServiceServer::new(service))
+            .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
+                rx.await.ok();
+            })
+            .await
+            .unwrap();
+    });
+
+    let config = EzMtlsManagerConfig::new_with_proxy(
+        "enforcer/ez_to_ez/test/testdata/leaf.key".to_string(),
+        "enforcer/ez_to_ez/test/testdata/leaf.csr".to_string(),
+        server_addr,
+        None,
+    );
+    let manager = EzMtlsManager::build(config).await.expect("Failed to build EzMtlsManager");
+    let acceptor = manager.create_tls_acceptor().await.expect("Failed to create TLS acceptor");
+    let connector = manager
+        .get_connector_factory()
+        .create_connector()
+        .await
+        .expect("Failed to create TLS connector");
+
+    let (client_stream, server_stream) = tokio::io::duplex(16 * 1024);
+    let (server_res, client_res) = tokio::join!(
+        tokio_boring::accept(&acceptor, server_stream),
+        tokio_boring::connect(
+            connector.configure().unwrap().verify_hostname(false),
+            "localhost",
+            client_stream,
+        ),
+    );
+    let server_tls = server_res.expect("Server failed to accept TLS");
+    let client_tls = client_res.expect("Client failed to connect TLS");
+    assert_eq!(server_tls.ssl().selected_alpn_protocol(), Some(&b"h2"[..]));
+    assert_eq!(client_tls.ssl().selected_alpn_protocol(), Some(&b"h2"[..]));
+    let _ = tx.send(());
+}
+
 fn extract_first_datagram(res: enforcer_proto::enforcer::v1::InvokeEzResponse) -> Vec<u8> {
     match res.ez_response_payload.unwrap().delivery_method.unwrap() {
         DeliveryMethod::InlineData(inline) => inline.datagrams[0].clone(),
@@ -1289,3 +1345,57 @@ fn start_counting_tls_uds_server(
     });
     (addr, tls_handshakes, task)
 }
+
+// Leaf (testdata/leaf.csr) + 3 intermediate CAs (int-3 -> int-2 -> int-1) signed by testdata/root.key.
+const DEEP_CERT_CHAIN_PEM: &str = "\
+-----BEGIN CERTIFICATE-----
+MIICzjCCAnOgAwIBAgIBZDAKBggqhkjOPQQDAjAQMQ4wDAYDVQQDDAVpbnQtMzAe
+Fw0yNTAxMDEwMDAwMDBaFw0zNjAxMDEwMDAwMDBaMFYxCzAJBgNVBAYTAlVTMQsw
+CQYDVQQIDAJXQTEQMA4GA1UEBwwHU2VhdHRsZTEPMA0GA1UECgwGR29vZ2xlMRcw
+FQYDVQQLDA5Qcml2YWN5U2FuZGJveDCCASIwDQYJKoZIhvcNAQEBBQADggEPADCC
+AQoCggEBAJ3TIWzi5XLZcaB6LkgrhBFUAU0634RScPQgs2Lkhpji6PDbklui4vfe
++JnLWPp1Yp3f9SXDomA8giasYNTRTf34Rnoug+NOESkJ6xK58I0+cb0YG3ZrvACZ
+eut64+vlH2XpAiE74S3waFZZDpq+TWE8oedbnk+YJufFUIyOjZfrWczShmTAlegE
+HADPF//Sq5lQPAvSWUF2w2+w/8cRY757jCjCx4By78hZCNKXfo9rGsQlmKDer4SR
+RPuQvKAVKsdrLO7Z3Bf6/203pWs6EzApo171Xb4LkDGfhxz7D7lP/5Y3JL0/MlXs
+nTk4ShAG+P4RH0svMEBYcFkJsLDfGncCAwEAAaOBrDCBqTCBpgYDVR0RBIGeMIGb
+hoGGc3BpZmZlOi8vYXZzLnRjYS5mYWtlY2Evb3BlcmF0b3IvcHJpdmFjeS1zYW5k
+Ym94LWRldi1qb2JzQHByb2QuZ29vZ2xlLmNvbS9wdWJsaXNoZXIvcmVsZWFzZUBn
+b29nbGUuY29tL3dvcmtsb2FkL2VuY3J5cHRlZC16b25lL3YvMS4wLjCCECouYXZz
+LnRjYS5mYWtlY2EwCgYIKoZIzj0EAwIDSQAwRgIhAKavf3xkDmpkJQ8Ou0pC/Vk7
+HbEWwW6JklpPJ3p0XlurAiEA2BecJv5aK/5zoqIe3flR5nS/f6ueZfpjuHJ0LUn+
+7S4=
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIBMjCB2KADAgECAgEDMAoGCCqGSM49BAMCMBAxDjAMBgNVBAMMBWludC0yMB4X
+DTI1MDEwMTAwMDAwMFoXDTM2MDEwMTAwMDAwMFowEDEOMAwGA1UEAwwFaW50LTMw
+WTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAAQcLJwgR54rVm4x1eg7BXSDTrPuvvy1
+j+poC8hNZ0+bdHbdlLjQ2J3G12DXAa7QukLDpqOmMRhbQ9xvue1oS1aXoyMwITAP
+BgNVHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwIBBjAKBggqhkjOPQQDAgNJADBG
+AiEA0dJDpMn5tJDIWv7DVq+EnxWLBFyhATfBcgmY3dIRkZYCIQCWM/48XehJr1p0
+T0L8FTXpRc1hrKjHKH7jYEK8WtBmCQ==
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIBMDCB2KADAgECAgECMAoGCCqGSM49BAMCMBAxDjAMBgNVBAMMBWludC0xMB4X
+DTI1MDEwMTAwMDAwMFoXDTM2MDEwMTAwMDAwMFowEDEOMAwGA1UEAwwFaW50LTIw
+WTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAAQzlBZ8AhocNOGRv5AmJrNqKQn73WEh
+vO6IQ8/GmK91tBdY/w/RdQMwmkAi0n54sXe24UeXKUB07js1pregDCqQoyMwITAP
+BgNVHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwIBBjAKBggqhkjOPQQDAgNHADBE
+AiBD16kAZM3Zh1SP46Ympf2Zc+UzzVjTsMZfG7ITCufQ9QIgRs5UMH8yizu/ygQk
+FdReYMP1Du2lwkQQHUDF4UwZ7rY=
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIICOTCCASGgAwIBAgIBATANBgkqhkiG9w0BAQsFADBWMQswCQYDVQQGEwJVUzEL
+MAkGA1UECAwCV0ExEDAOBgNVBAcMB1NlYXR0bGUxDzANBgNVBAoMBkdvb2dsZTEX
+MBUGA1UECwwOUHJpdmFjeVNhbmRib3gwHhcNMjUwMTAxMDAwMDAwWhcNMzYwMTAx
+MDAwMDAwWjAQMQ4wDAYDVQQDDAVpbnQtMTBZMBMGByqGSM49AgEGCCqGSM49AwEH
+A0IABOFDoVkivvv+FkGWIFBJZMohfotkZG9SrdhuoFN4nt9Mj4tl4rZNxa6JQHDc
+Sd7m0kAJ/2ZOEE4Z58JZK5vIAOSjIzAhMA8GA1UdEwEB/wQFMAMBAf8wDgYDVR0P
+AQH/BAQDAgEGMA0GCSqGSIb3DQEBCwUAA4IBAQANyRRWo26E06KnFzOcxL8yjB/l
+niiQlT1stYZM0KgYCYJbkNyUEHHR6dWlulyBNxPGgn/Z2Fl6JODJsM63ek48LQ0Z
+TcApuIehi5lBPv0F+5u9Mmwbu7OQc9rSBwGHvi5MIJDtd5aUAvS9XhvcGGELa0zf
+igcmzYlrKIPwDx7fAXo7OsdUMxptq8C310fkSCm0FEJRpd7eEfZZGZmvKDJZvaYV
+Gy7q5kUanaBOds5cg9C6ByXu2p2dv/eJglQWBpmy6GgJgCAb68ujM/wfI4X2ApUu
+If963vruIjbjEef6zDujoz7tVnN+4+mI54Sl+J+0J03gII/uR80XikgL7Gdp
+-----END CERTIFICATE-----
+";

@@ -7,6 +7,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use grpc_connector::GrpcChannelPool;
 use grpc_connector::{connect_tls_from_env, get_grpc_timeout_or_log, try_parse_grpc_timeout};
 use grpc_connector_test_proto::enforcer::grpc_connector::test::{

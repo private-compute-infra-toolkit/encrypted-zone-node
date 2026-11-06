@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// TODO(b/581995848): Replace expect with non-panicking error handling.
+#![allow(clippy::expect_used)]
+
 use anyhow::{ensure, Context, Result};
 use binary_manifest_proto::enforcer::v2::{binary_manifest, BinaryManifest};
 use opaque_isolate_manifest_proto::enforcer::v2::OpaqueIsolateManifest;

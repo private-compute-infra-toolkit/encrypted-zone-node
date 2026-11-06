@@ -11,6 +11,9 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use fake_opentelemetry_collector::FakeCollectorServer;
 use metrics::ez_to_ez_outbound::EzToEzOutboundMetrics;
 use metrics::setup_otel_metrics;

@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## 0.32.0 (2026-11-06)
+
+
+### EZ Policy Enforcer
+
+* **enforcer:** await setup pipes asynchronously in ContainerCustom
+* **enforcer:** check status pipe before propagating PID pipe EOF
+* **enforcer:** Improve pipe handling
+* **enforcer:** log report.are_isolates_ready in HealthManager
+
+
+### mTLS
+
+* **mtls:** remove verify_depth restriction
+
 ## 0.31.0 (2026-11-05)
 
 

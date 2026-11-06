@@ -11,6 +11,10 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+// TODO(b/581995848): Replace unwrap with non-panicking error handling.
+#![allow(clippy::unwrap_used)]
+
 pub mod logger {
     #[cfg(feature = "debug")]
     // Sets up logging to console.

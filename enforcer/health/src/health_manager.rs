@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// TODO(b/581995848): Replace unwrap with non-panicking error handling.
+#![allow(clippy::unwrap_used)]
+
 use container_manager_requester::ContainerManagerRequester;
 use data_scope::request::GetIsolateScopeRequest;
 use data_scope::requester::DataScopeRequester;
@@ -130,10 +133,7 @@ impl HealthManager {
                     log::info!("    {}", format_isolate_health(isolate));
                 }
             }
-            log::info!(
-                "[Health Manager] All Isolates are Ready: {}",
-                report.isolates.iter().all(|i| i.state == Some(IsolateState::Ready as i32))
-            );
+            log::info!("[Health Manager] All Isolates are Ready: {}", report.are_isolates_ready);
         }
         let mut latest = self.latest_report.write().await;
         *latest = report;

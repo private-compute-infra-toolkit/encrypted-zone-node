@@ -29,6 +29,7 @@ licenses(["notice"])
 
 exports_files([
     "LICENSE",
+    ".clippy.toml",
     ".rustfmt.toml",
     "version.txt",
 ])

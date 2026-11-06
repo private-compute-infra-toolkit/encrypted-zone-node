@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use container::{Container, ContainerRunStatus};
 use container_manager::sanitize_path_component;
 use container_manager_request::{

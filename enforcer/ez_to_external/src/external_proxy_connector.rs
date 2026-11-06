@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// TODO(b/581995848): Replace unwrap with non-panicking error handling.
+#![allow(clippy::unwrap_used)]
+
 use crate::types::{ExternalProxyChannel, ExternalProxyConnectorError};
 use data_scope::data_scope_validator::validate_external_call;
 use enforcer_proto::enforcer::v1::{

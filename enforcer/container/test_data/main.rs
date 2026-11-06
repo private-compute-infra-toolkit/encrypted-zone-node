@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use clap::{Parser, ValueEnum};
 use memmap2::{Mmap, MmapMut};
 use rand::Rng;
@@ -48,12 +50,15 @@ enum Operation {
     VerifyEzMount,
     GetUid,
     TryMkdir,
+    ReadInheritedFd,
 }
 
 #[derive(Parser)]
 struct Args {
     #[arg(long, required = false, value_enum, default_value_t = Operation::default())]
     operation: Operation,
+    #[arg(long, required = false)]
+    inherited_fd: Option<i32>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -252,6 +257,24 @@ fn main() -> anyhow::Result<()> {
             } else {
                 let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
                 stream.write_all(err.to_string().as_bytes())?;
+            }
+        }
+        Operation::ReadInheritedFd => {
+            let mut stream = UnixStream::connect(UDS_PATH)?;
+            let fd = args.inherited_fd.unwrap_or(-1);
+            let mut buf = [0u8; 64];
+            // SAFETY: `buf` is a valid stack buffer of length `buf.len()`, and `libc::read`
+            // returns -1 with `errno = EBADF` when `fd` is not an open descriptor.
+            let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+            if n >= 0 {
+                let mut msg = b"leaked:".to_vec();
+                msg.extend_from_slice(&buf[..n as usize]);
+                stream.write_all(&msg)?;
+            } else if std::io::Error::last_os_error().raw_os_error() == Some(libc::EBADF) {
+                stream.write_all(b"EBADF")?;
+            } else {
+                let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+                stream.write_all(format!("errno:{errno}").as_bytes())?;
             }
         }
     }

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use ez_error_trait::ToEzError;
 use isolate_info::InstanceIdGenerator;
 use manifest_proto::enforcer::v1::{

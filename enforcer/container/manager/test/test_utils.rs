@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use anyhow::{ensure, Context, Result};
 use common_proto::enforcer::v2::IsolateType;
 use container_manager::{ContainerManager, ContainerManagerArgs, ManifestSource};

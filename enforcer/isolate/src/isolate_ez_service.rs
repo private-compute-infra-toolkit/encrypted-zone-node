@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// TODO(b/581995848): Replace unwrap with non-panicking error handling.
+#![allow(clippy::unwrap_used)]
+
 use data_scope::data_scope_validator::{
     get_strictest_scope, replace_and_validate_invoke_ez_request_scopes,
 };

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use container_manager_request::{ContainerManagerRequest, ResetIsolateResponse};
 use container_manager_requester::ContainerManagerRequester;
 use data_scope::request::{
