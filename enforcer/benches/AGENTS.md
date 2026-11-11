@@ -1,4 +1,4 @@
-# Gemini Context: //enforcer/benches
+# Agent Context: //enforcer/benches
 
 This directory contains microbenchmarks for the Enforcer component, primarily using the Criterion.rs
 library.

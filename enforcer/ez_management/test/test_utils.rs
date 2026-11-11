@@ -24,16 +24,17 @@ use data_scope::requester::DataScopeRequester;
 use enforcer_proto::enforcer::v1::{InvokeIsolateRequest, InvokeIsolateResponse};
 use ez_error::EzError;
 use ez_management::{
-    EzManagementClient, EzManagementError, IsolateStartupParameters, LoadIsolatesError,
+    package_utils, EzManagementClient, EzManagementError, IsolateStartupParameters,
+    LoadIsolatesError,
 };
 use ez_management_proto::enforcer::v2::ez_management_service_server::{
     EzManagementService, EzManagementServiceServer,
 };
 use ez_management_proto::enforcer::v2::{
-    load_isolates_request, load_isolates_response, AllPackagesLoadedResponse,
-    FetchIsolateStartupParametersRequest, FetchIsolateStartupParametersResponse,
-    FetchOperatorInfoRequest, FetchOperatorInfoResponse, IsolatePackageChunk, LoadIsolatesRequest,
-    LoadIsolatesResponse, OperatorInfo, RatifiedIsolateManifestPayload,
+    ez_manifest, load_isolates_request, load_isolates_response, AllPackagesLoadedResponse,
+    BundleManifest, EndorsedBinaryManifest, EzManifest, FetchIsolateStartupParametersRequest,
+    FetchIsolateStartupParametersResponse, FetchOperatorInfoRequest, FetchOperatorInfoResponse,
+    IsolatePackageChunk, LoadIsolatesRequest, LoadIsolatesResponse, OperatorInfo,
 };
 use fileshare_manager::FileshareManager;
 use interceptor::Interceptor;
@@ -43,14 +44,10 @@ use isolate_service_mapper::IsolateServiceMapper;
 use junction_test_utils::FakeJunction;
 use junction_trait::Junction;
 use manifest_proto::enforcer::v1::IsolateRuntimeConfigs;
-use opaque_isolate_manifest_proto::enforcer::v2::{OpaqueIsolateDescriptor, OpaqueIsolateManifest};
 use payload_proto::enforcer::v1::{
     ez_hybrid_payload::DeliveryMethod, EzHybridPayload, EzPayloadData,
 };
 use prost::Message;
-use ratified_isolate_manifest_proto::enforcer::v2::{
-    RatifiedIsolateDescriptor, RatifiedIsolateManifest,
-};
 use setup_isolate_client::SetupIsolateClient;
 use setup_isolate_proto::enforcer::v2::{
     ValidateIsolateEndorsementRequest, ValidateIsolateEndorsementResponse as SetupValidateResponse,
@@ -168,6 +165,20 @@ impl TestContext {
             }
         }
         panic!("No LoadIsolatesResult found in received requests");
+    }
+
+    /// Returns the LoadIsolatesResults in the order the client sent them.
+    pub async fn get_load_results(
+        &self,
+    ) -> Vec<ez_management_proto::enforcer::v2::LoadIsolatesResult> {
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        let reqs = self.received_requests.lock().unwrap().clone();
+        reqs.into_iter()
+            .filter_map(|req| match req.request {
+                Some(load_isolates_request::Request::LoadIsolatesResult(res)) => Some(res),
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -520,9 +531,8 @@ pub async fn setup_test_context_with_client(
 }
 
 pub const RATIFIED_PUBLISHER_ID: &str = "EZ_Trusted";
-pub const OPAQUE_PUBLISHER_ID: &str = "adtech.com";
+pub const OPAQUE_PUBLISHER_ID: &str = "release-bot@adtech.com";
 
-/// Identity of an Isolate published in the ratified manifest.
 pub fn ratified_isolate_type(isolate_name: &str) -> IsolateType {
     IsolateType {
         isolate_name: isolate_name.to_string(),
@@ -530,7 +540,6 @@ pub fn ratified_isolate_type(isolate_name: &str) -> IsolateType {
     }
 }
 
-/// Identity of an Isolate published in the opaque manifest.
 pub fn opaque_isolate_type(isolate_name: &str) -> IsolateType {
     IsolateType {
         isolate_name: isolate_name.to_string(),
@@ -538,46 +547,68 @@ pub fn opaque_isolate_type(isolate_name: &str) -> IsolateType {
     }
 }
 
-pub fn create_ratified_manifest(
-    isolate_name: &str,
-    package_filename: &str,
-) -> RatifiedIsolateManifest {
-    RatifiedIsolateManifest {
-        ratified_isolate_descriptors: vec![RatifiedIsolateDescriptor {
-            isolate_type: Some(ratified_isolate_type(isolate_name)),
-            package_filename: package_filename.to_string(),
-            binary_filename: format!("main_{isolate_name}"),
-            ..Default::default()
-        }],
-    }
+/// Builds a JSON-encoded BinaryManifest for `kind` ("setup", "ratified", or "opaque")
+/// with `isolateDigest.packageSha256` set to the SHA-256 digest of `package`.
+pub fn create_binary_manifest_json(
+    isolate_type: &IsolateType,
+    kind: &str,
+    package: &[u8],
+) -> Vec<u8> {
+    format!(
+        r#"{{
+            "isolateType": {{
+                "isolateName": {isolate_name:?},
+                "publisherId": {publisher_id:?}
+            }},
+            "isolateDigest": {{"packageSha256": {package_sha256:?}}},
+            "binaryFilename": "main_{isolate_name}",
+            {kind:?}: {{}}
+        }}"#,
+        isolate_name = isolate_type.isolate_name,
+        publisher_id = isolate_type.publisher_id,
+        package_sha256 = package_utils::calculate_sha256(package),
+    )
+    .into_bytes()
 }
 
-pub fn create_opaque_manifest(isolate_name: &str, package_filename: &str) -> OpaqueIsolateManifest {
-    OpaqueIsolateManifest {
-        opaque_isolate_descriptors: vec![OpaqueIsolateDescriptor {
-            isolate_type: Some(opaque_isolate_type(isolate_name)),
-            package_filename: package_filename.to_string(),
-            binary_filename: format!("main_{isolate_name}"),
-            ..Default::default()
-        }],
-    }
+pub fn create_endorsed_manifest(binary_manifest_json: Vec<u8>) -> EndorsedBinaryManifest {
+    EndorsedBinaryManifest { binary_manifest_json, binary_manifest_endorsements: vec![] }
 }
 
-pub fn create_ratified_response(manifest: RatifiedIsolateManifest) -> LoadIsolatesResponse {
+pub fn create_ratified_manifest(isolate_name: &str) -> EndorsedBinaryManifest {
+    create_endorsed_manifest(create_binary_manifest_json(
+        &ratified_isolate_type(isolate_name),
+        "ratified",
+        VALID_TAR,
+    ))
+}
+
+pub fn create_opaque_manifest(isolate_name: &str) -> EndorsedBinaryManifest {
+    create_endorsed_manifest(create_binary_manifest_json(
+        &opaque_isolate_type(isolate_name),
+        "opaque",
+        VALID_TAR,
+    ))
+}
+
+pub fn create_bundle_response(
+    binary_manifests: Vec<EndorsedBinaryManifest>,
+) -> LoadIsolatesResponse {
+    create_bundle_response_from_entries(
+        binary_manifests.into_iter().map(binary_manifest_entry).collect(),
+    )
+}
+
+pub fn create_bundle_response_from_entries(manifests: Vec<EzManifest>) -> LoadIsolatesResponse {
     LoadIsolatesResponse {
-        response: Some(load_isolates_response::Response::RatifiedIsolateManifest(
-            RatifiedIsolateManifestPayload {
-                manifest: Some(manifest),
-                manifest_endorsements: vec![],
-            },
-        )),
+        response: Some(load_isolates_response::Response::BundleManifest(BundleManifest {
+            manifests,
+        })),
     }
 }
 
-pub fn create_opaque_response(manifest: OpaqueIsolateManifest) -> LoadIsolatesResponse {
-    LoadIsolatesResponse {
-        response: Some(load_isolates_response::Response::OpaqueIsolateManifest(manifest)),
-    }
+pub fn binary_manifest_entry(manifest: EndorsedBinaryManifest) -> EzManifest {
+    EzManifest { manifest: Some(ez_manifest::Manifest::BinaryManifest(manifest)) }
 }
 
 pub fn create_chunk_response(
@@ -621,6 +652,14 @@ pub fn create_mock_container_manager_requester(
 ) -> ContainerManagerRequester {
     let (container_manager_request_tx, mut rx) =
         mpsc::channel::<ContainerManagerRequest>(CHANNEL_SIZE);
+    // Provide a succeeding SetupIsolateClient so load_packages() passes manifest endorsement
+    // validation and reaches the ContainerManager calls under test.
+    let setup_client = SetupIsolateClient::new(
+        Box::new(MockSetupIsolateJunction::new_success()),
+        RATIFIED_PUBLISHER_ID.to_string(),
+        "setup".to_string(),
+        "SetupService".to_string(),
+    );
     tokio::spawn(async move {
         while let Some(req) = rx.recv().await {
             match req {
@@ -639,7 +678,7 @@ pub fn create_mock_container_manager_requester(
                 ContainerManagerRequest::GetSetupIsolateClient { resp } => {
                     let _ =
                         resp.send(Ok(container_manager_request::GetSetupIsolateClientResponse {
-                            client: None,
+                            client: Some(setup_client.clone()),
                         }));
                 }
                 _ => {}
@@ -649,12 +688,6 @@ pub fn create_mock_container_manager_requester(
     ContainerManagerRequester::new(container_manager_request_tx)
 }
 
-pub fn create_single_ratified_manifest_responses(
-    isolate_name: &str,
-    package_filename: &str,
-) -> Vec<LoadIsolatesResponse> {
-    vec![
-        create_ratified_response(create_ratified_manifest(isolate_name, package_filename)),
-        create_opaque_response(OpaqueIsolateManifest::default()),
-    ]
+pub fn create_single_ratified_manifest_responses(isolate_name: &str) -> Vec<LoadIsolatesResponse> {
+    vec![create_bundle_response(vec![create_ratified_manifest(isolate_name)])]
 }

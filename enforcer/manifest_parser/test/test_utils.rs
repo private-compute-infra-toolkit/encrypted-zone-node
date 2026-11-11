@@ -13,17 +13,14 @@
 // limitations under the License.
 
 use anyhow::Result;
-use manifest_parser::v2::{
-    parse_opaque_isolate_manifest, parse_ratified_isolate_manifest, WorkloadManifests,
-};
+use manifest_parser::v2::{load_binary_manifest, WorkloadManifests};
 use std::path::Path;
 
 /// Loads and parses workload isolate manifests from JSON file paths for test harnesses.
 pub fn load_workload_manifests_from_paths(
-    ratified_path: Option<impl AsRef<Path>>,
-    opaque_path: Option<impl AsRef<Path>>,
+    manifest_paths: &[impl AsRef<Path>],
 ) -> Result<WorkloadManifests> {
-    let ratified = ratified_path.map(parse_ratified_isolate_manifest).transpose()?;
-    let opaque = opaque_path.map(parse_opaque_isolate_manifest).transpose()?;
-    Ok(WorkloadManifests::new(ratified, opaque))
+    let binary_manifests =
+        manifest_paths.iter().map(load_binary_manifest).collect::<Result<Vec<_>>>()?;
+    Ok(WorkloadManifests::new(binary_manifests))
 }

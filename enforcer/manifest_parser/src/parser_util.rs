@@ -12,22 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{ensure, Context, Result};
 use binary_manifest_proto::enforcer::v2::{binary_manifest, BinaryManifest, IsolateDigest};
 use common_proto::enforcer::v2::IsolateType;
 use ez_backend_dependencies_proto::enforcer::v2::EzBackendDependency as EzBackendDependencyV2;
 use ez_service_spec_proto::enforcer::v2::EzServiceSpec as EzServiceSpecV2;
 use intercepting_services_proto::enforcer::v2::InterceptingServices as InterceptingServicesV2;
 use isolate_metrics_policy_proto::enforcer::v2::IsolateMetricsPolicy as IsolateMetricsPolicyV2;
-use isolate_startup_parameters_proto::enforcer::v2::IsolateStartupParameters;
 use manifest_proto::enforcer::v1::{
     AllowedMetric, EzBackendDependency, EzMethodSpec, EzServiceSpec, InterceptingServices,
     IsolateMetricsPolicy,
 };
-use opaque_isolate_manifest_proto::enforcer::v2::OpaqueIsolateDescriptor;
 use prost_reflect::prost::Message;
 use prost_reflect::{DescriptorPool, DynamicMessage};
-use ratified_isolate_manifest_proto::enforcer::v2::RatifiedIsolateDescriptor;
 use serde_json::de::Deserializer;
 
 use super::{IsolateKind, ParsedIsolate};
@@ -104,7 +101,7 @@ impl TryFrom<BinaryManifest> for ParsedIsolate {
 }
 
 /// Requires an `isolate_digest` whose `package_sha256` is a lowercase hex SHA-256 digest.
-fn validate_isolate_digest(isolate_digest: Option<&IsolateDigest>) -> Result<()> {
+pub fn validate_isolate_digest(isolate_digest: Option<&IsolateDigest>) -> Result<()> {
     let digest = &isolate_digest
         .context("isolate_digest is required for Ratified and Opaque Isolates")?
         .package_sha256;
@@ -114,58 +111,6 @@ fn validate_isolate_digest(isolate_digest: Option<&IsolateDigest>) -> Result<()>
          '{digest}'"
     );
     Ok(())
-}
-
-/// Converts a Ratified isolate descriptor into a normalized [`ParsedIsolate`].
-pub(crate) fn convert_ratified_descriptor_to_parsed_isolate(
-    desc: RatifiedIsolateDescriptor,
-) -> Result<ParsedIsolate> {
-    let (isolate_name, publisher_id) = extract_isolate_identity(desc.isolate_type)?;
-    let number_of_isolates = extract_number_of_isolates(desc.startup_parameters.as_ref())?;
-
-    Ok(ParsedIsolate {
-        isolate_name,
-        publisher_id,
-        package_filename: desc.package_filename,
-        number_of_isolates,
-        binary_filename: desc.binary_filename,
-        command_line_arguments: desc.command_line_arguments,
-        environment_variables: desc.environment_variables,
-        service_specs: convert_service_specs_v2_to_v1(desc.service_specs)?,
-        ez_backend_dependencies: convert_backend_dependencies_v2_to_v1(
-            desc.ez_backend_dependencies,
-        )?,
-        metrics_policy: desc.metrics_policy.map(convert_metrics_policy_v2_to_v1),
-        kind: IsolateKind::Ratified {
-            services_to_intercept: convert_intercepting_services_v2_to_v1(
-                desc.services_to_intercept,
-            )?,
-        },
-    })
-}
-
-/// Converts an Opaque isolate descriptor into a normalized [`ParsedIsolate`].
-pub(crate) fn convert_opaque_descriptor_to_parsed_isolate(
-    desc: OpaqueIsolateDescriptor,
-) -> Result<ParsedIsolate> {
-    let (isolate_name, publisher_id) = extract_isolate_identity(desc.isolate_type)?;
-    let number_of_isolates = extract_number_of_isolates(desc.startup_parameters.as_ref())?;
-
-    Ok(ParsedIsolate {
-        isolate_name,
-        publisher_id,
-        package_filename: desc.package_filename,
-        number_of_isolates,
-        binary_filename: desc.binary_filename,
-        command_line_arguments: vec![],
-        environment_variables: vec![],
-        service_specs: convert_service_specs_v2_to_v1(desc.service_specs)?,
-        ez_backend_dependencies: convert_backend_dependencies_v2_to_v1(
-            desc.ez_backend_dependencies,
-        )?,
-        metrics_policy: desc.metrics_policy.map(convert_metrics_policy_v2_to_v1),
-        kind: IsolateKind::Opaque,
-    })
 }
 
 fn convert_service_specs_v2_to_v1(specs: Vec<EzServiceSpecV2>) -> Result<Vec<EzServiceSpec>> {
@@ -253,14 +198,4 @@ fn extract_isolate_identity(isolate_type: Option<IsolateType>) -> Result<(String
     ensure!(!it.isolate_name.is_empty(), "isolate_name cannot be empty in isolate_type");
     ensure!(!it.publisher_id.is_empty(), "publisher_id cannot be empty in isolate_type");
     Ok((it.isolate_name, it.publisher_id))
-}
-
-fn extract_number_of_isolates(
-    startup_parameters: Option<&IsolateStartupParameters>,
-) -> Result<i32> {
-    let num = startup_parameters.map_or(0, |sp| sp.number_of_isolates);
-    if num < 0 {
-        bail!("number_of_isolates cannot be negative, got {}", num);
-    }
-    Ok(num)
 }

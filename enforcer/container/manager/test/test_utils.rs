@@ -87,7 +87,7 @@ pub const JSON_MANIFEST_PATH_SETUP_ISOLATE: &str =
     "enforcer/container/manager/test/testdata/test_manifest_setup_isolate.json";
 
 // The following constants are from the test manifests.
-// publisher_id of the Setup and Ratified Isolates in v2_setup.json and v2_ratified.json,
+// publisher_id of the Setup and Ratified Isolates in v2_setup.json and v2_ratified_*.json,
 // used to key their IsolateStartupParameters.
 pub const V2_RATIFIED_PUBLISHER_ID: &str = "pcit-release-bot@google.com";
 // From v2_setup.json
@@ -96,14 +96,16 @@ pub const SETUP_ISOLATE_DOMAIN: &str = "EZ_Trusted";
 pub const SETUP_SERVICE: &str = "SetupService";
 pub const SETUP_ISOLATE_NAME: &str = "setup_isolate";
 
-// From v2_ratified.json and v2_opaque.json
-pub const RATIFIED_1_ISOLATE_NAME: &str = "ratified_1";
+pub const V2_WORKLOAD_MANIFEST_PATHS: &[&str] = &[
+    "enforcer/manifest_parser/test/testdata/v2_ratified_pubsub_broker.json",
+    "enforcer/manifest_parser/test/testdata/v2_ratified_2.json",
+    "enforcer/manifest_parser/test/testdata/v2_opaque_helloworld.json",
+];
+pub const WORKLOAD_PACKAGE_PATH: &str = "enforcer/container/test_data/test_binary.tar";
+pub const PUBSUB_BROKER_ISOLATE_NAME: &str = "pubsub_broker";
+pub const PUBSUB_BROKER_SERVICE: &str = "PubSubBroker";
 pub const RATIFIED_2_ISOLATE_NAME: &str = "ratified_2";
 pub const HELLOWORLD_ISOLATE_NAME: &str = "helloworld";
-
-// From v2_opaque_explicit_startup_params.json
-pub const EXPLICIT_OPAQUE_DOMAIN: &str = "explicit_domain";
-pub const EXPLICIT_OPAQUE_ISOLATE_NAME: &str = "explicit_opaque";
 
 // From test_manifest_one_isolate.json
 pub const HELLOWORLD_BINARY: &str = "/usr/local/bin/main";
@@ -112,7 +114,6 @@ pub const GREETER_SERVICE: &str = "Greeter";
 pub const AUTH_SERVICE: &str = "AuthService";
 pub const SAY_HELLO_METHOD: &str = "SayHello";
 pub const RATIFIED_ISOLATE_DOMAIN: &str = "EZ_Trusted";
-pub const ENTRYPOINT_BINARY: &str = "/usr/local/bin/entrypoint.sh";
 
 // From test_manifest_multiple_isolates.json
 pub const SUMMATION_BINARY: &str = "/usr/local/bin/summation_by_lookup_table_with_backend";
@@ -199,23 +200,15 @@ impl TestHarness {
         .await
     }
 
-    pub async fn load_workload_manifests_from_paths(
-        &self,
-        ratified_path: Option<&str>,
-        opaque_path: Option<&str>,
-    ) -> Result<()> {
-        let workload_manifests = load_workload_manifests_from_paths(ratified_path, opaque_path)?;
-        let parsed_isolates = workload_manifests.clone().into_parsed_isolates()?;
+    pub async fn load_workload_manifests_from_paths(&self, manifest_paths: &[&str]) -> Result<()> {
+        let workload_manifests = load_workload_manifests_from_paths(manifest_paths)?;
         let resp = self
             .container_manager_requester
             .load_workload_manifests(LoadWorkloadManifestsRequest { workload_manifests })
             .await?;
         let indices = resp.registered_indices;
-        let isolate_packages: HashMap<BinaryServicesIndex, String> = indices
-            .into_iter()
-            .zip(parsed_isolates)
-            .map(|(idx, i)| (idx, i.package_filename))
-            .collect();
+        let isolate_packages: HashMap<BinaryServicesIndex, String> =
+            indices.into_iter().map(|idx| (idx, WORKLOAD_PACKAGE_PATH.to_string())).collect();
         self.container_manager_requester
             .load_workload_isolates(LoadWorkloadIsolatesRequest { isolate_packages })
             .await?;

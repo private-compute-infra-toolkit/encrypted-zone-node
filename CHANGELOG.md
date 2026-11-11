@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## 0.33.0 (2026-11-11)
+
+
+### EZ Policy Enforcer
+
+* **enforcer:** Load workload Isolates from BundleManifest
+
+
+### Documentation
+
+* standardize agent instruction files on AGENTS.md
+
 ## 0.32.0 (2026-11-06)
 
 

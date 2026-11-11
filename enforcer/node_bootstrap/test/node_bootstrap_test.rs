@@ -32,9 +32,10 @@ use ez_management_proto::enforcer::v2::ez_management_service_server::{
     EzManagementService, EzManagementServiceServer,
 };
 use ez_management_proto::enforcer::v2::{
-    load_isolates_response, AllPackagesLoadedResponse, FetchIsolateStartupParametersRequest,
-    FetchIsolateStartupParametersResponse, FetchOperatorInfoRequest, FetchOperatorInfoResponse,
-    LoadIsolatesRequest, LoadIsolatesResponse, OperatorInfo, RatifiedIsolateManifestPayload,
+    load_isolates_response, AllPackagesLoadedResponse, BundleManifest,
+    FetchIsolateStartupParametersRequest, FetchIsolateStartupParametersResponse,
+    FetchOperatorInfoRequest, FetchOperatorInfoResponse, LoadIsolatesRequest, LoadIsolatesResponse,
+    OperatorInfo,
 };
 use inbound_ez_to_ez_handler::InboundEzToEzHandler;
 use isolate_info::{register_isolate_type, BinaryServicesIndex, IsolateId};
@@ -42,13 +43,11 @@ use isolate_startup_parameters_proto::enforcer::v2::IsolateStartupParameters;
 use junction_test_utils::FakeJunction;
 use junction_trait::Junction;
 use node_bootstrap::{NodeBootstrapV2, NodeBootstrapV2Config};
-use opaque_isolate_manifest_proto::enforcer::v2::OpaqueIsolateManifest;
 use outbound_ez_to_ez_client::{OutboundEzToEzClient, OutboundTlsConfig};
 use payload_proto::enforcer::v1::{
     ez_hybrid_payload::DeliveryMethod, EzHybridPayload, EzPayloadData,
 };
 use prost::Message;
-use ratified_isolate_manifest_proto::enforcer::v2::RatifiedIsolateManifest;
 use setup_isolate_client::SetupIsolateClient;
 use setup_isolate_proto::enforcer::v2::FetchTlsCertificateResponse;
 use state_manager::IsolateStateManager;
@@ -498,16 +497,8 @@ impl EzManagementService for FakeManagementService {
 
         let responses = vec![
             LoadIsolatesResponse {
-                response: Some(load_isolates_response::Response::RatifiedIsolateManifest(
-                    RatifiedIsolateManifestPayload {
-                        manifest: Some(RatifiedIsolateManifest::default()),
-                        ..Default::default()
-                    },
-                )),
-            },
-            LoadIsolatesResponse {
-                response: Some(load_isolates_response::Response::OpaqueIsolateManifest(
-                    OpaqueIsolateManifest::default(),
+                response: Some(load_isolates_response::Response::BundleManifest(
+                    BundleManifest::default(),
                 )),
             },
             LoadIsolatesResponse {

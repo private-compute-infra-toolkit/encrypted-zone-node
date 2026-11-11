@@ -16,6 +16,7 @@ pub mod package_utils;
 pub mod types;
 use std::sync::Arc;
 
+use binary_manifest_proto::enforcer::v2::{binary_manifest, BinaryManifest, IsolateDigest};
 use common_proto::enforcer::v2::IsolateType;
 use container_manager_requester::{
     ContainerManagerRequester, LoadWorkloadIsolatesRequest, LoadWorkloadManifestsRequest,
@@ -24,19 +25,21 @@ use ez_management_proto::enforcer::v2::ez_management_service_client::EzManagemen
 use ez_management_proto::enforcer::v2::load_isolates_request::Request as LoadIsolatesRequestType;
 use ez_management_proto::enforcer::v2::load_isolates_response::Response as LoadIsolatesResponseType;
 use ez_management_proto::enforcer::v2::{
-    FetchIsolateStartupParametersRequest, FetchOperatorInfoRequest, LoadIsolatesRequest,
-    LoadIsolatesResponse, LoadIsolatesResult, ReadyToLoadPackagesRequest,
+    ez_manifest, BundleManifest, EndorsedBinaryManifest, FetchIsolateStartupParametersRequest,
+    FetchOperatorInfoRequest, LoadIsolatesRequest, LoadIsolatesResponse, LoadIsolatesResult,
+    ReadyToLoadPackagesRequest,
 };
 pub use ez_management_proto::enforcer::v2::{LoadIsolatesError, OperatorInfo};
 use grpc_connector::GrpcChannelPool;
 use isolate_endorsement_proto::enforcer::v1::{ValidateIsolateEndorsementResponse, Validity};
 use isolate_info::{get_binary_services_index, BinaryServicesIndex};
 pub use isolate_startup_parameters_proto::enforcer::v2::IsolateStartupParameters;
-use manifest_parser::v2::WorkloadManifests;
+use manifest_parser::v2::{validate_isolate_digest, WorkloadManifests};
+use manifest_parser::ParsedIsolate;
 use package_utils::{AssembledPackage, PackageAccumulator};
 use setup_isolate_proto::enforcer::v2::{ExpectedClaims, ValidateIsolateEndorsementRequest};
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::mpsc::{self, Sender};
 use tokio_stream::wrappers::ReceiverStream;
@@ -50,6 +53,8 @@ const DEFAULT_PACKAGE_OUTPUT_DIR: &str = "/tmp";
 const FETCH_OPERATOR_INFO_TIMEOUT: Duration = Duration::from_secs(10);
 const FETCH_ISOLATE_STARTUP_PARAMETERS_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_ISOLATE_COUNT: i32 = 64;
+const BINARY_MANIFEST_FILENAME: &str = "binary_manifest.json";
+const PACKAGE_FILENAME: &str = "package.tar";
 
 /// Client for communicating with the EzManagementService.
 #[derive(Clone)]
@@ -60,19 +65,21 @@ pub struct EzManagementClient {
     package_output_dir: PathBuf,
     // Sender for sending LoadIsolatesRequests to the EzManagementService.
     req_tx: Option<Sender<LoadIsolatesRequest>>,
-    // Map from IsolateType to its package metadata, loaded from the manifests.
-    package_metadata: HashMap<IsolateType, PackageMetadata>,
+    // Map from IsolateType to the isolate_digest of its BinaryManifest.
+    package_metadata: HashMap<IsolateType, IsolateDigest>,
     // Map from BinaryServicesIndex to the path of the Isolate package file.
     isolate_packages: HashMap<BinaryServicesIndex, String>,
     // The handle to the temporary directory. Keeps the directory alive.
     _package_temp_dir: Option<Arc<tempfile::TempDir>>,
 }
 
-// Metadata for an Isolate package, loaded from the manifests.
-#[derive(Clone, Debug)]
-struct PackageMetadata {
-    package_filename: String,
-    is_ratified: bool,
+/// A workload BinaryManifest that passed the checks in parse_binary_manifest.
+struct ParsedBinaryManifest {
+    manifest: BinaryManifest,
+    calculated_manifest_digest_sha256: String,
+    isolate_type: IsolateType,
+    isolate_digest: IsolateDigest,
+    binary_manifest_endorsements: Vec<u8>,
 }
 
 impl EzManagementClient {
@@ -205,9 +212,7 @@ impl EzManagementClient {
             .map_err(|e| EzManagementError::StreamError(e.to_string()))?;
         let mut stream = response.into_inner();
 
-        // Receive both manifests and load them with ContainerManagerRequester.
-        let manifests = self.receive_manifests(&mut stream).await?;
-        self.package_metadata = get_isolate_type_to_package_metadata(&manifests)?;
+        let manifests = self.receive_bundle_manifest(&mut stream).await?;
         self.container_manager_requester
             .load_workload_manifests(LoadWorkloadManifestsRequest { workload_manifests: manifests })
             .await
@@ -259,63 +264,72 @@ impl EzManagementClient {
         })
     }
 
-    /// Reads exactly the two expected manifests (Ratified and Opaque) from the stream.
-    async fn receive_manifests(
-        &self,
+    /// Reads the BundleManifest from the stream, validates its BinaryManifests, and fills
+    /// package_metadata.
+    async fn receive_bundle_manifest(
+        &mut self,
         stream: &mut Streaming<LoadIsolatesResponse>,
     ) -> Result<WorkloadManifests, EzManagementError> {
-        let mut ratified_manifest = None;
-        let mut opaque_manifest = None;
-
-        for _ in 0..2 {
-            let msg = stream
-                .message()
-                .await
-                .map_err(|e| EzManagementError::StreamError(e.to_string()))?
-                .ok_or_else(|| {
-                    EzManagementError::StreamError(
-                        "Stream closed prematurely while waiting for manifests".to_string(),
-                    )
-                })?;
-            match msg.response {
-                Some(LoadIsolatesResponseType::RatifiedIsolateManifest(payload)) => {
-                    let manifest = payload.manifest.ok_or_else(|| {
-                        EzManagementError::ManifestParsingFailed(
-                            "Received RatifiedIsolateManifestPayload with missing inner manifest"
-                                .to_string(),
-                        )
-                    })?;
-                    ratified_manifest = Some(manifest);
-                }
-                Some(LoadIsolatesResponseType::OpaqueIsolateManifest(manifest)) => {
-                    opaque_manifest = Some(manifest);
-                }
-                Some(LoadIsolatesResponseType::IsolatePackageChunk(_))
-                | Some(LoadIsolatesResponseType::AllPackagesLoaded(_)) => {
-                    return Err(EzManagementError::UnexpectedMessage(
-                        "Received package chunk or completion before both manifests were received"
-                            .to_string(),
-                    ));
-                }
-                Some(LoadIsolatesResponseType::BundleManifest(_)) => {
-                    return Err(EzManagementError::UnexpectedMessage(
-                        "Received BundleManifest, which is not supported yet".to_string(),
-                    ));
-                }
-                None => {
-                    return Err(EzManagementError::UnexpectedMessage(
-                        "Received empty LoadIsolatesResponse".to_string(),
-                    ));
-                }
+        let msg = stream
+            .message()
+            .await
+            .map_err(|e| EzManagementError::StreamError(e.to_string()))?
+            .ok_or_else(|| {
+                EzManagementError::StreamError(
+                    "Stream closed prematurely while waiting for the BundleManifest".to_string(),
+                )
+            })?;
+        let bundle_manifest = match msg.response {
+            Some(LoadIsolatesResponseType::BundleManifest(bundle_manifest)) => bundle_manifest,
+            Some(LoadIsolatesResponseType::IsolatePackageChunk(_))
+            | Some(LoadIsolatesResponseType::AllPackagesLoaded(_)) => {
+                return Err(EzManagementError::UnexpectedMessage(
+                    "Received package chunk or completion before the BundleManifest".to_string(),
+                ));
             }
+            Some(LoadIsolatesResponseType::RatifiedIsolateManifest(_))
+            | Some(LoadIsolatesResponseType::OpaqueIsolateManifest(_)) => {
+                return Err(EzManagementError::UnexpectedMessage(
+                    "Received legacy isolate manifest; only BundleManifest is supported"
+                        .to_string(),
+                ));
+            }
+            None => {
+                return Err(EzManagementError::UnexpectedMessage(
+                    "Received empty LoadIsolatesResponse".to_string(),
+                ));
+            }
+        };
+
+        let mut endorsed_manifests = Vec::new();
+        flatten_bundle_manifest(bundle_manifest, &mut endorsed_manifests)?;
+        let mut isolate_types = HashSet::new();
+        let mut parsed_manifests = Vec::new();
+        for endorsed_manifest in endorsed_manifests {
+            let parsed = parse_binary_manifest(endorsed_manifest)?;
+            if !isolate_types.insert(parsed.isolate_type.clone()) {
+                return Err(EzManagementError::LoadIsolatesFailed(
+                    LoadIsolatesError::ManifestParsingFailure,
+                    format!("Duplicate Isolate '{:?}' in the BundleManifest", parsed.isolate_type),
+                ));
+            }
+            parsed_manifests.push(parsed);
         }
-        let ratified = ratified_manifest.ok_or_else(|| {
-            EzManagementError::ManifestParsingFailed("Missing RatifiedIsolateManifest".to_string())
-        })?;
-        let opaque = opaque_manifest.ok_or_else(|| {
-            EzManagementError::ManifestParsingFailed("Missing OpaqueIsolateManifest".to_string())
-        })?;
-        Ok(WorkloadManifests::new(Some(ratified), Some(opaque)))
+
+        let mut binary_manifests = Vec::with_capacity(parsed_manifests.len());
+        let mut package_metadata = HashMap::with_capacity(parsed_manifests.len());
+        for parsed in parsed_manifests {
+            self.validate_manifest_endorsement(
+                &parsed.isolate_type,
+                parsed.calculated_manifest_digest_sha256,
+                &parsed.binary_manifest_endorsements,
+            )
+            .await?;
+            package_metadata.insert(parsed.isolate_type, parsed.isolate_digest);
+            binary_manifests.push(parsed.manifest);
+        }
+        self.package_metadata = package_metadata;
+        Ok(WorkloadManifests::new(binary_manifests))
     }
 
     /// Processes incoming isolate package chunks from the stream and saves package files.
@@ -402,24 +416,25 @@ impl EzManagementClient {
         }
     }
 
-    async fn validate_package_endorsement(
+    /// Validates a BinaryManifest endorsement via the Setup Isolate and sends the validation
+    /// response in a LoadIsolatesResult.
+    async fn validate_manifest_endorsement(
         &self,
         isolate_type: &IsolateType,
-        package_filename: &str,
-        package_hash: String,
-        package_endorsements: &[u8],
-    ) -> Result<ValidateIsolateEndorsementResponse, EzManagementError> {
+        manifest_digest_sha256: String,
+        manifest_endorsements: &[u8],
+    ) -> Result<(), EzManagementError> {
         let client = self.get_setup_isolate_client(isolate_type).await?;
 
         let expected_claims = ExpectedClaims {
             publisher_id: isolate_type.publisher_id.clone(),
             isolate_name: isolate_type.isolate_name.clone(),
-            package_filename: package_filename.to_string(),
+            package_filename: BINARY_MANIFEST_FILENAME.to_string(),
         };
         let req = ValidateIsolateEndorsementRequest {
             expected_claims: Some(expected_claims),
-            isolate_package_endorsement: package_endorsements.to_vec(),
-            package_digest_sha256: package_hash,
+            isolate_package_endorsement: manifest_endorsements.to_vec(),
+            package_digest_sha256: manifest_digest_sha256,
         };
         let res = match client.validate_isolate_endorsement(req).await {
             Ok(r) => r,
@@ -459,7 +474,8 @@ impl EzManagementClient {
             ));
         }
 
-        Ok(validate_response)
+        self.send_load_result(isolate_type, true, None, Some(validate_response)).await;
+        Ok(())
     }
 
     /// Saves package to disk, associates target path with registered binary index, and sends result back to server.
@@ -468,8 +484,8 @@ impl EzManagementClient {
         package: &AssembledPackage,
     ) -> Result<(), EzManagementError> {
         let isolate_type = &package.isolate_type;
-        let (package_filename, is_ratified) = match self.package_metadata.get(isolate_type) {
-            Some(metadata) => (metadata.package_filename.clone(), metadata.is_ratified),
+        let isolate_digest = match self.package_metadata.get(isolate_type) {
+            Some(isolate_digest) => isolate_digest.clone(),
             None => {
                 self.send_load_result(
                     isolate_type,
@@ -484,29 +500,32 @@ impl EzManagementClient {
                 ));
             }
         };
-        // Validate destination path upfront before endorsement validation.
-        let target_path = self.resolve_package_path(isolate_type, &package_filename).await?;
+        let target_path = self.resolve_package_path(isolate_type).await?;
         let binary_index = self.get_package_binary_index(isolate_type).await?;
 
-        // Calculate the hash before writing to disk and validate Ratified packages via setup isolate.
-        let mut validate_result = None;
-        if is_ratified {
-            let package_hash = package_utils::calculate_sha256(&package.package_bytes);
-            validate_result = Some(
-                self.validate_package_endorsement(
-                    isolate_type,
-                    &package_filename,
-                    package_hash,
-                    &package.endorsements,
-                )
-                .await?,
-            );
+        let package_sha256 = package_utils::calculate_sha256(&package.package_bytes);
+        if package_sha256 != isolate_digest.package_sha256 {
+            self.send_load_result(
+                isolate_type,
+                false,
+                Some(LoadIsolatesError::PackageDigestMismatch),
+                None,
+            )
+            .await;
+            return Err(EzManagementError::LoadIsolatesFailed(
+                LoadIsolatesError::PackageDigestMismatch,
+                format!(
+                    "Package digest {package_sha256} does not match isolate_digest.package_sha256 \
+                     '{}' of Isolate '{isolate_type:?}'",
+                    isolate_digest.package_sha256
+                ),
+            ));
         }
 
-        self.write_package_to_disk(isolate_type, &package_filename, &package.package_bytes).await?;
+        self.write_package_to_disk(isolate_type, &package.package_bytes).await?;
         let target_path_str = target_path.to_string_lossy().to_string();
         self.isolate_packages.insert(binary_index, target_path_str);
-        self.send_load_result(isolate_type, true, None, validate_result).await;
+        self.send_load_result(isolate_type, true, None, None).await;
         Ok(())
     }
 
@@ -533,15 +552,13 @@ impl EzManagementClient {
         }
     }
 
-    /// Resolves the output destination path for a package file based on package_output_dir
-    /// and a per-IsolateType directory (`<publisher_id>/<isolate_name>`).
-    /// The file is named after the package_filename declared in the Isolate manifest.
+    /// Validates `isolate_type` path components and returns
+    /// `<package_output_dir>/<publisher_id>/<isolate_name>/package.tar`.
     async fn resolve_package_path(
         &self,
         isolate_type: &IsolateType,
-        package_filename: &str,
     ) -> Result<PathBuf, EzManagementError> {
-        if let Err(e) = validate_package_path_components(isolate_type, package_filename) {
+        if let Err(e) = validate_package_path_components(isolate_type) {
             log::error!("Invalid package path component for Isolate '{isolate_type:?}': {e}");
             self.send_load_result(
                 isolate_type,
@@ -552,42 +569,20 @@ impl EzManagementClient {
             .await;
             return Err(e);
         }
-
-        let filename = Path::new(package_filename).file_name().ok_or_else(|| {
-            EzManagementError::LoadIsolatesFailed(
-                LoadIsolatesError::ManifestParsingFailure,
-                format!("Invalid package_filename '{package_filename}': cannot resolve file name"),
-            )
-        });
-
-        match filename {
-            Ok(f) => Ok(self
-                .package_output_dir
-                .join(&isolate_type.publisher_id)
-                .join(&isolate_type.isolate_name)
-                .join(f)),
-            Err(e) => {
-                log::error!("Invalid package path for Isolate '{isolate_type:?}': {e:?}");
-                self.send_load_result(
-                    isolate_type,
-                    false,
-                    Some(LoadIsolatesError::ManifestParsingFailure),
-                    None,
-                )
-                .await;
-                Err(e)
-            }
-        }
+        Ok(self
+            .package_output_dir
+            .join(&isolate_type.publisher_id)
+            .join(&isolate_type.isolate_name)
+            .join(PACKAGE_FILENAME))
     }
 
     /// Writes package bytes to disk, creating parent directories if necessary.
     async fn write_package_to_disk(
         &self,
         isolate_type: &IsolateType,
-        package_filename: &str,
         bytes: &[u8],
     ) -> Result<PathBuf, EzManagementError> {
-        let target_path = self.resolve_package_path(isolate_type, package_filename).await?;
+        let target_path = self.resolve_package_path(isolate_type).await?;
         if let Some(parent) = target_path.parent() {
             if !parent.as_os_str().is_empty() {
                 if let Err(e) = tokio::fs::create_dir_all(parent).await {
@@ -645,11 +640,95 @@ impl EzManagementClient {
     }
 }
 
-/// Validates that the isolate identity and package filename do not contain path traversal or invalid components.
-fn validate_package_path_components(
-    isolate_type: &IsolateType,
-    package_filename: &str,
+/// Flattens a [`BundleManifest`] and its nested [`BundleManifest`]s into a list of
+/// [`EndorsedBinaryManifest`]s.
+fn flatten_bundle_manifest(
+    bundle_manifest: BundleManifest,
+    output: &mut Vec<EndorsedBinaryManifest>,
 ) -> Result<(), EzManagementError> {
+    for entry in bundle_manifest.manifests {
+        match entry.manifest {
+            Some(ez_manifest::Manifest::BinaryManifest(endorsed_manifest)) => {
+                output.push(endorsed_manifest);
+            }
+            Some(ez_manifest::Manifest::BundleManifest(nested_bundle)) => {
+                flatten_bundle_manifest(nested_bundle, output)?;
+            }
+            None => {
+                return Err(EzManagementError::LoadIsolatesFailed(
+                    LoadIsolatesError::ManifestParsingFailure,
+                    "BundleManifest entry has no manifest".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Parses and checks a workload EndorsedBinaryManifest before any endorsement RPC, so that an
+/// incorrect manifest gives a manifest error, not an endorsement error.
+fn parse_binary_manifest(
+    endorsed_manifest: EndorsedBinaryManifest,
+) -> Result<ParsedBinaryManifest, EzManagementError> {
+    let manifest =
+        manifest_parser::v2::parse_binary_manifest(&endorsed_manifest.binary_manifest_json)
+            .map_err(|e| EzManagementError::ManifestParsingFailed(format!("{e:#}")))?;
+    let isolate_type = manifest
+        .isolate_type
+        .clone()
+        .filter(|t| !t.publisher_id.is_empty() && !t.isolate_name.is_empty())
+        .ok_or_else(|| {
+            EzManagementError::LoadIsolatesFailed(
+                LoadIsolatesError::ManifestParsingFailure,
+                "BinaryManifest is missing a valid isolate_type".to_string(),
+            )
+        })?;
+    match manifest.isolate_kind {
+        Some(binary_manifest::IsolateKind::Ratified(_))
+        | Some(binary_manifest::IsolateKind::Opaque(_)) => {}
+        Some(binary_manifest::IsolateKind::Setup(_)) => {
+            return Err(EzManagementError::LoadIsolatesFailed(
+                LoadIsolatesError::ManifestParsingFailure,
+                format!("Setup Isolate '{isolate_type:?}' is not allowed in the BundleManifest"),
+            ));
+        }
+        None => {
+            return Err(EzManagementError::LoadIsolatesFailed(
+                LoadIsolatesError::ManifestParsingFailure,
+                format!("BinaryManifest for '{isolate_type:?}' is missing isolate_kind"),
+            ));
+        }
+    }
+    validate_isolate_digest(manifest.isolate_digest.as_ref()).map_err(|e| {
+        EzManagementError::LoadIsolatesFailed(
+            LoadIsolatesError::ManifestParsingFailure,
+            format!(
+                "BinaryManifest for '{isolate_type:?}' isolate_digest field parsing failure: \
+                 {e:#}"
+            ),
+        )
+    })?;
+    let isolate_digest = manifest.isolate_digest.clone().unwrap_or_default();
+    // Create ParsedIsolate to validate the BinaryManifest.
+    ParsedIsolate::try_from(manifest.clone()).map_err(|e| {
+        EzManagementError::LoadIsolatesFailed(
+            LoadIsolatesError::ManifestParsingFailure,
+            format!("BinaryManifest for '{isolate_type:?}': {e:#}"),
+        )
+    })?;
+    let calculated_manifest_digest_sha256 =
+        package_utils::calculate_sha256(&endorsed_manifest.binary_manifest_json);
+    Ok(ParsedBinaryManifest {
+        manifest,
+        calculated_manifest_digest_sha256,
+        isolate_type,
+        isolate_digest,
+        binary_manifest_endorsements: endorsed_manifest.binary_manifest_endorsements,
+    })
+}
+
+/// Validates that the isolate identity does not contain path traversal or invalid components.
+fn validate_package_path_components(isolate_type: &IsolateType) -> Result<(), EzManagementError> {
     let is_invalid_component = |s: &str| {
         s.is_empty() || s == "." || s.contains("..") || s.contains('/') || s.contains('\\')
     };
@@ -671,67 +750,5 @@ fn validate_package_path_components(
             ),
         ));
     }
-    if package_filename.is_empty() || package_filename == "." || package_filename.contains("..") {
-        return Err(EzManagementError::LoadIsolatesFailed(
-            LoadIsolatesError::ManifestParsingFailure,
-            format!("Invalid package_filename '{package_filename}': path traversal not allowed"),
-        ));
-    }
     Ok(())
-}
-
-/// Registers the package metadata of a single manifest descriptor, keyed by its IsolateType.
-fn insert_package_metadata(
-    package_metadata: &mut HashMap<IsolateType, PackageMetadata>,
-    isolate_type: Option<&IsolateType>,
-    package_filename: &str,
-    is_ratified: bool,
-) -> Result<(), EzManagementError> {
-    let Some(isolate_type) =
-        isolate_type.cloned().filter(|t| !t.publisher_id.is_empty() && !t.isolate_name.is_empty())
-    else {
-        return Err(EzManagementError::LoadIsolatesFailed(
-            LoadIsolatesError::ManifestParsingFailure,
-            "Manifest descriptor is missing valid IsolateType".to_string(),
-        ));
-    };
-    if package_metadata.contains_key(&isolate_type) {
-        return Err(EzManagementError::LoadIsolatesFailed(
-            LoadIsolatesError::ManifestParsingFailure,
-            format!("Duplicate Isolate '{isolate_type:?}' found across manifests"),
-        ));
-    }
-    package_metadata.insert(
-        isolate_type,
-        PackageMetadata { package_filename: package_filename.to_string(), is_ratified },
-    );
-    Ok(())
-}
-
-/// Creates a mapping from IsolateType to its package metadata from the manifests.
-fn get_isolate_type_to_package_metadata(
-    manifests: &WorkloadManifests,
-) -> Result<HashMap<IsolateType, PackageMetadata>, EzManagementError> {
-    let mut package_metadata: HashMap<IsolateType, PackageMetadata> = HashMap::new();
-    if let Some(ref ratified) = manifests.ratified_isolate_manifest {
-        for d in &ratified.ratified_isolate_descriptors {
-            insert_package_metadata(
-                &mut package_metadata,
-                d.isolate_type.as_ref(),
-                &d.package_filename,
-                true,
-            )?;
-        }
-    }
-    if let Some(ref opaque) = manifests.opaque_isolate_manifest {
-        for d in &opaque.opaque_isolate_descriptors {
-            insert_package_metadata(
-                &mut package_metadata,
-                d.isolate_type.as_ref(),
-                &d.package_filename,
-                false,
-            )?;
-        }
-    }
-    Ok(package_metadata)
 }

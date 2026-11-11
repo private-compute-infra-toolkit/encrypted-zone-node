@@ -1,0 +1,23 @@
+{
+  "isolate_type": {
+    "isolate_name": "ratified_2",
+    "publisher_id": "pcit-release-bot@google.com"
+  },
+  "isolate_digest": {
+    "package_sha256": "89abcdef0123456789abcdef0123456789abcdef0123456789abcdef01234567"
+  },
+  "binary_filename": "/usr/local/bin/main",
+  "service_specs": [
+    {
+      "service_name": "AuthService",
+      "method_specs": [
+        {
+          "method_name": "Authenticate",
+          "input_scope_types": ["DATA_SCOPE_TYPE_PUBLIC"],
+          "output_scope_types": ["DATA_SCOPE_TYPE_PUBLIC"]
+        }
+      ]
+    }
+  ],
+  "ratified": {}
+}

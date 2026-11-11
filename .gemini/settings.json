@@ -1,5 +1,6 @@
 {
   "context": {
+    "fileName": ["AGENTS.md", "GEMINI.md"],
     "fileFiltering": {
       "enableRecursiveFileSearch": false
     }

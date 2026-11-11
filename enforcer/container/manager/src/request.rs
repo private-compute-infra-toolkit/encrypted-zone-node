@@ -152,8 +152,8 @@ pub struct GetRunStatusResponse {
 
 #[derive(Debug)]
 pub struct LoadWorkloadManifestsRequest {
-    /// Workload manifests (Ratified and Opaque) containing descriptors for all
-    /// workload isolates to be validated and registered with the ContainerManager.
+    /// BinaryManifests of the Ratified and Opaque Isolates to validate and register with the
+    /// ContainerManager.
     pub workload_manifests: WorkloadManifests,
 }
 

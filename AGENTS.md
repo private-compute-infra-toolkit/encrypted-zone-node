@@ -1,4 +1,4 @@
-# Gemini Code Understanding
+# Agent Guidelines for Encrypted Zone Node
 
 This document provides a high-level overview of the Encrypted Zone (EZ) codebase and coding rules to
 be used as instructional context for development and automated code generation.
@@ -139,7 +139,7 @@ benchmarks.
 
 ## Additional Context
 
--   **Enforcer Benchmarks:** See [`enforcer/benches/GEMINI.md`](enforcer/benches/GEMINI.md)
+-   **Enforcer Benchmarks:** See [`enforcer/benches/AGENTS.md`](enforcer/benches/AGENTS.md)
 
 ## Code Coverage
 

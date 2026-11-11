@@ -28,7 +28,7 @@ async fn test_container_manager_v2_start_multiple_isolates() {
         "test_operator".to_string(),
         vec![
             setup_startup_parameters(),
-            startup_parameters(V2_RATIFIED_PUBLISHER_ID, RATIFIED_1_ISOLATE_NAME, 1),
+            startup_parameters(V2_RATIFIED_PUBLISHER_ID, PUBSUB_BROKER_ISOLATE_NAME, 1),
             startup_parameters(V2_RATIFIED_PUBLISHER_ID, RATIFIED_2_ISOLATE_NAME, 1),
             startup_parameters(HELLOWORLD_DOMAIN, HELLOWORLD_ISOLATE_NAME, 1),
         ],
@@ -43,12 +43,8 @@ async fn test_container_manager_v2_start_multiple_isolates() {
         .await
         .expect("Setup isolate should be ready");
 
-    // Load composite workload manifests (2 ratified + 1 opaque) dynamically
     harness
-        .load_workload_manifests_from_paths(
-            Some("enforcer/manifest_parser/test/testdata/v2_ratified.json"),
-            Some("enforcer/manifest_parser/test/testdata/v2_opaque.json"),
-        )
+        .load_workload_manifests_from_paths(V2_WORKLOAD_MANIFEST_PATHS)
         .await
         .expect("Should load workload manifests");
 
@@ -73,17 +69,16 @@ async fn test_container_manager_v2_start_multiple_isolates() {
         .expect("SetupService should be registered");
     assert!(service_info_has_valid_binary_index(&setup_index));
 
-    // Verify Greeter service (from ratified isolate 1)
-    let greeter_index = harness
+    let pubsub_broker_index = harness
         .isolate_service_mapper
         .get_service_index(&IsolateServiceInfo {
             operator_domain: V2_RATIFIED_PUBLISHER_ID.to_string(),
-            service_name: GREETER_SERVICE.to_string(),
+            service_name: PUBSUB_BROKER_SERVICE.to_string(),
             ..Default::default()
         })
         .await
-        .expect("Ratified Greeter should be registered");
-    assert!(service_info_has_valid_binary_index(&greeter_index));
+        .expect("Ratified PubSubBroker should be registered");
+    assert!(service_info_has_valid_binary_index(&pubsub_broker_index));
 
     // Verify AuthService (from ratified isolate 2)
     let auth_index = harness
@@ -122,26 +117,16 @@ async fn test_container_manager_v2_start_multiple_isolates() {
             .expect("Setup container should be tracked");
         assert!(setup_container.value().command_line_arguments.is_empty());
 
-        // Verify Ratified container args
-        let ratified_containers: Vec<_> = tracker
+        // All three workload test manifests set binary_filename to HELLOWORLD_BINARY
+        // ("/usr/local/bin/main"), whereas the Setup Isolate uses SETUP_BINARY.
+        let workload_containers: Vec<_> = tracker
             .iter()
-            .filter(|c| {
-                c.value().binary_filename.as_deref() == Some(HELLOWORLD_BINARY)
-                    && !c.value().command_line_arguments.is_empty()
-            })
+            .filter(|c| c.value().binary_filename.as_deref() == Some(HELLOWORLD_BINARY))
             .collect();
-        assert_eq!(ratified_containers.len(), 2);
-        assert_eq!(ratified_containers[0].value().command_line_arguments, vec!["".to_string()]);
-        assert_eq!(ratified_containers[1].value().command_line_arguments, vec!["".to_string()]);
-
-        // Verify Opaque container args (must be empty from manifest)
-        tracker
-            .iter()
-            .find(|c| {
-                c.value().binary_filename.as_deref() == Some(HELLOWORLD_BINARY)
-                    && c.value().command_line_arguments.is_empty()
-            })
-            .expect("Opaque container should be tracked with empty command line args");
+        assert_eq!(workload_containers.len(), 3);
+        for container in workload_containers {
+            assert!(container.value().command_line_arguments.is_empty());
+        }
 
         // Verify Layer 1 Enforcer platform environment variables on all containers
         for container_ref in tracker.iter() {
@@ -171,7 +156,7 @@ async fn test_v2_explicit_startup_parameters_scaling() {
             IsolateStartupParameters {
                 command_line_arguments: vec!["--foo=bar".to_string()],
                 environment_variables: vec!["KEY=value".to_string()],
-                ..startup_parameters(EXPLICIT_OPAQUE_DOMAIN, EXPLICIT_OPAQUE_ISOLATE_NAME, 2)
+                ..startup_parameters(HELLOWORLD_DOMAIN, HELLOWORLD_ISOLATE_NAME, 2)
             },
         ],
     )
@@ -185,17 +170,15 @@ async fn test_v2_explicit_startup_parameters_scaling() {
         .await
         .expect("Setup isolate should be ready");
 
-    // The fetched number_of_isolates = 2 overrides the one embedded in the manifest (3).
     harness
-        .load_workload_manifests_from_paths(
-            None,
-            Some("enforcer/manifest_parser/test/testdata/v2_opaque_explicit_startup_params.json"),
-        )
+        .load_workload_manifests_from_paths(&[
+            "enforcer/manifest_parser/test/testdata/v2_opaque_helloworld.json",
+        ])
         .await
-        .expect("Should load explicit opaque manifest");
+        .expect("Should load opaque manifest");
 
     let workload_containers =
-        start_and_ready_containers_in_dependency_order(vec![ENTRYPOINT_BINARY, ENTRYPOINT_BINARY])
+        start_and_ready_containers_in_dependency_order(vec![HELLOWORLD_BINARY, HELLOWORLD_BINARY])
             .await
             .expect("All 2 opaque replicas should start and be readied");
     assert_eq!(workload_containers.len(), 2);
@@ -207,7 +190,7 @@ async fn test_v2_explicit_startup_parameters_scaling() {
         let tracker = FakeContainer::get_tracker();
         let opaque_containers: Vec<_> = tracker
             .iter()
-            .filter(|c| c.value().binary_filename.as_deref() == Some(ENTRYPOINT_BINARY))
+            .filter(|c| c.value().binary_filename.as_deref() == Some(HELLOWORLD_BINARY))
             .collect();
         assert_eq!(
             opaque_containers.len(),
@@ -234,7 +217,7 @@ async fn test_v2_load_workload_manifests_without_starting_isolates() {
         "test_operator".to_string(),
         vec![
             setup_startup_parameters(),
-            startup_parameters(V2_RATIFIED_PUBLISHER_ID, RATIFIED_1_ISOLATE_NAME, 1),
+            startup_parameters(V2_RATIFIED_PUBLISHER_ID, PUBSUB_BROKER_ISOLATE_NAME, 1),
             startup_parameters(V2_RATIFIED_PUBLISHER_ID, RATIFIED_2_ISOLATE_NAME, 1),
             startup_parameters(HELLOWORLD_DOMAIN, HELLOWORLD_ISOLATE_NAME, 1),
         ],
@@ -249,30 +232,25 @@ async fn test_v2_load_workload_manifests_without_starting_isolates() {
     let _client = notify_isolate_ready(isolate_ez_bridge_enforcer_side_uds_path)
         .await
         .expect("Setup isolate should be ready");
-    let workload_manifests = load_workload_manifests_from_paths(
-        Some("enforcer/manifest_parser/test/testdata/v2_ratified.json"),
-        Some("enforcer/manifest_parser/test/testdata/v2_opaque.json"),
-    )
-    .expect("Should parse workload manifests");
+    let workload_manifests = load_workload_manifests_from_paths(V2_WORKLOAD_MANIFEST_PATHS)
+        .expect("Should parse workload manifests");
     let response = harness
         .container_manager_requester
-        .load_workload_manifests(LoadWorkloadManifestsRequest {
-            workload_manifests: workload_manifests.clone(),
-        })
+        .load_workload_manifests(LoadWorkloadManifestsRequest { workload_manifests })
         .await
         .expect("Should load workload manifests without starting isolates");
     let indices = response.registered_indices;
     assert_eq!(indices.len(), 3);
-    let greeter_index = harness
+    let pubsub_broker_index = harness
         .isolate_service_mapper
         .get_service_index(&IsolateServiceInfo {
             operator_domain: V2_RATIFIED_PUBLISHER_ID.to_string(),
-            service_name: GREETER_SERVICE.to_string(),
+            service_name: PUBSUB_BROKER_SERVICE.to_string(),
             ..Default::default()
         })
         .await
-        .expect("Ratified Greeter should be registered");
-    assert!(service_info_has_valid_binary_index(&greeter_index));
+        .expect("Ratified PubSubBroker should be registered");
+    assert!(service_info_has_valid_binary_index(&pubsub_broker_index));
     let auth_index = harness
         .isolate_service_mapper
         .get_service_index(&IsolateServiceInfo {
@@ -283,11 +261,8 @@ async fn test_v2_load_workload_manifests_without_starting_isolates() {
         .await
         .expect("Ratified AuthService should be registered");
     assert!(service_info_has_valid_binary_index(&auth_index));
-    let isolate_packages: HashMap<BinaryServicesIndex, String> = indices
-        .into_iter()
-        .zip(workload_manifests.into_parsed_isolates().expect("Failed to parse workload isolates"))
-        .map(|(idx, i)| (idx, i.package_filename))
-        .collect();
+    let isolate_packages: HashMap<BinaryServicesIndex, String> =
+        indices.into_iter().map(|idx| (idx, WORKLOAD_PACKAGE_PATH.to_string())).collect();
     let started_response = harness
         .container_manager_requester
         .load_workload_isolates(LoadWorkloadIsolatesRequest { isolate_packages })
@@ -385,7 +360,7 @@ async fn test_v2_ratified_isolate_accepts_non_ez_trusted_publisher() {
         "test_operator".to_string(),
         vec![
             setup_startup_parameters(),
-            startup_parameters(V2_RATIFIED_PUBLISHER_ID, "crypto_oracle", 1),
+            startup_parameters(V2_RATIFIED_PUBLISHER_ID, RATIFIED_2_ISOLATE_NAME, 1),
         ],
     )
     .await
@@ -398,10 +373,9 @@ async fn test_v2_ratified_isolate_accepts_non_ez_trusted_publisher() {
         .expect("Setup isolate should be ready");
 
     harness
-        .load_workload_manifests_from_paths(
-            Some("enforcer/manifest_parser/test/testdata/v2_ratified_external_publisher.json"),
-            None,
-        )
+        .load_workload_manifests_from_paths(&[
+            "enforcer/manifest_parser/test/testdata/v2_ratified_2.json",
+        ])
         .await
         .expect("Ratified isolate with a non EZ_Trusted publisher should load");
 
@@ -410,16 +384,16 @@ async fn test_v2_ratified_isolate_accepts_non_ez_trusted_publisher() {
             .await
             .expect("Workload container should start and be readied");
 
-    let greeter_index = harness
+    let auth_service_index = harness
         .isolate_service_mapper
         .get_service_index(&IsolateServiceInfo {
             operator_domain: V2_RATIFIED_PUBLISHER_ID.to_string(),
-            service_name: GREETER_SERVICE.to_string(),
+            service_name: AUTH_SERVICE.to_string(),
             ..Default::default()
         })
         .await
-        .expect("Ratified Greeter should be registered under its own publisher domain");
-    assert!(service_info_has_valid_binary_index(&greeter_index));
+        .expect("Ratified AuthService should be registered under its own publisher domain");
+    assert!(service_info_has_valid_binary_index(&auth_service_index));
 
     harness.stop().await;
     for (id, _) in setup_containers.into_iter().chain(workload_containers.into_iter()) {
@@ -529,10 +503,9 @@ async fn test_v2_load_workload_manifests_fails_with_startup_parameters_for_unkno
         .expect("Setup isolate should be ready");
 
     let err = harness
-        .load_workload_manifests_from_paths(
-            None,
-            Some("enforcer/manifest_parser/test/testdata/v2_opaque.json"),
-        )
+        .load_workload_manifests_from_paths(&[
+            "enforcer/manifest_parser/test/testdata/v2_opaque_helloworld.json",
+        ])
         .await
         .expect_err("Startup parameters for an unknown Isolate should be rejected");
     assert!(format!("{err:#}").contains("unknown Isolate"), "{err:#}");
@@ -549,7 +522,7 @@ async fn test_v2_load_workload_manifests_fails_with_zero_number_of_isolates_for_
         "test_operator".to_string(),
         vec![
             setup_startup_parameters(),
-            startup_parameters(V2_RATIFIED_PUBLISHER_ID, RATIFIED_1_ISOLATE_NAME, 0),
+            startup_parameters(V2_RATIFIED_PUBLISHER_ID, PUBSUB_BROKER_ISOLATE_NAME, 0),
             startup_parameters(V2_RATIFIED_PUBLISHER_ID, RATIFIED_2_ISOLATE_NAME, 1),
         ],
     )
@@ -564,10 +537,10 @@ async fn test_v2_load_workload_manifests_fails_with_zero_number_of_isolates_for_
         .expect("Setup isolate should be ready");
 
     let err = harness
-        .load_workload_manifests_from_paths(
-            Some("enforcer/manifest_parser/test/testdata/v2_ratified.json"),
-            None,
-        )
+        .load_workload_manifests_from_paths(&[
+            "enforcer/manifest_parser/test/testdata/v2_ratified_pubsub_broker.json",
+            "enforcer/manifest_parser/test/testdata/v2_ratified_2.json",
+        ])
         .await
         .expect_err("Ratified Isolate with number_of_isolates = 0 should be rejected");
     assert!(format!("{err:#}").contains("number_of_isolates must be >= 1"), "{err:#}");
@@ -601,10 +574,9 @@ async fn test_v2_load_workload_manifests_fails_with_reserved_environment_variabl
         .expect("Setup isolate should be ready");
 
     let err = harness
-        .load_workload_manifests_from_paths(
-            None,
-            Some("enforcer/manifest_parser/test/testdata/v2_opaque.json"),
-        )
+        .load_workload_manifests_from_paths(&[
+            "enforcer/manifest_parser/test/testdata/v2_opaque_helloworld.json",
+        ])
         .await
         .expect_err("Opaque Isolate startup parameters must not set reserved EZ_ variables");
     assert!(format!("{err:#}").contains("reserved 'EZ_' environment variables"), "{err:#}");
@@ -635,10 +607,9 @@ async fn test_v2_load_workload_manifests_fails_with_negative_number_of_isolates_
         .expect("Setup isolate should be ready");
 
     let err = harness
-        .load_workload_manifests_from_paths(
-            None,
-            Some("enforcer/manifest_parser/test/testdata/v2_opaque.json"),
-        )
+        .load_workload_manifests_from_paths(&[
+            "enforcer/manifest_parser/test/testdata/v2_opaque_helloworld.json",
+        ])
         .await
         .expect_err("Opaque Isolate with negative number_of_isolates should be rejected");
     assert!(format!("{err:#}").contains("number_of_isolates cannot be negative"), "{err:#}");
@@ -656,7 +627,7 @@ async fn test_v2_starts_isolate_with_slash_in_publisher_id() {
         "test_operator".to_string(),
         vec![
             setup_startup_parameters(),
-            startup_parameters(slash_publisher_id, "crypto_oracle", 1),
+            startup_parameters(slash_publisher_id, RATIFIED_2_ISOLATE_NAME, 1),
         ],
     )
     .await
@@ -668,20 +639,13 @@ async fn test_v2_starts_isolate_with_slash_in_publisher_id() {
         .await
         .expect("Setup isolate should be ready");
 
-    let mut workload_manifests = load_workload_manifests_from_paths(
-        Some("enforcer/manifest_parser/test/testdata/v2_ratified_external_publisher.json"),
-        None::<&str>,
-    )
+    let mut workload_manifests = load_workload_manifests_from_paths(&[
+        "enforcer/manifest_parser/test/testdata/v2_ratified_2.json",
+    ])
     .expect("Should parse workload manifest");
-    workload_manifests.ratified_isolate_manifest.as_mut().unwrap().ratified_isolate_descriptors
-        [0]
-    .isolate_type
-    .as_mut()
-    .unwrap()
-    .publisher_id = slash_publisher_id.to_string();
+    workload_manifests.binary_manifests[0].isolate_type.as_mut().unwrap().publisher_id =
+        slash_publisher_id.to_string();
 
-    let parsed_isolates =
-        workload_manifests.clone().into_parsed_isolates().expect("Failed to parse isolates");
     let resp = harness
         .container_manager_requester
         .load_workload_manifests(LoadWorkloadManifestsRequest { workload_manifests })
@@ -690,8 +654,7 @@ async fn test_v2_starts_isolate_with_slash_in_publisher_id() {
     let isolate_packages: HashMap<BinaryServicesIndex, String> = resp
         .registered_indices
         .into_iter()
-        .zip(parsed_isolates)
-        .map(|(idx, i)| (idx, i.package_filename))
+        .map(|idx| (idx, WORKLOAD_PACKAGE_PATH.to_string()))
         .collect();
     harness
         .container_manager_requester
@@ -704,16 +667,16 @@ async fn test_v2_starts_isolate_with_slash_in_publisher_id() {
             .await
             .expect("Workload container with slash in publisher_id should start and be readied");
 
-    let greeter_index = harness
+    let auth_service_index = harness
         .isolate_service_mapper
         .get_service_index(&IsolateServiceInfo {
             operator_domain: slash_publisher_id.to_string(),
-            service_name: GREETER_SERVICE.to_string(),
+            service_name: AUTH_SERVICE.to_string(),
             ..Default::default()
         })
         .await
         .expect("Service should be registered under publisher_id containing slash");
-    assert!(service_info_has_valid_binary_index(&greeter_index));
+    assert!(service_info_has_valid_binary_index(&auth_service_index));
 
     harness.stop().await;
     for (id, _) in setup_containers.into_iter().chain(workload_containers.into_iter()) {
