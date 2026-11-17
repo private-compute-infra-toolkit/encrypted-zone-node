@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// TODO(b/581995848): Replace unwrap with non-panicking error handling.
-#![allow(clippy::unwrap_used)]
-
 use data_scope::error::DataScopeError;
 use data_scope::manifest_validator::ManifestValidator;
 use data_scope::request::{
@@ -41,7 +38,6 @@ use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{metadata::MetadataValue, Request, Status, Streaming};
 use traces::context::inject_trace_context;
-#[deny(clippy::unwrap_used)]
 pub mod error;
 use dashmap::DashMap;
 use data_scope::data_scope_validator::{
@@ -209,12 +205,14 @@ impl Junction for IsolateJunction {
                 self.metrics
                     .isolate_rpc_duration_sec
                     .record(isolate_rpc_start_time.elapsed().as_secs_f64(), &metric_attr.base());
-                let Ok(invoke_isolate_response) = invoke_isolate_result else {
-                    self.metrics.record_error(&metric_attr.base(), "invoke_isolate_error");
-                    // TODO(b/430986767) add retry send and reset
-                    return Err(EzError::Status(invoke_isolate_result.unwrap_err()));
+                let mut invoke_isolate_response = match invoke_isolate_result {
+                    Ok(response) => response.into_inner(),
+                    Err(err) => {
+                        self.metrics.record_error(&metric_attr.base(), "invoke_isolate_error");
+                        // TODO(b/430986767) add retry send and reset
+                        return Err(EzError::Status(err));
+                    }
                 };
-                let mut invoke_isolate_response = invoke_isolate_response.into_inner();
 
                 // Read response payload from shared memory if applicable
                 self.read_response_payload_from_shm(
@@ -497,16 +495,19 @@ impl IsolateJunction {
         let connect_result = self
             .establish_isolate_streaming_rpc(destination_isolate_id, outbound_stream, args.timeout)
             .await;
-        let Ok(invoke_isolate_response_stream) = connect_result else {
-            let connect_error = connect_result.unwrap_err();
-            let connect_ez_error = EzError::Status(match connect_error.downcast_ref::<Status>() {
-                Some(status) => status.clone(),
-                _ => Status::internal(format!(
-                    "Error initiating stream with Isolate: {connect_error:#?}"
-                )),
-            });
-            let _ = args.junction_to_client_tx.send(Err(connect_ez_error)).await;
-            return;
+        let invoke_isolate_response_stream = match connect_result {
+            Ok(stream) => stream,
+            Err(connect_error) => {
+                let connect_ez_error =
+                    EzError::Status(match connect_error.downcast_ref::<Status>() {
+                        Some(status) => status.clone(),
+                        _ => Status::internal(format!(
+                            "Error initiating stream with Isolate: {connect_error:#?}"
+                        )),
+                    });
+                let _ = args.junction_to_client_tx.send(Err(connect_ez_error)).await;
+                return;
+            }
         };
 
         let self_clone2 = self.clone();
@@ -670,21 +671,16 @@ impl IsolateJunction {
 
             let result = async {
                 let _timer = self.metrics.track_message_processing(metric_attr.request());
-                let validate_scope_result = self
-                    .validate_streaming_request_scope(&invoke_isolate_request, isolate_id)
-                    .await;
-                let Ok(_) = validate_scope_result else {
-                    if junction_to_client_tx
-                        .send(Err(validate_scope_result.unwrap_err().to_ez_error()))
-                        .await
-                        .is_err()
-                    {
+                if let Err(err) =
+                    self.validate_streaming_request_scope(&invoke_isolate_request, isolate_id).await
+                {
+                    if junction_to_client_tx.send(Err(err.to_ez_error())).await.is_err() {
                         // Break the stream if junction fails to send the error response
                         log::warn!("Failed to send error response from the junction to the client");
                         return Err(());
                     }
                     return Ok(());
-                };
+                }
                 self.write_request_payload_to_shm(isolate_id, &mut invoke_isolate_request).await;
                 match mask_streaming_msg_id(stream_id, &mut invoke_isolate_request) {
                     Ok(_) => {}

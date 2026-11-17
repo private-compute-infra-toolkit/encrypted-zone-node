@@ -31,7 +31,10 @@ use mtls::mtls::{
     extract_sni_params, sni, EzMtlsManager, EzMtlsManagerConfig, IsolateIdentity, SpiffeUri,
 };
 use outbound_ez_to_ez_client::OutboundEzToEzClient;
-use outbound_ez_to_ez_handler::{OutboundEzToEzHandler, OutboundTlsConfig};
+use outbound_ez_to_ez_handler::{
+    OutboundEzToEzHandler, OutboundTlsConfig, TLS_CHANNEL_CONNECT_RETRY_COUNT,
+    TLS_CHANNEL_CONNECT_TIMEOUT,
+};
 use payload_proto::enforcer::v1::{
     ez_hybrid_payload::DeliveryMethod, EzHybridPayload, EzPayloadData,
 };
@@ -42,7 +45,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, Notify};
 use tokio_stream::wrappers::{TcpListenerStream, UnixListenerStream};
 use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status};
@@ -509,7 +512,7 @@ async fn create_test_context() -> TestContext {
         TestMetrics::default(),
         Some(outbound_tls_config.clone()),
         /* expect_tls_config= */ false,
-        /* enable_per_unary_tls_channel= */ true,
+        /* enable_dedicated_tls_channel= */ true,
         4 * 1024 * 1024,
     )
     .await
@@ -635,9 +638,6 @@ async fn test_e2e_mtls_streaming() {
 /// This verifies that SPIFFE identity verification is working.
 #[tokio::test]
 async fn test_e2e_mtls_wrong_identity() {
-    // Set retry count to 1 to fail fast in test
-    std::env::set_var("PROXY_CONNECT_RETRY_COUNT", "1");
-
     let key_path = "enforcer/ez_to_ez/test/testdata/leaf.key".to_string();
     let csr_path = "enforcer/ez_to_ez/test/testdata/leaf.csr".to_string();
 
@@ -731,7 +731,7 @@ async fn test_e2e_mtls_wrong_identity() {
         TestMetrics::default(),
         Some(outbound_tls_config),
         /* expect_tls_config= */ false,
-        /* enable_per_unary_tls_channel= */ true,
+        /* enable_dedicated_tls_channel= */ true,
         4 * 1024 * 1024,
     )
     .await
@@ -812,7 +812,7 @@ async fn test_outbound_pending_then_set_tls_config_works() {
         TestMetrics::default(),
         /* tls_config= */ None,
         /* expect_tls_config= */ true,
-        /* enable_per_unary_tls_channel= */ true,
+        /* enable_dedicated_tls_channel= */ true,
         4 * 1024 * 1024,
     )
     .await
@@ -1172,8 +1172,7 @@ async fn test_tls_handshake_fails_open_when_allowed_peer_identities_empty() {
 async fn test_outbound_per_unary_tls_channel_enabled_vs_disabled() {
     let ctx = create_test_context().await;
     let counting_sock = ctx._dir.path().join("counting.sock");
-    let (addr, tls_handshakes, counting_task) =
-        start_counting_tls_uds_server(&counting_sock, ctx.acceptor.clone());
+    let server = start_counting_tls_uds_server(&counting_sock, ctx.acceptor.clone());
     let meta = ControlPlaneMetadata {
         destination_operator_domain: ctx.client_manager.self_identity().operator_domain.clone(),
         ..Default::default()
@@ -1188,62 +1187,215 @@ async fn test_outbound_per_unary_tls_channel_enabled_vs_disabled() {
         ..Default::default()
     };
 
-    // 1. Default (enabled): each unary RPC opens 1 fresh TLS channel; streams share the pool.
-    let per_unary = OutboundEzToEzHandler::new(
-        addr.clone(),
+    // 1. Enabled: each unary RPC and each streaming call opens 1 fresh TLS channel.
+    let dedicated = OutboundEzToEzHandler::new(
+        server.addr.clone(),
         TestMetrics::default(),
         Some(ctx.outbound_tls_config.clone()),
         false,
-        /* enable_per_unary_tls_channel= */ true,
+        /* enable_dedicated_tls_channel= */ true,
         4 * 1024 * 1024,
     )
     .await
     .unwrap();
     let wait = Duration::from_secs(2);
-    assert_eq!(tls_handshakes.load(Ordering::SeqCst), 0);
+    assert_eq!(server.tls_handshakes.load(Ordering::SeqCst), 0);
     for expected in 1..=3 {
         let msg = format!("unary-{expected}");
-        let res = tokio::time::timeout(wait, per_unary.remote_invoke(make_req(&msg), None))
+        let res = tokio::time::timeout(wait, dedicated.remote_invoke(make_req(&msg), None))
             .await
             .unwrap()
             .unwrap();
         assert_eq!(extract_first_datagram(res), msg.as_bytes());
-        assert_eq!(tls_handshakes.load(Ordering::SeqCst), expected);
+        assert_eq!(server.tls_handshakes.load(Ordering::SeqCst), expected);
     }
     for idx in 1..=2 {
         let (req_tx, req_rx) = tokio::sync::mpsc::channel(4);
         let mut res_rx =
-            per_unary.remote_streaming_connect(Some(&meta), req_rx, None).await.unwrap();
+            dedicated.remote_streaming_connect(Some(&meta), req_rx, None).await.unwrap();
         let msg = format!("stream-{idx}");
         req_tx.send(make_req(&msg)).await.unwrap();
         let res = tokio::time::timeout(wait, res_rx.recv()).await.unwrap().unwrap().unwrap();
         assert_eq!(extract_first_datagram(res), msg.as_bytes());
-        assert_eq!(tls_handshakes.load(Ordering::SeqCst), 3 + grpc_connector::DEFAULT_POOL_SIZE);
+        assert_eq!(server.tls_handshakes.load(Ordering::SeqCst), 3 + idx);
+        drop(req_tx);
+        assert!(tokio::time::timeout(wait, res_rx.recv()).await.unwrap().is_none());
     }
+    server.wait_for_active_connections(0, wait).await;
 
-    // 2. Disabled: unary RPCs initialize and reuse the channel pool.
-    tls_handshakes.store(0, Ordering::SeqCst);
+    // 2. Disabled: both unary and streaming RPCs initialize and reuse the per-SNI channel pool.
+    server.tls_handshakes.store(0, Ordering::SeqCst);
     let pooled = OutboundEzToEzHandler::new(
-        addr,
+        server.addr.clone(),
         TestMetrics::default(),
         Some(ctx.outbound_tls_config),
         false,
-        /* enable_per_unary_tls_channel= */ false,
+        /* enable_dedicated_tls_channel= */ false,
         4 * 1024 * 1024,
     )
     .await
     .unwrap();
     for idx in 1..=3 {
-        let msg = format!("pooled-{idx}");
+        let msg = format!("pooled-unary-{idx}");
         let res = tokio::time::timeout(wait, pooled.remote_invoke(make_req(&msg), None))
             .await
             .unwrap()
             .unwrap();
         assert_eq!(extract_first_datagram(res), msg.as_bytes());
-        assert_eq!(tls_handshakes.load(Ordering::SeqCst), grpc_connector::DEFAULT_POOL_SIZE);
+        assert_eq!(server.tls_handshakes.load(Ordering::SeqCst), grpc_connector::DEFAULT_POOL_SIZE);
+    }
+    for idx in 1..=2 {
+        let (req_tx, req_rx) = tokio::sync::mpsc::channel(4);
+        let mut res_rx = pooled.remote_streaming_connect(Some(&meta), req_rx, None).await.unwrap();
+        let msg = format!("pooled-stream-{idx}");
+        req_tx.send(make_req(&msg)).await.unwrap();
+        let res = tokio::time::timeout(wait, res_rx.recv()).await.unwrap().unwrap().unwrap();
+        assert_eq!(extract_first_datagram(res), msg.as_bytes());
+        assert_eq!(server.tls_handshakes.load(Ordering::SeqCst), grpc_connector::DEFAULT_POOL_SIZE);
+        drop(req_tx);
+        assert!(tokio::time::timeout(wait, res_rx.recv()).await.unwrap().is_none());
+        server.wait_for_active_connections(grpc_connector::DEFAULT_POOL_SIZE, wait).await;
     }
 
-    counting_task.abort();
+    server.task.abort();
+    let _ = ctx.mock_service_tx.send(());
+    ctx.server_task.abort();
+}
+
+#[tokio::test]
+async fn test_outbound_per_stream_tls_channel_reconnects_with_handshake() {
+    let ctx = create_test_context().await;
+    let counting_sock = ctx._dir.path().join("counting_stream.sock");
+    let server = start_counting_tls_uds_server(&counting_sock, ctx.acceptor.clone());
+    let meta = ControlPlaneMetadata {
+        destination_operator_domain: ctx.client_manager.self_identity().operator_domain.clone(),
+        ..Default::default()
+    };
+    let make_req = |msg: &str| enforcer_proto::enforcer::v1::InvokeEzRequest {
+        control_plane_metadata: Some(meta.clone()),
+        isolate_request_payload: Some(EzHybridPayload {
+            delivery_method: Some(DeliveryMethod::InlineData(EzPayloadData {
+                datagrams: vec![msg.as_bytes().to_vec()],
+            })),
+        }),
+        ..Default::default()
+    };
+
+    // Dedicated TLS channel enabled: each stream connect/reconnect performs 1 fresh TLS handshake,
+    // reuses that session across messages on the open stream, and shuts down the TLS channel when
+    // the stream closes.
+    let per_stream = OutboundEzToEzHandler::new(
+        server.addr.clone(),
+        TestMetrics::default(),
+        Some(ctx.outbound_tls_config),
+        false,
+        /* enable_dedicated_tls_channel= */ true,
+        4 * 1024 * 1024,
+    )
+    .await
+    .unwrap();
+    let wait = Duration::from_secs(2);
+    assert_eq!(server.tls_handshakes.load(Ordering::SeqCst), 0);
+    assert_eq!(server.active_connections.load(Ordering::SeqCst), 0);
+    for expected in 1..=3 {
+        let (req_tx, req_rx) = tokio::sync::mpsc::channel(4);
+        let mut res_rx =
+            per_stream.remote_streaming_connect(Some(&meta), req_rx, None).await.unwrap();
+        assert_eq!(server.tls_handshakes.load(Ordering::SeqCst), expected);
+        server.wait_for_active_connections(1, wait).await;
+        for seq in 1..=2 {
+            let msg = format!("stream-{expected}-msg-{seq}");
+            req_tx.send(make_req(&msg)).await.unwrap();
+            let res = tokio::time::timeout(wait, res_rx.recv()).await.unwrap().unwrap().unwrap();
+            assert_eq!(extract_first_datagram(res), msg.as_bytes());
+            assert_eq!(server.tls_handshakes.load(Ordering::SeqCst), expected);
+            assert_eq!(server.active_connections.load(Ordering::SeqCst), 1);
+        }
+        drop(req_tx);
+        assert!(tokio::time::timeout(wait, res_rx.recv()).await.unwrap().is_none());
+        server.wait_for_active_connections(0, wait).await;
+    }
+
+    server.task.abort();
+    let _ = ctx.mock_service_tx.send(());
+    ctx.server_task.abort();
+}
+
+#[tokio::test]
+async fn test_outbound_dedicated_tls_channel_connect_retry_limit_and_timeout() {
+    let ctx = create_test_context().await;
+    let faulty_sock = ctx._dir.path().join("faulty_tls.sock");
+    let faulty_addr = format!("unix:{}", faulty_sock.to_str().unwrap());
+    let listener = tokio::net::UnixListener::bind(&faulty_sock).unwrap();
+
+    let count_attempts = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stall_handshake = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let (count_flag, stall_flag, attempts_clone) =
+        (count_attempts.clone(), stall_handshake.clone(), attempts.clone());
+    let accept_task = tokio::spawn(async move {
+        let mut held_streams = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            if count_flag.load(Ordering::SeqCst) {
+                attempts_clone.fetch_add(1, Ordering::SeqCst);
+                if stall_flag.load(Ordering::SeqCst) {
+                    held_streams.push(stream);
+                }
+            } else {
+                held_streams.push(stream);
+            }
+        }
+    });
+
+    let handler = OutboundEzToEzHandler::new(
+        faulty_addr,
+        TestMetrics::default(),
+        Some(ctx.outbound_tls_config),
+        /* expect_tls_config= */ false,
+        /* enable_dedicated_tls_channel= */ true,
+        4 * 1024 * 1024,
+    )
+    .await
+    .unwrap();
+
+    let meta = ControlPlaneMetadata {
+        destination_operator_domain: ctx.client_manager.self_identity().operator_domain.clone(),
+        ..Default::default()
+    };
+    let req = enforcer_proto::enforcer::v1::InvokeEzRequest {
+        control_plane_metadata: Some(meta.clone()),
+        ..Default::default()
+    };
+
+    // 1. Immediate EOF on TLS handshake stops after 1 initial attempt + bounded linear retries.
+    count_attempts.store(true, Ordering::SeqCst);
+    let retry_err = handler
+        .remote_invoke(req, None)
+        .await
+        .expect_err("Expected immediate handshake EOF to fail after bounded retries");
+    assert_eq!(attempts.load(Ordering::SeqCst), TLS_CHANNEL_CONNECT_RETRY_COUNT + 1);
+    let expected_retry_msg = format!("after {TLS_CHANNEL_CONNECT_RETRY_COUNT} retries");
+    assert!(
+        retry_err.to_string().contains(&expected_retry_msg),
+        "Unexpected retry error: {retry_err:#}"
+    );
+
+    // 2. Stalled TLS handshake aborts promptly once the overall connect timeout elapses.
+    attempts.store(0, Ordering::SeqCst);
+    stall_handshake.store(true, Ordering::SeqCst);
+    let (_req_tx, req_rx) = tokio::sync::mpsc::channel(1);
+    let timeout_err = match handler.remote_streaming_connect(Some(&meta), req_rx, None).await {
+        Ok(_) => panic!("Expected stalled TLS handshake to time out"),
+        Err(err) => err,
+    };
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    let expected_timeout_msg = format!("Timed out after {TLS_CHANNEL_CONNECT_TIMEOUT:?}");
+    assert!(
+        timeout_err.to_string().contains(&expected_timeout_msg),
+        "Unexpected timeout error: {timeout_err:#}"
+    );
+
+    accept_task.abort();
     let _ = ctx.mock_service_tx.send(());
     ctx.server_task.abort();
 }
@@ -1309,18 +1461,107 @@ fn extract_first_datagram(res: enforcer_proto::enforcer::v1::InvokeEzResponse) -
     }
 }
 
+struct CountingTlsServer {
+    addr: String,
+    tls_handshakes: Arc<AtomicUsize>,
+    active_connections: Arc<AtomicUsize>,
+    conn_changed: Arc<Notify>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl CountingTlsServer {
+    async fn wait_for_active_connections(&self, expected: usize, timeout: Duration) {
+        tokio::time::timeout(timeout, async {
+            loop {
+                let notified = self.conn_changed.notified();
+                if self.active_connections.load(Ordering::SeqCst) == expected {
+                    return;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .expect("Timed out waiting for expected active TLS connection count");
+    }
+}
+
+struct TrackedTlsStream<S> {
+    inner: mtls::mtls::BoringTlsStream<S>,
+    active_connections: Arc<AtomicUsize>,
+    conn_changed: Arc<Notify>,
+}
+
+impl<S> Drop for TrackedTlsStream<S> {
+    fn drop(&mut self) {
+        self.active_connections.fetch_sub(1, Ordering::SeqCst);
+        self.conn_changed.notify_waiters();
+    }
+}
+
+impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> tokio::io::AsyncRead
+    for TrackedTlsStream<S>
+{
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite
+    for TrackedTlsStream<S>
+{
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+impl<S: tonic::transport::server::Connected> tonic::transport::server::Connected
+    for TrackedTlsStream<S>
+{
+    type ConnectInfo = S::ConnectInfo;
+
+    fn connect_info(&self) -> Self::ConnectInfo {
+        self.inner.connect_info()
+    }
+}
+
 fn start_counting_tls_uds_server(
     socket_path: &std::path::Path,
     acceptor: boring::ssl::SslAcceptor,
-) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+) -> CountingTlsServer {
     let addr = format!("unix:{}", socket_path.to_str().unwrap());
     let uds = tokio::net::UnixListener::bind(socket_path).unwrap();
     let acceptor = Arc::new(acceptor);
     let tls_handshakes = Arc::new(AtomicUsize::new(0));
-    let handshakes = tls_handshakes.clone();
+    let active_connections = Arc::new(AtomicUsize::new(0));
+    let conn_changed = Arc::new(Notify::new());
+    let (handshakes, active, changed) =
+        (tls_handshakes.clone(), active_connections.clone(), conn_changed.clone());
     let incoming = UnixListenerStream::new(uds)
         .then(move |conn| {
-            let (acceptor, handshakes) = (acceptor.clone(), handshakes.clone());
+            let (acceptor, handshakes, active, changed) =
+                (acceptor.clone(), handshakes.clone(), active.clone(), changed.clone());
             async move {
                 let tls = tokio::time::timeout(
                     Duration::from_secs(1),
@@ -1330,7 +1571,13 @@ fn start_counting_tls_uds_server(
                 .ok()?
                 .ok()?;
                 handshakes.fetch_add(1, Ordering::SeqCst);
-                Some(Ok::<_, std::io::Error>(mtls::mtls::BoringTlsStream::new(tls)))
+                active.fetch_add(1, Ordering::SeqCst);
+                changed.notify_waiters();
+                Some(Ok::<_, std::io::Error>(TrackedTlsStream {
+                    inner: mtls::mtls::BoringTlsStream::new(tls),
+                    active_connections: active,
+                    conn_changed: changed,
+                }))
             }
         })
         .filter_map(|x| x);
@@ -1343,7 +1590,7 @@ fn start_counting_tls_uds_server(
             .await
             .unwrap();
     });
-    (addr, tls_handshakes, task)
+    CountingTlsServer { addr, tls_handshakes, active_connections, conn_changed, task }
 }
 
 // Leaf (testdata/leaf.csr) + 3 intermediate CAs (int-3 -> int-2 -> int-1) signed by testdata/root.key.

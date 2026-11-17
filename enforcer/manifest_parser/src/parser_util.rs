@@ -54,6 +54,11 @@ impl TryFrom<BinaryManifest> for ParsedIsolate {
             !manifest.binary_filename.is_empty(),
             "binary_filename cannot be empty in BinaryManifest"
         );
+        // EZ_ prefix variables are reserved as they are set by the Enforcer.
+        ensure!(
+            !manifest.environment_variables.iter().any(|e| e.starts_with("EZ_")),
+            "environment_variables in BinaryManifest cannot start with the reserved EZ_ prefix"
+        );
         let isolate_kind = manifest.isolate_kind.context("isolate_kind must be specified")?;
         let (package_filename, metrics_policy, kind) = match isolate_kind {
             // The Setup Isolate runs as a Ratified Isolate.
@@ -76,7 +81,8 @@ impl TryFrom<BinaryManifest> for ParsedIsolate {
             }
             binary_manifest::IsolateKind::Opaque(opaque) => {
                 validate_isolate_digest(manifest.isolate_digest.as_ref())?;
-                (String::new(), opaque.metrics_policy, IsolateKind::Opaque)
+                let kind = IsolateKind::Opaque { allowed_overrides: opaque.allowed_overrides };
+                (String::new(), opaque.metrics_policy, kind)
             }
         };
 
@@ -88,8 +94,8 @@ impl TryFrom<BinaryManifest> for ParsedIsolate {
             // Set from IsolateStartupParameters.
             number_of_isolates: 0,
             binary_filename: manifest.binary_filename,
-            command_line_arguments: vec![],
-            environment_variables: vec![],
+            command_line_arguments: manifest.command_line_arguments,
+            environment_variables: manifest.environment_variables,
             service_specs: convert_service_specs_v2_to_v1(manifest.service_specs)?,
             ez_backend_dependencies: convert_backend_dependencies_v2_to_v1(
                 manifest.ez_backend_dependencies,

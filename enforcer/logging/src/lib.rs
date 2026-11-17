@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// TODO(b/581995848): Replace unwrap with non-panicking error handling.
-#![allow(clippy::unwrap_used)]
-
 pub mod logger {
     #[cfg(feature = "debug")]
     // Sets up logging to console.
@@ -37,8 +34,8 @@ pub mod logger {
                     .build("console_logs", Box::new(console_appender)),
             )
             .build(log4rs::config::Root::builder().appender("console_logs").build(log_level))
-            .unwrap();
-        log4rs::init_config(config).unwrap();
+            .map_err(std::io::Error::other)?;
+        log4rs::init_config(config).map_err(std::io::Error::other)?;
         Ok(())
     }
     #[cfg(not(feature = "debug"))]

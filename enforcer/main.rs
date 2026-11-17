@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// TODO(b/581995848): Replace expect with non-panicking error handling.
-#![allow(clippy::expect_used)]
-
 use anyhow::Context;
 use clap::Parser;
 use container_custom::ContainerCustom;
@@ -202,9 +199,9 @@ struct EnforcerInputs {
         num_args = 0..=1,
         require_equals = true,
         action = clap::ArgAction::Set,
-        help = "Creates a new outbound TLS channel for each unary EZ-to-EZ request to allow \
-                per-request load balancing. Streaming EZ-to-EZ calls continue to use the channel \
-                pool."
+        help = "Creates a new outbound TLS channel for each unary and streaming EZ-to-EZ call \
+                so that unary requests and stream connects/reconnects perform a fresh TLS \
+                handshake and load-balance across peers."
     )]
     ez_to_ez_per_unary_tls: bool,
 
@@ -618,7 +615,10 @@ fn main() -> anyhow::Result<()> {
 
         // Clean-up when Enforcer receives SIGINT
         tokio::spawn(async move {
-            tokio::signal::ctrl_c().await.expect("Could not add SIGINT handler");
+            if let Err(e) = tokio::signal::ctrl_c().await {
+                log::error!("Could not add SIGINT handler: {e:?}");
+                return;
+            }
             log::info!("ctrl-c received! Cleaning-up...");
             container_manager.stop().await;
             std::process::exit(0); // Without this, Enforcer will never end.

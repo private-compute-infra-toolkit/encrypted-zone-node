@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// TODO(b/581995848): Replace expect with non-panicking error handling.
-#![allow(clippy::expect_used)]
-
 use anyhow::{Context, Result};
 use manifest_proto::enforcer::v1::ez_manifest::ManifestType;
 use manifest_proto::enforcer::v1::{
@@ -33,11 +30,14 @@ const PROTO_DESCRIPTOR_V1_BYTES: &[u8] = include_bytes!(env!("MANIFEST_V1_DESCRI
 
 static V1_DESCRIPTOR_POOL: OnceLock<DescriptorPool> = OnceLock::new();
 
-fn get_v1_descriptor_pool() -> &'static DescriptorPool {
-    V1_DESCRIPTOR_POOL.get_or_init(|| {
-        DescriptorPool::decode(PROTO_DESCRIPTOR_V1_BYTES)
-            .expect("embedded v1 descriptor set bytes must be valid")
-    })
+fn get_v1_descriptor_pool() -> Result<&'static DescriptorPool> {
+    if let Some(pool) = V1_DESCRIPTOR_POOL.get() {
+        return Ok(pool);
+    }
+    let pool = DescriptorPool::decode(PROTO_DESCRIPTOR_V1_BYTES)
+        .context("embedded v1 descriptor set bytes must be valid")?;
+    let _ = V1_DESCRIPTOR_POOL.set(pool);
+    V1_DESCRIPTOR_POOL.get().context("v1 descriptor pool must be initialized")
 }
 
 /// Parses a legacy (v1) JSON manifest file into an [`EzManifest`].
@@ -45,7 +45,7 @@ pub fn parse_manifest(manifest_path: impl AsRef<Path>) -> Result<EzManifest> {
     let path = manifest_path.as_ref();
     let manifest_json_string = read_to_string(path)
         .context(format!("couldn't open manifest Json file at: {}", path.display()))?;
-    parse_proto_message(get_v1_descriptor_pool(), "enforcer.v1.EzManifest", &manifest_json_string)
+    parse_proto_message(get_v1_descriptor_pool()?, "enforcer.v1.EzManifest", &manifest_json_string)
 }
 
 /// Flattens an [`EzManifest`] (binary or bundle) into a list of [`ParsedIsolate`]s.
@@ -79,7 +79,7 @@ fn flatten_manifest_helper(ez_manifest: EzManifest, output: &mut Vec<ParsedIsola
                     "services_to_intercept cannot be set for Opaque Isolate {}",
                     ez_manifest.isolate_name
                 );
-                IsolateKind::Opaque
+                IsolateKind::Opaque { allowed_overrides: vec![] }
             };
             output.push(ParsedIsolate {
                 isolate_name: ez_manifest.isolate_name,
@@ -105,7 +105,11 @@ pub fn parse_isolate_runtime_configs(configs_json: &str) -> Result<IsolateRuntim
     if configs_json.is_empty() {
         return Ok(IsolateRuntimeConfigs::default());
     }
-    parse_proto_message(get_v1_descriptor_pool(), "enforcer.v1.IsolateRuntimeConfigs", configs_json)
+    parse_proto_message(
+        get_v1_descriptor_pool()?,
+        "enforcer.v1.IsolateRuntimeConfigs",
+        configs_json,
+    )
 }
 
 /// Serializes a vector of [`EzBackendDependency`] into a textproto string.
@@ -113,7 +117,7 @@ pub fn serialize_backend_dependencies(deps: Vec<EzBackendDependency>) -> Result<
     let wrapped = EzBackendDependencies { ez_backend_dependencies: deps };
     let bytes = wrapped.encode_to_vec();
 
-    let pool = get_v1_descriptor_pool();
+    let pool = get_v1_descriptor_pool()?;
     let descriptor = pool
         .get_message_by_name("enforcer.v1.EzBackendDependencies")
         .context("Couldn't find message descriptor for enforcer.v1.EzBackendDependencies")?;

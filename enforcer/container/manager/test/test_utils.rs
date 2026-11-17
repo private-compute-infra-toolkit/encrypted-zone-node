@@ -70,6 +70,8 @@ pub const MAX_DECODING_SIZE: usize = 4 * 1024 * 1024;
 pub const SHM_NUM_SLOTS: u64 = 10;
 pub const SHM_SLOT_SIZE: u64 = 64;
 pub const SHM_PAYLOAD_THRESHOLD: u64 = 100 * 1024 * 1024;
+pub const ISOLATE_NAME_ENV_PREFIX: &str = "EZ_ISOLATE_NAME=";
+pub const PUBLISHER_ID_ENV_PREFIX: &str = "EZ_PUBLISHER_ID=";
 pub const JSON_MANIFEST_PATH_ONE_ISOLATE: &str =
     "enforcer/container/manager/test/testdata/test_manifest_one_isolate.json";
 pub const JSON_MANIFEST_PATH_MULTIPLE_ISOLATE: &str =

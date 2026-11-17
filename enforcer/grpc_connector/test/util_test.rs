@@ -10,7 +10,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use grpc_connector::GrpcChannelPool;
-use grpc_connector::{connect_tls_from_env, get_grpc_timeout_or_log, try_parse_grpc_timeout};
+use grpc_connector::{
+    connect_tls, connect_tls_from_env, get_grpc_timeout_or_log, try_parse_grpc_timeout,
+};
 use grpc_connector_test_proto::enforcer::grpc_connector::test::{
     test_service_client::TestServiceClient,
     test_service_server::{TestService, TestServiceServer},
@@ -362,12 +364,24 @@ async fn test_connect_tls_from_env_tcp_rejected() {
     let (_acceptor, connector) = create_test_tls_acceptor_and_connector();
     let err = connect_tls_from_env(
         "http://127.0.0.1:8080",
-        connector,
+        connector.clone(),
         /*sni=*/ "localhost".to_string(),
     )
     .await
     .expect_err("Expected TLS over TCP to fail");
     assert!(err.to_string().contains("TLS over TCP is not supported"));
+
+    let uds_err = connect_tls(
+        "unix:/tmp/nonexistent-connect-tls-test.sock".to_string(),
+        /*retry_count=*/ 2,
+        /*retry_multiplier=*/ 1,
+        /*initial_delay_ms=*/ 10,
+        connector,
+        /*sni=*/ "localhost".to_string(),
+    )
+    .await
+    .expect_err("Expected missing UDS socket to fail after bounded retries");
+    assert!(uds_err.to_string().contains("Failed to connect to UDS TLS endpoint"));
 }
 
 #[tokio::test]

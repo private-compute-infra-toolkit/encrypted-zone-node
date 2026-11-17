@@ -205,8 +205,9 @@ pub async fn connect_tls_from_env(
     .await
 }
 
-/// Establishes a TLS-enabled connection to a gRPC service and returns the channel.
-async fn connect_tls(
+/// Establishes a single TLS-enabled connection to a gRPC service with configurable retry
+/// parameters and returns the channel.
+pub async fn connect_tls(
     address: String,
     retry_count: usize,
     retry_multiplier: u64,

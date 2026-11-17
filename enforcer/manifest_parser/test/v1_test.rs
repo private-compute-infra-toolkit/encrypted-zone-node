@@ -248,7 +248,7 @@ fn test_flatten_manifest() {
         isolates[0].binary_filename,
         "/usr/local/bin/summation_by_lookup_table_with_backend"
     );
-    assert_eq!(isolates[0].kind, IsolateKind::Opaque);
+    assert_eq!(isolates[0].kind, IsolateKind::Opaque { allowed_overrides: vec![] });
     assert_eq!(isolates[1].publisher_id, "playground_example");
     assert_eq!(isolates[1].binary_filename, "/usr/local/bin/summation_precomputed_backend");
     assert_eq!(isolates[1].kind, IsolateKind::Ratified { services_to_intercept: vec![] });

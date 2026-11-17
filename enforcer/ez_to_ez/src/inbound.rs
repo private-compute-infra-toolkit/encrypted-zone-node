@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// TODO(b/581995848): Replace unwrap with non-panicking error handling.
-#![allow(clippy::unwrap_used)]
-
 use boring::ssl::SslAcceptor;
 use data_scope_proto::enforcer::v1::{DataScopeType, EzStaticScopeInfo};
 use enforcer_proto::enforcer::v1::{
@@ -330,10 +327,12 @@ pub async fn launch_server(
         if let Err(e) = std::fs::remove_file(path) {
             log::warn!("Could not remove old UDS socket at {path:?}: {e}. This may be ignored if the file did not exist.");
         }
-        let uds_result = tokio::net::UnixListener::bind(path);
-        let Ok(uds) = uds_result else {
-            log::error!("Failed to bind to UDS at {path:?}: {:?}", uds_result.unwrap_err());
-            return;
+        let uds = match tokio::net::UnixListener::bind(path) {
+            Ok(uds) => uds,
+            Err(e) => {
+                log::error!("Failed to bind to UDS at {path:?}: {e:?}");
+                return;
+            }
         };
         let uds_stream = UnixListenerStream::new(uds);
         if let Some(config) = tls_config {

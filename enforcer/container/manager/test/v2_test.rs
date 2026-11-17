@@ -110,25 +110,31 @@ async fn test_container_manager_v2_start_multiple_isolates() {
     {
         let tracker = FakeContainer::get_tracker();
 
-        // Verify Setup container args
-        let setup_container = tracker
+        // Each container is started with the arguments and environment variables of its manifest.
+        let mut arguments_and_variables: Vec<_> = tracker
             .iter()
-            .find(|c| c.value().binary_filename.as_deref() == Some(SETUP_BINARY))
-            .expect("Setup container should be tracked");
-        assert!(setup_container.value().command_line_arguments.is_empty());
-
-        // All three workload test manifests set binary_filename to HELLOWORLD_BINARY
-        // ("/usr/local/bin/main"), whereas the Setup Isolate uses SETUP_BINARY.
-        let workload_containers: Vec<_> = tracker
-            .iter()
-            .filter(|c| c.value().binary_filename.as_deref() == Some(HELLOWORLD_BINARY))
+            .map(|c| (c.value().command_line_arguments.clone(), manifest_variables(&c.value().env)))
             .collect();
-        assert_eq!(workload_containers.len(), 3);
-        for container in workload_containers {
-            assert!(container.value().command_line_arguments.is_empty());
-        }
+        arguments_and_variables.sort();
+        assert_eq!(
+            arguments_and_variables,
+            [
+                // pubsub_broker
+                (vec![], vec![]),
+                // helloworld
+                (
+                    to_strings(&["--foo=manifest", "--verbose"]),
+                    to_strings(&["KEY=manifest", "LOG_LEVEL=info"])
+                ),
+                // setup_isolate
+                (to_strings(&["--mode=setup"]), to_strings(&["SETUP_ENV=1"])),
+                // ratified_2
+                (to_strings(&["--policy-flag=active"]), to_strings(&["BASE_ENV=1"])),
+            ]
+        );
 
         // Verify Layer 1 Enforcer platform environment variables on all containers
+        let mut observed_identities: Vec<(String, String)> = Vec::new();
         for container_ref in tracker.iter() {
             let envs = &container_ref.value().env;
             assert!(envs.iter().any(|e| e.starts_with("EZ_MAX_DECODING_MESSAGE_SIZE=")));
@@ -136,7 +142,39 @@ async fn test_container_manager_v2_start_multiple_isolates() {
             assert!(envs.iter().any(|e| e.starts_with("EZ_SHM_SLOT_SIZE=")));
             assert!(envs.iter().any(|e| e.starts_with("EZ_SHM_PAYLOAD_THRESHOLD=")));
             assert!(envs.iter().any(|e| e == "EZ_OPERATOR_ROLE=test_operator"));
+            let isolate_name_env = envs
+                .iter()
+                .find(|e| e.starts_with(ISOLATE_NAME_ENV_PREFIX))
+                .expect("Container should have EZ_ISOLATE_NAME")
+                .clone();
+            let publisher_id_env = envs
+                .iter()
+                .find(|e| e.starts_with(PUBLISHER_ID_ENV_PREFIX))
+                .expect("Container should have EZ_PUBLISHER_ID")
+                .clone();
+            observed_identities.push((isolate_name_env, publisher_id_env));
         }
+        observed_identities.sort();
+        let mut expected_identities = vec![
+            (
+                format!("{ISOLATE_NAME_ENV_PREFIX}{SETUP_ISOLATE_NAME}"),
+                format!("{PUBLISHER_ID_ENV_PREFIX}{V2_RATIFIED_PUBLISHER_ID}"),
+            ),
+            (
+                format!("{ISOLATE_NAME_ENV_PREFIX}{PUBSUB_BROKER_ISOLATE_NAME}"),
+                format!("{PUBLISHER_ID_ENV_PREFIX}{V2_RATIFIED_PUBLISHER_ID}"),
+            ),
+            (
+                format!("{ISOLATE_NAME_ENV_PREFIX}{RATIFIED_2_ISOLATE_NAME}"),
+                format!("{PUBLISHER_ID_ENV_PREFIX}{V2_RATIFIED_PUBLISHER_ID}"),
+            ),
+            (
+                format!("{ISOLATE_NAME_ENV_PREFIX}{HELLOWORLD_ISOLATE_NAME}"),
+                format!("{PUBLISHER_ID_ENV_PREFIX}{HELLOWORLD_DOMAIN}"),
+            ),
+        ];
+        expected_identities.sort();
+        assert_eq!(observed_identities, expected_identities);
     }
 
     harness.stop().await;
@@ -154,7 +192,10 @@ async fn test_v2_explicit_startup_parameters_scaling() {
         vec![
             setup_startup_parameters(),
             IsolateStartupParameters {
-                command_line_arguments: vec!["--foo=bar".to_string()],
+                command_line_arguments: vec![
+                    "--foo=bar".to_string(),
+                    "--verbose=false".to_string(),
+                ],
                 environment_variables: vec!["KEY=value".to_string()],
                 ..startup_parameters(HELLOWORLD_DOMAIN, HELLOWORLD_ISOLATE_NAME, 2)
             },
@@ -197,9 +238,16 @@ async fn test_v2_explicit_startup_parameters_scaling() {
             2,
             "2 container instances must be spawned for number_of_isolates = 2"
         );
+        let expected_isolate_name_env =
+            format!("{ISOLATE_NAME_ENV_PREFIX}{HELLOWORLD_ISOLATE_NAME}");
+        let expected_publisher_id_env = format!("{PUBLISHER_ID_ENV_PREFIX}{HELLOWORLD_DOMAIN}");
+        // --foo, --verbose, and KEY from the manifest are replaced by the overrides, which are added
+        // after the remaining entries.
         for oc in opaque_containers {
-            assert_eq!(oc.value().command_line_arguments, vec!["--foo=bar".to_string()]);
-            assert!(oc.value().env.iter().any(|e| e == "KEY=value"));
+            assert_eq!(oc.value().command_line_arguments, ["--foo=bar", "--verbose=false"]);
+            assert_eq!(manifest_variables(&oc.value().env), ["LOG_LEVEL=info", "KEY=value"]);
+            assert!(oc.value().env.iter().any(|e| e == &expected_isolate_name_env));
+            assert!(oc.value().env.iter().any(|e| e == &expected_publisher_id_env));
         }
     }
 
@@ -682,4 +730,71 @@ async fn test_v2_starts_isolate_with_slash_in_publisher_id() {
     for (id, _) in setup_containers.into_iter().chain(workload_containers.into_iter()) {
         ensure_isolate_stopped(id).await.expect("Container should stop");
     }
+}
+
+#[tokio::test]
+async fn test_v2_load_workload_manifests_fails_with_disallowed_overrides() {
+    // "--foo", "--verbose", and "KEY" are listed in allowed_overrides of v2_opaque_helloworld.json.
+    let flag_error = "must be --key=value";
+    let variable_error = "must be KEY=value";
+    let repeat_error = "Duplicate key in";
+    for (arguments, variables, rejected, expected_error) in [
+        (vec!["--bar=secret"], vec![], "command_line_arguments[0]", flag_error),
+        // Booleans have to be written as --verbose=true or --verbose=false.
+        (vec!["--verbose"], vec![], "command_line_arguments[0]", flag_error),
+        // KEY is allowed only as a variable, and --foo only as a flag.
+        (vec!["KEY=secret"], vec![], "command_line_arguments[0]", flag_error),
+        (vec![], vec!["--foo=secret"], "environment_variables[0]", variable_error),
+        (vec![], vec!["OTHER=secret"], "environment_variables[0]", variable_error),
+        (vec![], vec!["KEY"], "environment_variables[0]", variable_error),
+        (vec![], vec!["KEY=value", "KEY=secret"], "environment_variables[1]", repeat_error),
+    ] {
+        let mut harness = TestHarness::new_v2(
+            "enforcer/manifest_parser/test/testdata/v2_setup.json",
+            &IsolateRuntimeConfigs::default(),
+            "test_operator".to_string(),
+            vec![
+                setup_startup_parameters(),
+                IsolateStartupParameters {
+                    command_line_arguments: to_strings(&arguments),
+                    environment_variables: to_strings(&variables),
+                    ..startup_parameters(HELLOWORLD_DOMAIN, HELLOWORLD_ISOLATE_NAME, 1)
+                },
+            ],
+        )
+        .await
+        .expect("ContainerManager should start with v2 setup manifest");
+
+        let setup_containers = check_container_started(vec![SETUP_BINARY])
+            .await
+            .expect("Setup container should start");
+        let (fake_container_id, isolate_ez_bridge_enforcer_side_uds_path) =
+            setup_containers[0].clone();
+        let _client = notify_isolate_ready(isolate_ez_bridge_enforcer_side_uds_path)
+            .await
+            .expect("Setup isolate should be ready");
+
+        let err = harness
+            .load_workload_manifests_from_paths(&[
+                "enforcer/manifest_parser/test/testdata/v2_opaque_helloworld.json",
+            ])
+            .await
+            .expect_err("Overrides outside allowed_overrides should be rejected");
+        let err = format!("{err:#}");
+        assert!(err.contains(&format!("IsolateStartupParameters.{rejected} for Opaque")), "{err}");
+        assert!(err.contains(expected_error), "{err}");
+        assert!(!err.contains("secret"), "{err}");
+
+        harness.stop().await;
+        ensure_isolate_stopped(fake_container_id).await.expect("Container should stop");
+    }
+}
+
+/// Returns the environment variables without the EZ_ ones added by the Enforcer.
+fn manifest_variables(env: &[String]) -> Vec<String> {
+    env.iter().filter(|e| !e.starts_with("EZ_")).cloned().collect()
+}
+
+fn to_strings(values: &[&str]) -> Vec<String> {
+    values.iter().map(|v| v.to_string()).collect()
 }

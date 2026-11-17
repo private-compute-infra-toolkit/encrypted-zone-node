@@ -19,7 +19,10 @@
       ]
     }
   ],
+  "command_line_arguments": ["--foo=manifest", "--verbose"],
+  "environment_variables": ["KEY=manifest", "LOG_LEVEL=info"],
   "opaque": {
+    "allowed_overrides": ["--foo", "--verbose", "KEY"],
     "metrics_policy": {
       "allowed_metrics": [
         {

@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// TODO(b/581995848): Replace unwrap with non-panicking error handling.
-#![allow(clippy::unwrap_used)]
-
 use anyhow::Result;
 use data_scope_proto::enforcer::v1::{DataScopeType, EzDataScope, EzStaticScopeInfo};
 use enforcer_proto::enforcer::v1::{
@@ -111,11 +108,11 @@ impl EzPublicApi for EzPublicApiService {
         let metric_attr = MetricAttributes::from(&call_request);
         let _call_tracker = self.metrics.track_call(metric_attr.base());
 
-        if call_request.session_metadata.is_none() {
+        let Some(session_metadata) = call_request.session_metadata.take() else {
             return Err(
                 IsolateStatusCode::MissingField("session_metadata".to_string()).to_tonic_status()
             );
-        }
+        };
         if call_request.input_params.is_none() {
             return Err(
                 IsolateStatusCode::MissingField("input_params".to_string()).to_tonic_status()
@@ -125,7 +122,6 @@ impl EzPublicApi for EzPublicApiService {
         tracing::debug!("before replacing with interceptor");
         self.interceptor.replace_with_interceptor(&mut call_request, RequestType::Unary).await;
 
-        let session_metadata = std::mem::take(&mut call_request.session_metadata).unwrap();
         let session_id = session_metadata.session_id;
 
         // Send request to IsolateJunction

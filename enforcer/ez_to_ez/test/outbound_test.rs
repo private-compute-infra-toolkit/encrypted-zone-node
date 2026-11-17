@@ -165,7 +165,7 @@ async fn test_outbound_boxed_client_unary_and_streaming_flow() {
         TestMetrics::default(),
         /* tls_config= */ None,
         /* expect_tls_config= */ false,
-        /* enable_per_unary_tls_channel= */ true,
+        /* enable_dedicated_tls_channel= */ true,
         DEFAULT_MAX_DECODING_MESSAGE_SIZE,
     )
     .await
@@ -211,7 +211,7 @@ async fn test_outbound_unary_flow() {
         TestMetrics::default(),
         /* tls_config= */ None,
         /* expect_tls_config= */ false,
-        /* enable_per_unary_tls_channel= */ true,
+        /* enable_dedicated_tls_channel= */ true,
         DEFAULT_MAX_DECODING_MESSAGE_SIZE,
     )
     .await
@@ -240,7 +240,7 @@ async fn test_outbound_unary_empty_payload() {
         TestMetrics::default(),
         /* tls_config= */ None,
         /* expect_tls_config= */ false,
-        /* enable_per_unary_tls_channel= */ true,
+        /* enable_dedicated_tls_channel= */ true,
         DEFAULT_MAX_DECODING_MESSAGE_SIZE,
     )
     .await
@@ -267,7 +267,7 @@ async fn test_outbound_unary_call_timeout_propagation() {
         TestMetrics::default(),
         /* tls_config= */ None,
         /* expect_tls_config= */ false,
-        /* enable_per_unary_tls_channel= */ true,
+        /* enable_dedicated_tls_channel= */ true,
         DEFAULT_MAX_DECODING_MESSAGE_SIZE,
     )
     .await
@@ -306,7 +306,7 @@ async fn test_outbound_streaming_flow() {
         TestMetrics::default(),
         /* tls_config= */ None,
         /* expect_tls_config= */ false,
-        /* enable_per_unary_tls_channel= */ true,
+        /* enable_dedicated_tls_channel= */ true,
         DEFAULT_MAX_DECODING_MESSAGE_SIZE,
     )
     .await
@@ -356,7 +356,7 @@ async fn test_outbound_extensions_propagated() {
         TestMetrics::default(),
         /* tls_config= */ None,
         /* expect_tls_config= */ false,
-        /* enable_per_unary_tls_channel= */ true,
+        /* enable_dedicated_tls_channel= */ true,
         DEFAULT_MAX_DECODING_MESSAGE_SIZE,
     )
     .await
@@ -381,7 +381,7 @@ async fn test_outbound_streaming_empty_payload() {
         TestMetrics::default(),
         /* tls_config= */ None,
         /* expect_tls_config= */ false,
-        /* enable_per_unary_tls_channel= */ true,
+        /* enable_dedicated_tls_channel= */ true,
         DEFAULT_MAX_DECODING_MESSAGE_SIZE,
     )
     .await
@@ -444,7 +444,7 @@ async fn test_outbound_pending_tls_fails_precondition_unary() {
         TestMetrics::default(),
         /* tls_config= */ None,
         /* expect_tls_config= */ true,
-        /* enable_per_unary_tls_channel= */ true,
+        /* enable_dedicated_tls_channel= */ true,
         DEFAULT_MAX_DECODING_MESSAGE_SIZE,
     )
     .await
@@ -468,7 +468,7 @@ async fn test_outbound_pending_tls_fails_precondition_streaming() {
         TestMetrics::default(),
         /* tls_config= */ None,
         /* expect_tls_config= */ true,
-        /* enable_per_unary_tls_channel= */ true,
+        /* enable_dedicated_tls_channel= */ true,
         DEFAULT_MAX_DECODING_MESSAGE_SIZE,
     )
     .await
@@ -492,7 +492,7 @@ async fn test_outbound_large_payload_unary_and_streaming() {
         TestMetrics::default(),
         /* tls_config= */ None,
         /* expect_tls_config= */ false,
-        /* enable_per_unary_tls_channel= */ true,
+        /* enable_dedicated_tls_channel= */ true,
         LARGE_MAX_DECODING_MESSAGE_SIZE,
     )
     .await

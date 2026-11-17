@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// TODO(b/581995848): Replace unwrap with non-panicking error handling.
-#![allow(clippy::unwrap_used)]
-
 use container_manager_requester::ContainerManagerRequester;
 use data_scope::request::GetIsolateScopeRequest;
 use data_scope::requester::DataScopeRequester;
@@ -207,11 +204,12 @@ impl HealthManager {
         }
 
         if let Some(current_ticks) = system_metrics::get_system_cpu_ticks() {
-            let mut last_sample = self.last_cpu_sample.lock().unwrap();
-            if let Some(cpu_usage) =
-                system_metrics::calculate_cpu_usage(current_ticks, &mut last_sample)
-            {
-                self.metrics.system_cpu_percent.record(cpu_usage, &[]);
+            if let Ok(mut last_sample) = self.last_cpu_sample.lock() {
+                if let Some(cpu_usage) =
+                    system_metrics::calculate_cpu_usage(current_ticks, &mut last_sample)
+                {
+                    self.metrics.system_cpu_percent.record(cpu_usage, &[]);
+                }
             }
         }
     }

@@ -40,16 +40,39 @@ async fn test_outbound_stream_metrics() {
     let server_address = format!("http://localhost:{}", port);
 
     let metrics = EzToEzOutboundMetrics::default();
+    let pending_tls_handler = OutboundEzToEzHandler::new(
+        server_address.clone(),
+        metrics.clone(),
+        /* tls_config= */ None,
+        /* expect_tls_config= */ true,
+        /* enable_dedicated_tls_channel= */ true,
+        4 * 1024 * 1024,
+    )
+    .await
+    .unwrap();
     let handler = OutboundEzToEzHandler::new(
         server_address,
         metrics,
         /* tls_config= */ None,
         /* expect_tls_config= */ false,
-        /* enable_per_unary_tls_channel= */ true,
+        /* enable_dedicated_tls_channel= */ true,
         4 * 1024 * 1024,
     )
     .await
     .unwrap();
+
+    let mut err_req = create_test_request(None);
+    err_req.control_plane_metadata.as_mut().unwrap().destination_service_name =
+        "stream_err_svc".to_string();
+    let (_err_tx, err_rx) = mpsc::channel(1);
+    let stream_err = pending_tls_handler
+        .remote_streaming_connect(err_req.control_plane_metadata.as_ref(), err_rx, None)
+        .await
+        .expect_err("Pending TLS streaming connect should fail");
+    assert_eq!(
+        stream_err.downcast_ref::<tonic::Status>().unwrap().code(),
+        tonic::Code::FailedPrecondition
+    );
 
     let first_payload = "hello metrics 1";
     let second_payload = "hello metrics 2";
@@ -108,6 +131,22 @@ async fn test_outbound_stream_metrics() {
 
     assert_eq!(request_message_count, 2, "Expected exactly 2 outbound request size observations");
     assert_eq!(response_message_count, 2, "Expected exactly 2 outbound response size observations");
+
+    let error_points =
+        verifier.get_counter_points("encrypted_zone.enforcer.ez_to_ez.outbound.error");
+    let stream_channel_err_count: u64 = error_points
+        .iter()
+        .filter(|(_, attrs)| {
+            attrs.get("error").map(String::as_str) == Some("channel_creation_failed")
+                && attrs.get("service_name").map(String::as_str) == Some("stream_err_svc")
+        })
+        .map(|(val, _)| *val)
+        .max()
+        .unwrap_or(0);
+    assert_eq!(
+        stream_channel_err_count, 1,
+        "Expected streaming channel_creation_failed metric to be recorded, got: {error_points:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -122,16 +161,38 @@ async fn test_outbound_unary_metrics() {
     let server_address = format!("http://localhost:{}", port);
 
     let metrics = EzToEzOutboundMetrics::default();
+    let pending_tls_handler = OutboundEzToEzHandler::new(
+        server_address.clone(),
+        metrics.clone(),
+        /* tls_config= */ None,
+        /* expect_tls_config= */ true,
+        /* enable_dedicated_tls_channel= */ true,
+        4 * 1024 * 1024,
+    )
+    .await
+    .unwrap();
     let handler = OutboundEzToEzHandler::new(
         server_address,
         metrics,
         /* tls_config= */ None,
         /* expect_tls_config= */ false,
-        /* enable_per_unary_tls_channel= */ true,
+        /* enable_dedicated_tls_channel= */ true,
         4 * 1024 * 1024,
     )
     .await
     .unwrap();
+
+    let mut err_request = create_test_request(Some("fail unary"));
+    err_request.control_plane_metadata.as_mut().unwrap().destination_service_name =
+        "unary_err_svc".to_string();
+    let unary_err = pending_tls_handler
+        .remote_invoke(err_request, None)
+        .await
+        .expect_err("Pending TLS unary invoke should fail");
+    assert_eq!(
+        unary_err.downcast_ref::<tonic::Status>().unwrap().code(),
+        tonic::Code::FailedPrecondition
+    );
 
     let first_request = create_test_request(Some("hello unary metrics 1"));
     let _ = handler.remote_invoke(first_request, None).await.unwrap();
@@ -192,5 +253,21 @@ async fn test_outbound_unary_metrics() {
     assert_eq!(
         response_message_count, 2,
         "Expected 2 outbound unary response message size observations"
+    );
+
+    let error_points =
+        verifier.get_counter_points("encrypted_zone.enforcer.ez_to_ez.outbound.error");
+    let unary_channel_err_count: u64 = error_points
+        .iter()
+        .filter(|(_, attrs)| {
+            attrs.get("error").map(String::as_str) == Some("channel_creation_failed")
+                && attrs.get("service_name").map(String::as_str) == Some("unary_err_svc")
+        })
+        .map(|(val, _)| *val)
+        .max()
+        .unwrap_or(0);
+    assert_eq!(
+        unary_channel_err_count, 1,
+        "Expected unary channel_creation_failed metric to be recorded, got: {error_points:?}"
     );
 }

@@ -25,7 +25,7 @@ pub mod v2;
 #[derive(Clone, Debug, PartialEq)]
 pub enum IsolateKind {
     Ratified { services_to_intercept: Vec<InterceptingServices> },
-    Opaque,
+    Opaque { allowed_overrides: Vec<String> },
 }
 
 /// A parsed isolate containing its identity, startup configuration, and security specifications.
@@ -36,10 +36,6 @@ pub struct ParsedIsolate {
     pub package_filename: String,
     pub number_of_isolates: i32,
     pub binary_filename: String,
-    // Manifest V1: parsed from the EzManifest.
-    // Manifest V2: the manifest has no such fields, so the parser leaves these empty and
-    // ContainerManager fills them for Opaque Isolates from the IsolateStartupParameters fetched
-    // from EzManagementService.
     pub command_line_arguments: Vec<String>,
     pub environment_variables: Vec<String>,
     pub service_specs: Vec<EzServiceSpec>,
@@ -56,7 +52,7 @@ impl ParsedIsolate {
     pub fn services_to_intercept(&self) -> &[InterceptingServices] {
         match &self.kind {
             IsolateKind::Ratified { services_to_intercept } => services_to_intercept,
-            IsolateKind::Opaque => &[],
+            IsolateKind::Opaque { .. } => &[],
         }
     }
 }

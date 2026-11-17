@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// TODO(b/581995848): Replace expect with non-panicking error handling.
-#![allow(clippy::expect_used)]
-
 use anyhow::{ensure, Context, Result};
 use binary_manifest_proto::enforcer::v2::{binary_manifest, BinaryManifest};
 use prost_reflect::DescriptorPool;
@@ -30,11 +27,14 @@ const PROTO_DESCRIPTOR_V2_BYTES: &[u8] = include_bytes!(env!("MANIFEST_V2_DESCRI
 
 static V2_DESCRIPTOR_POOL: OnceLock<DescriptorPool> = OnceLock::new();
 
-fn get_v2_descriptor_pool() -> &'static DescriptorPool {
-    V2_DESCRIPTOR_POOL.get_or_init(|| {
-        DescriptorPool::decode(PROTO_DESCRIPTOR_V2_BYTES)
-            .expect("embedded v2 descriptor set bytes must be valid")
-    })
+fn get_v2_descriptor_pool() -> Result<&'static DescriptorPool> {
+    if let Some(pool) = V2_DESCRIPTOR_POOL.get() {
+        return Ok(pool);
+    }
+    let pool = DescriptorPool::decode(PROTO_DESCRIPTOR_V2_BYTES)
+        .context("embedded v2 descriptor set bytes must be valid")?;
+    let _ = V2_DESCRIPTOR_POOL.set(pool);
+    V2_DESCRIPTOR_POOL.get().context("v2 descriptor pool must be initialized")
 }
 
 /// Container for the Setup Isolate's BinaryManifest (v2 schema).
@@ -86,12 +86,12 @@ impl SetupManifest {
     }
 
     /// Extracts [`IsolateIdentity`] for the Setup Isolate.
-    pub fn extract_sni_params(&self) -> IsolateIdentity {
+    pub fn extract_sni_params(&self) -> Result<IsolateIdentity> {
         self.binary_manifest
             .isolate_type
             .as_ref()
             .map(|it| IsolateIdentity::new(it.isolate_name.clone(), it.publisher_id.clone()))
-            .expect("isolate_type must be present in SetupManifest")
+            .context("isolate_type must be present in SetupManifest")
     }
 }
 
@@ -130,7 +130,7 @@ impl WorkloadManifests {
 pub fn parse_binary_manifest(json_bytes: impl AsRef<[u8]>) -> Result<BinaryManifest> {
     let json_string =
         std::str::from_utf8(json_bytes.as_ref()).context("BinaryManifest is not valid UTF-8")?;
-    parse_proto_message(get_v2_descriptor_pool(), "enforcer.v2.BinaryManifest", json_string)
+    parse_proto_message(get_v2_descriptor_pool()?, "enforcer.v2.BinaryManifest", json_string)
 }
 
 /// Loads and parses a [`BinaryManifest`] from a JSON file path.

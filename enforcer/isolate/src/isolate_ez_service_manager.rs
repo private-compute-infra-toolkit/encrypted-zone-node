@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// TODO(b/581995848): Replace expect with non-panicking error handling.
-#![allow(clippy::expect_used)]
-
 use common_proto::enforcer::v2::IsolateType;
 use dashmap::DashMap;
 use data_scope::manifest_validator::ManifestValidator;
@@ -278,7 +275,7 @@ impl IsolateEzServiceManager {
         is_ratified: bool,
         isolate_instance_id: String,
     ) {
-        let receiver = IsolateMetricsReceiver::new(IsolateMetricsReceiverConfig {
+        let receiver = match IsolateMetricsReceiver::new(IsolateMetricsReceiverConfig {
             policy,
             isolate_name,
             publisher_id,
@@ -290,7 +287,10 @@ impl IsolateEzServiceManager {
             ..Default::default()
         })
         .await
-        .expect("Failed to create IsolateMetricsReceiver");
+        {
+            Ok(receiver) => receiver,
+            Err(e) => return log::error!("Failed to create IsolateMetricsReceiver: {e:?}"),
+        };
         let max_decoding_message_size = self.deps.max_decoding_message_size;
         log::info!("Starting OTel metrics server task");
         let result = Server::builder()

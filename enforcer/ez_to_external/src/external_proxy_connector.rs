@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// TODO(b/581995848): Replace unwrap with non-panicking error handling.
-#![allow(clippy::unwrap_used)]
-
 use crate::types::{ExternalProxyChannel, ExternalProxyConnectorError};
 use data_scope::data_scope_validator::validate_external_call;
 use enforcer_proto::enforcer::v1::{
@@ -390,13 +387,12 @@ pub fn translate_to_proxy_request(
         )),
     }?;
 
-    // Check if the payload contains more than one datagram.
-    if inline_data.datagrams.len() != 1 {
-        return Err(ExternalProxyConnectorError::TranslationError(
+    // Check if the payload contains exactly one datagram.
+    let [payload_bytes]: [Vec<u8>; 1] = inline_data.datagrams.try_into().map_err(|_| {
+        ExternalProxyConnectorError::TranslationError(
             "External calls must contain exactly one datagram.".to_string(),
-        ));
-    }
-    let payload_bytes = inline_data.datagrams.into_iter().next().unwrap();
+        )
+    })?;
 
     let target_domain = &metadata.destination_operator_domain;
 

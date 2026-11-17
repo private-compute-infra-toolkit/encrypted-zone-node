@@ -19,5 +19,7 @@
       ]
     }
   ],
+  "command_line_arguments": ["--policy-flag=active"],
+  "environment_variables": ["BASE_ENV=1"],
   "ratified": {}
 }

@@ -46,9 +46,8 @@ fn test_load_v2_setup_manifest() {
     assert_eq!(isolate.publisher_id, "pcit-release-bot@google.com");
     assert_eq!(isolate.package_filename, "enforcer/container/test_data/test_binary.tar");
     assert_eq!(isolate.binary_filename, "/usr/local/bin/setup");
-    // The startup script in the package sets the Setup Isolate's arguments and environment.
-    assert!(isolate.command_line_arguments.is_empty());
-    assert!(isolate.environment_variables.is_empty());
+    assert_eq!(isolate.command_line_arguments, ["--mode=setup"]);
+    assert_eq!(isolate.environment_variables, ["SETUP_ENV=1"]);
     assert_eq!(isolate.kind, IsolateKind::Ratified { services_to_intercept: vec![] });
 }
 
@@ -94,7 +93,16 @@ fn test_v2_binary_manifest_opaque() {
     assert_eq!(isolate.isolate_name, "helloworld");
     assert_eq!(isolate.publisher_id, "helloworld_domain");
     assert_eq!(isolate.binary_filename, "/usr/local/bin/main");
-    assert_eq!(isolate.kind, IsolateKind::Opaque);
+    assert_eq!(
+        isolate.kind,
+        IsolateKind::Opaque {
+            allowed_overrides: vec![
+                "--foo".to_string(),
+                "--verbose".to_string(),
+                "KEY".to_string()
+            ]
+        }
+    );
     assert_eq!(isolate.service_specs.len(), 1);
     let metrics_policy = isolate.metrics_policy.expect("Opaque metrics_policy should be parsed");
     assert_eq!(metrics_policy.allowed_metrics[0].name, "test_metric");
@@ -167,6 +175,18 @@ fn test_v2_binary_manifest_missing_isolate_digest_fails() {
 }
 
 #[test]
+fn test_v2_binary_manifest_reserved_environment_variable_fails() {
+    for path in
+        [V2_SETUP_JSON_PATH, V2_RATIFIED_PUBSUB_BROKER_JSON_PATH, V2_OPAQUE_HELLOWORLD_JSON_PATH]
+    {
+        let mut manifest = load_manifest(path);
+        manifest.environment_variables.push("EZ_OPERATOR_ROLE=spoofed".to_string());
+        let err = ParsedIsolate::try_from(manifest).unwrap_err();
+        assert!(err.to_string().contains("reserved EZ_ prefix"), "{err}");
+    }
+}
+
+#[test]
 fn test_load_v2_workload_manifests() {
     let workload = load_workload_manifests_from_paths(&[
         V2_RATIFIED_PUBSUB_BROKER_JSON_PATH,
@@ -194,13 +214,15 @@ fn test_load_v2_workload_manifests() {
     assert_eq!(isolates[1].binary_filename, "/usr/local/bin/main");
     assert!(isolates[1].is_ratified());
     assert_eq!(isolates[1].service_specs[0].service_name, "AuthService");
+    assert_eq!(isolates[1].command_line_arguments, ["--policy-flag=active"]);
+    assert_eq!(isolates[1].environment_variables, ["BASE_ENV=1"]);
 
     // Opaque isolate
     assert_eq!(isolates[2].isolate_name, "helloworld");
     assert_eq!(isolates[2].publisher_id, "helloworld_domain");
     assert_eq!(isolates[2].binary_filename, "/usr/local/bin/main");
-    assert_eq!(isolates[2].command_line_arguments, &[] as &[String]);
-    assert_eq!(isolates[2].environment_variables, &[] as &[String]);
+    assert_eq!(isolates[2].command_line_arguments, ["--foo=manifest", "--verbose"]);
+    assert_eq!(isolates[2].environment_variables, ["KEY=manifest", "LOG_LEVEL=info"]);
     assert!(!isolates[2].is_ratified());
 }
 
@@ -215,7 +237,7 @@ fn test_v2_workload_manifests_reject_setup_kind() {
 fn test_v2_extract_sni_params() {
     let setup =
         SetupManifest::load_from_path(V2_SETUP_JSON_PATH).expect("Failed to load setup manifest");
-    let setup_sni = setup.extract_sni_params();
+    let setup_sni = setup.extract_sni_params().expect("Failed to extract setup SNI params");
     assert_eq!(setup_sni, IsolateIdentity::new("setup_isolate", "pcit-release-bot@google.com"));
 
     let workload = load_workload_manifests_from_paths(&[
@@ -238,6 +260,11 @@ fn test_v2_extract_sni_params() {
 fn test_v2_missing_isolate_type_fails() {
     let mut manifest = load_manifest(V2_OPAQUE_HELLOWORLD_JSON_PATH);
     manifest.isolate_type = None;
+    let sni_err = SetupManifest::new(manifest.clone()).extract_sni_params().unwrap_err();
+    assert!(
+        sni_err.to_string().contains("isolate_type must be present in SetupManifest"),
+        "{sni_err}"
+    );
     let err = ParsedIsolate::try_from(manifest).unwrap_err();
     assert!(err.to_string().contains("isolate_type must be specified"), "{err}");
 }

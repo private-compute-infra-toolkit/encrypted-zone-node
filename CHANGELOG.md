@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## 0.34.0 (2026-11-17)
+
+
+### EZ Policy Enforcer
+
+* **enforcer:** Apply BinaryManifest args, env, and overrides
+* **enforcer:** inject isolate identity env vars
+* **enforcer:** remove unwrap and expect in container and isolate
+* **enforcer:** remove unwrap and expect in startup and health modules
+* **enforcer:** remove unwrap in public_api, junction, and connectors
+
+
+### mTLS
+
+* **mtls:** support per-stream outbound TLS channel
+
 ## 0.33.0 (2026-11-11)
 
 

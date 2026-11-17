@@ -39,6 +39,8 @@ const TEST_CONTAINER_READ_DIR: &str = "/container/test_read_dir";
 const TEST_OPERATOR_ROLE: &str = "test_operator_role";
 const TEST_OPERATOR_ROLE_ENV: &str = "EZ_OPERATOR_ROLE=test_operator_role";
 const EMPTY_OPERATOR_ROLE_ENV: &str = "EZ_OPERATOR_ROLE=";
+const EXPECTED_HELLOWORLD_ISOLATE_NAME_ENV: &str = "EZ_ISOLATE_NAME=ezpkg://helloworld.com";
+const EXPECTED_HELLOWORLD_PUBLISHER_ID_ENV: &str = "EZ_PUBLISHER_ID=helloworld_domain";
 
 #[tokio::test]
 async fn test_mount_directories() {
@@ -573,7 +575,9 @@ async fn test_start_one_isolate_with_override() {
                 "EZ_SHM_SLOT_SIZE=64".to_string(),
                 "EZ_SHM_PAYLOAD_THRESHOLD=104857600".to_string(),
                 "EZ_BACKEND_DEPENDENCIES=ez_backend_dependencies:[{operator_domain:\"helloworld_domain\",service_name:\"Greeter\",method_name:\"SayHello\"}]".to_string(),
-                "EZ_OPERATOR_ROLE=".to_string()
+                EMPTY_OPERATOR_ROLE_ENV.to_string(),
+                EXPECTED_HELLOWORLD_ISOLATE_NAME_ENV.to_string(),
+                EXPECTED_HELLOWORLD_PUBLISHER_ID_ENV.to_string(),
             ]
         );
         let etc_hosts_mount = tracked_container
@@ -1525,4 +1529,50 @@ async fn test_add_new_isolate_rolls_back_on_junction_connect_failure() {
 
     harness.stop().await;
     ensure_isolate_stopped(initial_container_id).await.expect("Initial container should stop");
+}
+
+// Verifies that ContainerManager injects isolate identity environment variables
+// (EZ_ISOLATE_NAME and EZ_PUBLISHER_ID) into launched V1 isolate containers.
+#[tokio::test]
+async fn test_v1_isolate_identity_env_vars() {
+    // Launch a single opaque isolate from the V1 test manifest.
+    let mut harness = TestHarness::new(
+        JSON_MANIFEST_PATH_ONE_ISOLATE,
+        &IsolateRuntimeConfigs::default(),
+        /* otel_endpoint= */ None,
+        /* operator_role= */ TEST_OPERATOR_ROLE.to_string(),
+    )
+    .await
+    .expect("TestHarness::new should succeed");
+
+    // Wait for the container to start and transition the isolate to Ready.
+    let isolate_and_uds_vec =
+        check_container_started(vec![HELLOWORLD_BINARY]).await.expect("Container should start");
+    assert_eq!(isolate_and_uds_vec.len(), 1);
+    let (fake_container_id, isolate_ez_bridge_enforcer_side_uds_path) =
+        isolate_and_uds_vec[0].clone();
+    let _client = notify_isolate_ready(isolate_ez_bridge_enforcer_side_uds_path)
+        .await
+        .expect("Isolate should be ready");
+
+    // Inspect the environment variables passed to the launched container and verify that
+    // EZ_ISOLATE_NAME and EZ_PUBLISHER_ID match the manifest identity.
+    {
+        let tracker = FakeContainer::get_tracker();
+        let tracked_container = tracker.get(&fake_container_id).expect("Should have isolate");
+        assert!(
+            tracked_container.env.iter().any(|e| e == EXPECTED_HELLOWORLD_ISOLATE_NAME_ENV),
+            "EZ_ISOLATE_NAME env var not found or incorrect. Actual env: {:?}",
+            tracked_container.env
+        );
+        assert!(
+            tracked_container.env.iter().any(|e| e == EXPECTED_HELLOWORLD_PUBLISHER_ID_ENV),
+            "EZ_PUBLISHER_ID env var not found or incorrect. Actual env: {:?}",
+            tracked_container.env
+        );
+    }
+
+    // Stop the harness and verify the container stopped cleanly.
+    harness.stop().await;
+    ensure_isolate_stopped(fake_container_id).await.expect("Container should stop");
 }

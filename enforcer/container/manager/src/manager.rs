@@ -12,11 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// TODO(b/581995848): Replace expect with non-panicking error handling.
-#![allow(clippy::expect_used)]
-
-#[deny(clippy::expect_used)]
 pub mod dependency_graph;
+mod startup_overrides;
 
 use anyhow::{bail, ensure, Context, Result};
 use common_proto::enforcer::v2::IsolateType;
@@ -80,6 +77,8 @@ const OTLP_METRICS_UDS: &str = "otlp-metrics.sock";
 const OTEL_TRACES_UDS: &str = "traces-otlp.sock";
 const DEV_SHM_PATH: &str = "/dev/shm";
 const RATIFIED_ISOLATE_DOMAIN: &str = "EZ_Trusted";
+const ISOLATE_NAME_ENV_VAR: &str = "EZ_ISOLATE_NAME";
+const PUBLISHER_ID_ENV_VAR: &str = "EZ_PUBLISHER_ID";
 
 #[derive(Debug, Derivative)]
 #[derivative(Clone(bound = ""))]
@@ -544,6 +543,10 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
             env_vars.push(format!("EZ_BACKEND_DEPENDENCIES={}", serialized_deps));
         }
         env_vars.push(format!("EZ_OPERATOR_ROLE={}", self.operator_role));
+        env_vars
+            .push(format!("{ISOLATE_NAME_ENV_VAR}={}", sanitize_env_value(&isolate.isolate_name)));
+        env_vars
+            .push(format!("{PUBLISHER_ID_ENV_VAR}={}", sanitize_env_value(&isolate.publisher_id)));
 
         let container_startup_args = ContainerStartupArgs {
             binary_filename: isolate.binary_filename.clone(),
@@ -896,7 +899,7 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
                 isolate_id,
                 IsolateContainer {
                     container,
-                    _sharing_dir: sharing_dir.take().expect("sharing_dir should be present"),
+                    _sharing_dir: sharing_dir.take().context("sharing_dir should be present")?,
                     restart_count,
                 },
             );
@@ -1283,8 +1286,8 @@ fn apply_startup_parameters(
         .get(&key)
         .with_context(|| format!("No IsolateStartupParameters for Isolate {key:?}"))?;
     match &isolate.kind {
-        // Setup and Ratified Isolates take their arguments and environment from the startup
-        // script in their package.
+        // Command-line args and env-vars overrides are not supported for Setup and Ratified
+        // Isolates.
         IsolateKind::Ratified { .. } => {
             ensure!(
                 parameters.command_line_arguments.is_empty(),
@@ -1301,7 +1304,7 @@ fn apply_startup_parameters(
                 "number_of_isolates must be >= 1 for Setup and Ratified Isolate {key:?}"
             );
         }
-        IsolateKind::Opaque => {
+        IsolateKind::Opaque { allowed_overrides } => {
             ensure!(
                 parameters.number_of_isolates >= 0,
                 "number_of_isolates cannot be negative for Opaque Isolate {key:?}"
@@ -1310,8 +1313,15 @@ fn apply_startup_parameters(
                 !parameters.environment_variables.iter().any(|e| e.starts_with("EZ_")),
                 "IsolateStartupParameters cannot set reserved 'EZ_' environment variables for {key:?}"
             );
-            isolate.command_line_arguments.clone_from(&parameters.command_line_arguments);
-            isolate.environment_variables.clone_from(&parameters.environment_variables);
+            startup_overrides::validate(&key, parameters, allowed_overrides)?;
+            startup_overrides::apply(
+                &mut isolate.command_line_arguments,
+                &parameters.command_line_arguments,
+            );
+            startup_overrides::apply(
+                &mut isolate.environment_variables,
+                &parameters.environment_variables,
+            );
         }
     }
     isolate.number_of_isolates = parameters.number_of_isolates;
@@ -1339,4 +1349,8 @@ pub fn sanitize_path_component(component: &str) -> String {
             }
         })
         .collect()
+}
+
+fn sanitize_env_value(value: &str) -> String {
+    value.chars().filter(|c| !c.is_control()).collect()
 }

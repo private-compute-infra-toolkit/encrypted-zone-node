@@ -40,6 +40,23 @@ These variables configure the behavior when connecting to external proxy or mTLS
 
 ## Workload / Isolate Configuration
 
+### `EZ_ISOLATE_NAME`
+
+-   **Description:** The `isolate_name` declared in the Isolate's manifest (`EzManifest` or V2
+    `IsolateType`), injected automatically by the Enforcer into every Isolate container at startup
+    (with control characters stripped). Used by the Rust and C++ SDK logging helpers to prefix
+    Isolate log lines with `[<isolate_name>]`.
+-   **Type:** String
+-   **Default:** Set by the Enforcer from the manifest `isolate_name`.
+
+### `EZ_PUBLISHER_ID`
+
+-   **Description:** The `publisher_id` declared in the Isolate's manifest (`EzManifest` or V2
+    `IsolateType`), injected automatically by the Enforcer into every Isolate container at startup
+    (with control characters stripped).
+-   **Type:** String
+-   **Default:** Set by the Enforcer from the manifest `publisher_id`.
+
 ### `EZ_BACKEND_DEPENDENCIES`
 
 -   **Description:** Serialized `textproto` representation of the `EzManifest` backend dependencies
