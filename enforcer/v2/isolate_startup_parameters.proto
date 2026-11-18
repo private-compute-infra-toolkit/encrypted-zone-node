@@ -22,10 +22,14 @@ import "enforcer/v2/common.proto";
 message IsolateStartupParameters {
   // Identifies the target isolate by name and publisher.
   IsolateType identifier = 1;
-  // Command line arguments supplied dynamically at runtime.
-  repeated string command_line_arguments = 2;
-  // Environment variables supplied dynamically at runtime.
-  repeated string environment_variables = 3;
+  // Runtime overrides for the command_line_arguments.
+  // Only allowed for Opaque Isolates. An override is only respected if its key
+  // is listed in BinaryManifest's allowed_overrides field.
+  repeated string override_command_line_arguments = 2;
+  // Runtime overrides for the environment_variables.
+  // Only allowed for Opaque Isolates. An override is only respected if its key
+  // is listed in BinaryManifest's allowed_overrides field.
+  repeated string override_environment_variables = 3;
   // Number of isolate container instances to maintain.
   int32 number_of_isolates = 4;
 }

@@ -32,7 +32,7 @@
       "route_type": "ROUTE_TYPE_EXTERNAL"
     }
   ],
-  "ratified": {
+  "ratified_controls": {
     "metrics_policy": {
       "allowed_metrics": [
         {

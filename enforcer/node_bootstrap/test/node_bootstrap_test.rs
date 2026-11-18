@@ -257,6 +257,7 @@ async fn test_bootstrap_launches_inbound_ez_to_ez_server() {
             ez_to_ez_handshake_timeout: Duration::from_secs(5),
             ez_to_ez_max_concurrent_handshakes: 10,
             allowed_peer_identities: vec![],
+            skip_endorsement_check: false,
         },
     )
     .await
@@ -292,6 +293,7 @@ async fn test_bootstrap_with_mtls_configures_outbound_tls() {
             ez_to_ez_handshake_timeout: Duration::from_secs(5),
             ez_to_ez_max_concurrent_handshakes: 10,
             allowed_peer_identities: vec![],
+            skip_endorsement_check: false,
         },
     )
     .await
@@ -340,6 +342,7 @@ async fn test_bootstrap_with_mtls_forwards_allowed_peer_identities() {
             allowed_peer_identities: vec![
                 "spiffe://mesh.example.tca/operator/op/publisher/pub/workload/wl".to_string(),
             ],
+            skip_endorsement_check: false,
         },
     )
     .await
@@ -363,6 +366,7 @@ async fn test_bootstrap_with_mtls_forwards_allowed_peer_identities() {
             ez_to_ez_handshake_timeout: Duration::from_secs(5),
             ez_to_ez_max_concurrent_handshakes: 10,
             allowed_peer_identities: vec!["invalid-spiffe-id".to_string()],
+            skip_endorsement_check: false,
         },
     )
     .await
@@ -396,6 +400,7 @@ async fn test_bootstrap_does_not_contact_management_service_when_mtls_fetch_fail
             ez_to_ez_handshake_timeout: Duration::from_secs(5),
             ez_to_ez_max_concurrent_handshakes: 10,
             allowed_peer_identities: vec![],
+            skip_endorsement_check: false,
         },
     )
     .await
@@ -437,6 +442,7 @@ async fn test_bootstrap_fails_without_a_setup_isolate() {
             ez_to_ez_handshake_timeout: Duration::from_secs(5),
             ez_to_ez_max_concurrent_handshakes: 10,
             allowed_peer_identities: vec![],
+            skip_endorsement_check: false,
         },
     )
     .await
@@ -610,6 +616,7 @@ impl TestHarness {
                 ez_to_ez_handshake_timeout: Duration::from_secs(5),
                 ez_to_ez_max_concurrent_handshakes: 10,
                 allowed_peer_identities: vec![],
+                skip_endorsement_check: false,
             },
         )
         .await

@@ -49,11 +49,11 @@ message BinaryManifest {
   // Kind-specific settings. Exactly one must be set.
   oneof isolate_kind {
     // The Setup Isolate.
-    SetupControls setup = 9;
+    SetupControls setup_controls = 9;
     // A Ratified Isolate.
-    RatifiedControls ratified = 10;
+    RatifiedControls ratified_controls = 10;
     // An Opaque Isolate.
-    OpaqueControls opaque = 11;
+    OpaqueControls opaque_controls = 11;
   }
 }
 

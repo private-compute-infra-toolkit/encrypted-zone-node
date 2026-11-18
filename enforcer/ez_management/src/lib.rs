@@ -71,6 +71,8 @@ pub struct EzManagementClient {
     isolate_packages: HashMap<BinaryServicesIndex, String>,
     // The handle to the temporary directory. Keeps the directory alive.
     _package_temp_dir: Option<Arc<tempfile::TempDir>>,
+    // Whether Isolates load without endorsement validation and package digest checks.
+    skip_endorsement_check: bool,
 }
 
 /// A workload BinaryManifest that passed the checks in parse_binary_manifest.
@@ -84,10 +86,15 @@ struct ParsedBinaryManifest {
 
 impl EzManagementClient {
     /// Creates a new [`EzManagementClient`] that loads manifests and Isolate packages.
+    ///
+    /// If `skip_endorsement_check` is set, Opaque and Ratified BinaryManifests (but not the Setup
+    /// Isolate) load without endorsement validation, even if they have endorsements, and packages
+    /// load without the package digest check. Only Enforcer debug builds may set it.
     pub async fn new(
         address: &str,
         container_manager_requester: ContainerManagerRequester,
         max_decoding_message_size: usize,
+        skip_endorsement_check: bool,
     ) -> Result<Self, EzManagementError> {
         let channel_pool = GrpcChannelPool::new_from_env(address)
             .await
@@ -122,6 +129,7 @@ impl EzManagementClient {
             package_metadata: HashMap::new(),
             isolate_packages: HashMap::new(),
             _package_temp_dir: Some(Arc::new(package_temp_dir)),
+            skip_endorsement_check,
         })
     }
 
@@ -319,12 +327,20 @@ impl EzManagementClient {
         let mut binary_manifests = Vec::with_capacity(parsed_manifests.len());
         let mut package_metadata = HashMap::with_capacity(parsed_manifests.len());
         for parsed in parsed_manifests {
-            self.validate_manifest_endorsement(
-                &parsed.isolate_type,
-                parsed.calculated_manifest_digest_sha256,
-                &parsed.binary_manifest_endorsements,
-            )
-            .await?;
+            if self.skip_endorsement_check {
+                log::warn!(
+                    "Loading Isolate '{:?}' without endorsement validation or package digest \
+                     check",
+                    parsed.isolate_type
+                );
+            } else {
+                self.validate_manifest_endorsement(
+                    &parsed.isolate_type,
+                    parsed.calculated_manifest_digest_sha256,
+                    &parsed.binary_manifest_endorsements,
+                )
+                .await?;
+            }
             package_metadata.insert(parsed.isolate_type, parsed.isolate_digest);
             binary_manifests.push(parsed.manifest);
         }
@@ -503,23 +519,25 @@ impl EzManagementClient {
         let target_path = self.resolve_package_path(isolate_type).await?;
         let binary_index = self.get_package_binary_index(isolate_type).await?;
 
-        let package_sha256 = package_utils::calculate_sha256(&package.package_bytes);
-        if package_sha256 != isolate_digest.package_sha256 {
-            self.send_load_result(
-                isolate_type,
-                false,
-                Some(LoadIsolatesError::PackageDigestMismatch),
-                None,
-            )
-            .await;
-            return Err(EzManagementError::LoadIsolatesFailed(
-                LoadIsolatesError::PackageDigestMismatch,
-                format!(
-                    "Package digest {package_sha256} does not match isolate_digest.package_sha256 \
-                     '{}' of Isolate '{isolate_type:?}'",
-                    isolate_digest.package_sha256
-                ),
-            ));
+        if !self.skip_endorsement_check {
+            let package_sha256 = package_utils::calculate_sha256(&package.package_bytes);
+            if package_sha256 != isolate_digest.package_sha256 {
+                self.send_load_result(
+                    isolate_type,
+                    false,
+                    Some(LoadIsolatesError::PackageDigestMismatch),
+                    None,
+                )
+                .await;
+                return Err(EzManagementError::LoadIsolatesFailed(
+                    LoadIsolatesError::PackageDigestMismatch,
+                    format!(
+                        "Package digest {package_sha256} does not match \
+                         isolate_digest.package_sha256 '{}' of Isolate '{isolate_type:?}'",
+                        isolate_digest.package_sha256
+                    ),
+                ));
+            }
         }
 
         self.write_package_to_disk(isolate_type, &package.package_bytes).await?;
@@ -684,9 +702,9 @@ fn parse_binary_manifest(
             )
         })?;
     match manifest.isolate_kind {
-        Some(binary_manifest::IsolateKind::Ratified(_))
-        | Some(binary_manifest::IsolateKind::Opaque(_)) => {}
-        Some(binary_manifest::IsolateKind::Setup(_)) => {
+        Some(binary_manifest::IsolateKind::RatifiedControls(_))
+        | Some(binary_manifest::IsolateKind::OpaqueControls(_)) => {}
+        Some(binary_manifest::IsolateKind::SetupControls(_)) => {
             return Err(EzManagementError::LoadIsolatesFailed(
                 LoadIsolatesError::ManifestParsingFailure,
                 format!("Setup Isolate '{isolate_type:?}' is not allowed in the BundleManifest"),

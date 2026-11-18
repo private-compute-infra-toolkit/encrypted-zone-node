@@ -1290,14 +1290,14 @@ fn apply_startup_parameters(
         // Isolates.
         IsolateKind::Ratified { .. } => {
             ensure!(
-                parameters.command_line_arguments.is_empty(),
+                parameters.override_command_line_arguments.is_empty(),
                 "Setup and Ratified Isolate {key:?} cannot have command-line arguments: {:?}",
-                parameters.command_line_arguments
+                parameters.override_command_line_arguments
             );
             ensure!(
-                parameters.environment_variables.is_empty(),
+                parameters.override_environment_variables.is_empty(),
                 "Setup and Ratified Isolate {key:?} cannot have environment variables: {:?}",
-                parameters.environment_variables
+                parameters.override_environment_variables
             );
             ensure!(
                 parameters.number_of_isolates >= 1,
@@ -1310,17 +1310,17 @@ fn apply_startup_parameters(
                 "number_of_isolates cannot be negative for Opaque Isolate {key:?}"
             );
             ensure!(
-                !parameters.environment_variables.iter().any(|e| e.starts_with("EZ_")),
+                !parameters.override_environment_variables.iter().any(|e| e.starts_with("EZ_")),
                 "IsolateStartupParameters cannot set reserved 'EZ_' environment variables for {key:?}"
             );
             startup_overrides::validate(&key, parameters, allowed_overrides)?;
             startup_overrides::apply(
                 &mut isolate.command_line_arguments,
-                &parameters.command_line_arguments,
+                &parameters.override_command_line_arguments,
             );
             startup_overrides::apply(
                 &mut isolate.environment_variables,
-                &parameters.environment_variables,
+                &parameters.override_environment_variables,
             );
         }
     }

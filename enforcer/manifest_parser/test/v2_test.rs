@@ -55,13 +55,14 @@ fn test_load_v2_setup_manifest() {
 fn test_v2_setup_manifest_rejects_other_kinds() {
     let setup = SetupManifest::new(load_manifest(V2_RATIFIED_PUBSUB_BROKER_JSON_PATH));
     let err = setup.into_parsed_isolate().unwrap_err();
-    assert!(err.to_string().contains("isolate_kind to setup"), "{err}");
+    assert!(err.to_string().contains("isolate_kind to setup_controls"), "{err}");
 }
 
 #[test]
 fn test_v2_setup_manifest_requires_package_filename() {
     let mut manifest = load_manifest(V2_SETUP_JSON_PATH);
-    manifest.isolate_kind = Some(binary_manifest::IsolateKind::Setup(SetupControls::default()));
+    manifest.isolate_kind =
+        Some(binary_manifest::IsolateKind::SetupControls(SetupControls::default()));
     let err = SetupManifest::new(manifest).into_parsed_isolate().unwrap_err();
     assert!(err.to_string().contains("package_filename cannot be empty"), "{err}");
 }
@@ -111,14 +112,15 @@ fn test_v2_binary_manifest_opaque() {
 #[test]
 fn test_v2_binary_manifest_ratified_controls() {
     let mut manifest = load_manifest(V2_RATIFIED_PUBSUB_BROKER_JSON_PATH);
-    manifest.isolate_kind = Some(binary_manifest::IsolateKind::Ratified(RatifiedControls {
-        services_to_intercept: vec![InterceptingServices {
-            intercepting_service_name: "Greeter".to_string(),
-            interceptor_service_name: "Interceptor".to_string(),
+    manifest.isolate_kind =
+        Some(binary_manifest::IsolateKind::RatifiedControls(RatifiedControls {
+            services_to_intercept: vec![InterceptingServices {
+                intercepting_service_name: "Greeter".to_string(),
+                interceptor_service_name: "Interceptor".to_string(),
+                ..Default::default()
+            }],
             ..Default::default()
-        }],
-        ..Default::default()
-    }));
+        }));
     let isolate = ParsedIsolate::try_from(manifest).expect("Failed to parse RatifiedControls");
     assert_eq!(isolate.services_to_intercept().len(), 1);
     assert_eq!(isolate.services_to_intercept()[0].interceptor_service_name, "Interceptor");
@@ -126,7 +128,8 @@ fn test_v2_binary_manifest_ratified_controls() {
 
 #[test]
 fn test_v2_binary_manifest_rejects_ratified_controls_on_opaque() {
-    let err = parse_binary_manifest(r#"{"opaque": {}, "ratified": {}}"#).unwrap_err();
+    let err =
+        parse_binary_manifest(r#"{"opaque_controls": {}, "ratified_controls": {}}"#).unwrap_err();
     assert!(format!("{err:#}").contains("multiple fields provided for oneof"), "{err:#}");
 }
 
@@ -230,7 +233,10 @@ fn test_load_v2_workload_manifests() {
 fn test_v2_workload_manifests_reject_setup_kind() {
     let workload = WorkloadManifests::new(vec![load_manifest(V2_SETUP_JSON_PATH)]);
     let err = workload.into_parsed_isolates().unwrap_err();
-    assert!(err.to_string().contains("isolate_kind to ratified or opaque"), "{err}");
+    assert!(
+        err.to_string().contains("isolate_kind to ratified_controls or opaque_controls"),
+        "{err}"
+    );
 }
 
 #[test]

@@ -448,6 +448,14 @@ pub async fn setup_test_context_with_requester(
     responses: Vec<LoadIsolatesResponse>,
     requester: ContainerManagerRequester,
 ) -> TestContext {
+    start_test_context(responses, requester, false).await
+}
+
+async fn start_test_context(
+    responses: Vec<LoadIsolatesResponse>,
+    requester: ContainerManagerRequester,
+    skip_endorsement_check: bool,
+) -> TestContext {
     let pkg_temp_dir = tempdir().unwrap();
     std::env::set_var("EZ_PACKAGE_OUTPUT_DIR", pkg_temp_dir.path());
     let server_temp_dir = tempdir().unwrap();
@@ -471,9 +479,10 @@ pub async fn setup_test_context_with_requester(
     });
 
     let address = format!("unix:{}", uds_path.to_str().unwrap());
-    let client = EzManagementClient::new(&address, requester, MAX_DECODING_SIZE)
-        .await
-        .expect("Client should connect");
+    let client =
+        EzManagementClient::new(&address, requester, MAX_DECODING_SIZE, skip_endorsement_check)
+            .await
+            .expect("Client should connect");
     TestContext {
         client,
         received_requests,
@@ -504,13 +513,28 @@ pub async fn setup_test_context_with_junction(
     responses: Vec<LoadIsolatesResponse>,
     junction: MockSetupIsolateJunction,
 ) -> TestContext {
-    let setup_client = SetupIsolateClient::new(
+    setup_test_context_with_client(responses, Some(create_setup_client(junction))).await
+}
+
+/// Like [`setup_test_context_with_junction`], but the client has `skip_endorsement_check` set.
+pub async fn setup_test_context_skipping_endorsement_check(
+    responses: Vec<LoadIsolatesResponse>,
+    junction: MockSetupIsolateJunction,
+) -> TestContext {
+    let (container_manager_requester, cm_temp_dir) =
+        create_fake_container_manager(Some(create_setup_client(junction))).await;
+    let mut ctx = start_test_context(responses, container_manager_requester, true).await;
+    ctx._cm_temp_dir = cm_temp_dir;
+    ctx
+}
+
+fn create_setup_client(junction: MockSetupIsolateJunction) -> SetupIsolateClient {
+    SetupIsolateClient::new(
         Box::new(junction),
         "EZ_Trusted".to_string(),
         "setup".to_string(),
         "SetupService".to_string(),
-    );
-    setup_test_context_with_client(responses, Some(setup_client)).await
+    )
 }
 
 pub async fn setup_test_context_without_setup_client(
@@ -547,8 +571,8 @@ pub fn opaque_isolate_type(isolate_name: &str) -> IsolateType {
     }
 }
 
-/// Builds a JSON-encoded BinaryManifest for `kind` ("setup", "ratified", or "opaque")
-/// with `isolateDigest.packageSha256` set to the SHA-256 digest of `package`.
+/// Builds a JSON-encoded BinaryManifest for `kind` ("setup_controls", "ratified_controls", or
+/// "opaque_controls") with `isolateDigest.packageSha256` set to the SHA-256 digest of `package`.
 pub fn create_binary_manifest_json(
     isolate_type: &IsolateType,
     kind: &str,
@@ -578,7 +602,7 @@ pub fn create_endorsed_manifest(binary_manifest_json: Vec<u8>) -> EndorsedBinary
 pub fn create_ratified_manifest(isolate_name: &str) -> EndorsedBinaryManifest {
     create_endorsed_manifest(create_binary_manifest_json(
         &ratified_isolate_type(isolate_name),
-        "ratified",
+        "ratified_controls",
         VALID_TAR,
     ))
 }
@@ -586,7 +610,7 @@ pub fn create_ratified_manifest(isolate_name: &str) -> EndorsedBinaryManifest {
 pub fn create_opaque_manifest(isolate_name: &str) -> EndorsedBinaryManifest {
     create_endorsed_manifest(create_binary_manifest_json(
         &opaque_isolate_type(isolate_name),
-        "opaque",
+        "opaque_controls",
         VALID_TAR,
     ))
 }

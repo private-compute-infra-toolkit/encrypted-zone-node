@@ -265,6 +265,15 @@ struct EnforcerInputs {
         help = "Address of the EzManagementService used to dynamically load Isolate manifests and packages. Supports both UDS ('unix:' prefixed) and network addresses. Required when use_manifest_v2 is true."
     )]
     pub ez_management_address: Option<String>,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Manifest v2 only, for manual testing and SUTs: load Opaque and Ratified \
+                BinaryManifests (but not the Setup Isolate) without endorsement validation, even \
+                if they have endorsements, and their packages without the package digest check. \
+                Ignored in all builds except enforcer_debug."
+    )]
+    pub skip_endorsement_check: bool,
 }
 
 enum Endpoint {
@@ -495,6 +504,21 @@ fn main() -> anyhow::Result<()> {
             (InboundEzToEzHandler::new(Box::new(isolate_junction.clone())), address)
         });
 
+        // Only the debug flavor (enforcer_debug) enables the `test` feature; the `debug` feature
+        // is also enabled in enforcer_perf.
+        #[cfg(not(feature = "test"))]
+        let skip_endorsement_check = {
+            if enforcer_inputs.skip_endorsement_check {
+                log::warn!(
+                    "--skip-endorsement-check is ignored outside enforcer_debug. All \
+                     BinaryManifests require valid endorsements."
+                );
+            }
+            false
+        };
+        #[cfg(feature = "test")]
+        let skip_endorsement_check = enforcer_inputs.skip_endorsement_check;
+
         let node_bootstrap = if enforcer_inputs.use_manifest_v2 {
             let ez_management_address = enforcer_inputs
                 .ez_management_address
@@ -523,6 +547,7 @@ fn main() -> anyhow::Result<()> {
                         allowed_peer_identities: enforcer_inputs
                             .allowlisted_peer_node_spiffe_id
                             .clone(),
+                        skip_endorsement_check,
                     },
                 )
                 .await?,

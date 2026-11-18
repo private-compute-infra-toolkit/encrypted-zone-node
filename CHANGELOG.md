@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## 0.35.0 (2026-11-18)
+
+
+### EZ Policy Enforcer
+
+* **enforcer:** Add --skip-endorsement-check
+* **enforcer:** Rename v2 startup override and isolate_kind fields
+
 ## 0.34.0 (2026-11-17)
 
 

@@ -78,9 +78,9 @@ impl SetupManifest {
         ensure!(
             matches!(
                 self.binary_manifest.isolate_kind,
-                Some(binary_manifest::IsolateKind::Setup(_))
+                Some(binary_manifest::IsolateKind::SetupControls(_))
             ),
-            "Setup isolate manifest must set isolate_kind to setup"
+            "Setup isolate manifest must set isolate_kind to setup_controls"
         );
         ParsedIsolate::try_from(self.binary_manifest)
     }
@@ -108,8 +108,12 @@ impl WorkloadManifests {
             .into_iter()
             .map(|manifest| {
                 ensure!(
-                    !matches!(manifest.isolate_kind, Some(binary_manifest::IsolateKind::Setup(_))),
-                    "Workload isolate manifest must set isolate_kind to ratified or opaque"
+                    !matches!(
+                        manifest.isolate_kind,
+                        Some(binary_manifest::IsolateKind::SetupControls(_))
+                    ),
+                    "Workload isolate manifest must set isolate_kind to ratified_controls or \
+                     opaque_controls"
                 );
                 ParsedIsolate::try_from(manifest)
             })

@@ -40,6 +40,9 @@ pub struct NodeBootstrapV2Config {
     pub ez_to_ez_max_concurrent_handshakes: usize,
     /// Allowlist of peer EZ node SPIFFE IDs permitted for mTLS communication.
     pub allowed_peer_identities: Vec<String>,
+    /// Whether Opaque and Ratified Isolates (not the Setup Isolate) load without endorsement
+    /// validation and package digest checks. Only Enforcer debug builds may set this.
+    pub skip_endorsement_check: bool,
 }
 
 /// EZ Node Bootstrapper for Manifest V2.
@@ -66,6 +69,7 @@ impl NodeBootstrapV2 {
             &config.ez_management_address,
             container_manager_requester.clone(),
             config.max_decoding_message_size,
+            config.skip_endorsement_check,
         )
         .await
         .context("Failed to create EzManagementClient")?;

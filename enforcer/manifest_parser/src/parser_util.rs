@@ -62,7 +62,7 @@ impl TryFrom<BinaryManifest> for ParsedIsolate {
         let isolate_kind = manifest.isolate_kind.context("isolate_kind must be specified")?;
         let (package_filename, metrics_policy, kind) = match isolate_kind {
             // The Setup Isolate runs as a Ratified Isolate.
-            binary_manifest::IsolateKind::Setup(setup) => {
+            binary_manifest::IsolateKind::SetupControls(setup) => {
                 ensure!(
                     !setup.package_filename.is_empty(),
                     "package_filename cannot be empty in SetupControls"
@@ -70,7 +70,7 @@ impl TryFrom<BinaryManifest> for ParsedIsolate {
                 let kind = IsolateKind::Ratified { services_to_intercept: vec![] };
                 (setup.package_filename, None, kind)
             }
-            binary_manifest::IsolateKind::Ratified(ratified) => {
+            binary_manifest::IsolateKind::RatifiedControls(ratified) => {
                 validate_isolate_digest(manifest.isolate_digest.as_ref())?;
                 let kind = IsolateKind::Ratified {
                     services_to_intercept: convert_intercepting_services_v2_to_v1(
@@ -79,7 +79,7 @@ impl TryFrom<BinaryManifest> for ParsedIsolate {
                 };
                 (String::new(), ratified.metrics_policy, kind)
             }
-            binary_manifest::IsolateKind::Opaque(opaque) => {
+            binary_manifest::IsolateKind::OpaqueControls(opaque) => {
                 validate_isolate_digest(manifest.isolate_digest.as_ref())?;
                 let kind = IsolateKind::Opaque { allowed_overrides: opaque.allowed_overrides };
                 (String::new(), opaque.metrics_policy, kind)

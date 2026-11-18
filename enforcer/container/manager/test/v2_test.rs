@@ -192,11 +192,11 @@ async fn test_v2_explicit_startup_parameters_scaling() {
         vec![
             setup_startup_parameters(),
             IsolateStartupParameters {
-                command_line_arguments: vec![
+                override_command_line_arguments: vec![
                     "--foo=bar".to_string(),
                     "--verbose=false".to_string(),
                 ],
-                environment_variables: vec!["KEY=value".to_string()],
+                override_environment_variables: vec!["KEY=value".to_string()],
                 ..startup_parameters(HELLOWORLD_DOMAIN, HELLOWORLD_ISOLATE_NAME, 2)
             },
         ],
@@ -490,12 +490,12 @@ async fn test_v2_start_fails_with_command_line_arguments_for_setup_isolate() {
         &IsolateRuntimeConfigs::default(),
         "test_operator".to_string(),
         vec![IsolateStartupParameters {
-            command_line_arguments: vec!["--foo=bar".to_string()],
+            override_command_line_arguments: vec!["--foo=bar".to_string()],
             ..setup_startup_parameters()
         }],
     )
     .await
-    .expect_err("Setup Isolate startup parameters must not set command_line_arguments");
+    .expect_err("Setup Isolate startup parameters must not set override_command_line_arguments");
     assert!(format!("{err:#}").contains("cannot have command-line arguments"), "{err:#}");
 }
 
@@ -506,12 +506,12 @@ async fn test_v2_start_fails_with_environment_variables_for_setup_isolate() {
         &IsolateRuntimeConfigs::default(),
         "test_operator".to_string(),
         vec![IsolateStartupParameters {
-            environment_variables: vec!["KEY=value".to_string()],
+            override_environment_variables: vec!["KEY=value".to_string()],
             ..setup_startup_parameters()
         }],
     )
     .await
-    .expect_err("Setup Isolate startup parameters must not set environment_variables");
+    .expect_err("Setup Isolate startup parameters must not set override_environment_variables");
     assert!(format!("{err:#}").contains("cannot have environment variables"), "{err:#}");
 }
 
@@ -606,7 +606,7 @@ async fn test_v2_load_workload_manifests_fails_with_reserved_environment_variabl
         vec![
             setup_startup_parameters(),
             IsolateStartupParameters {
-                environment_variables: vec!["EZ_OPERATOR_ROLE=spoofed".to_string()],
+                override_environment_variables: vec!["EZ_OPERATOR_ROLE=spoofed".to_string()],
                 ..startup_parameters(HELLOWORLD_DOMAIN, HELLOWORLD_ISOLATE_NAME, 1)
             },
         ],
@@ -739,15 +739,20 @@ async fn test_v2_load_workload_manifests_fails_with_disallowed_overrides() {
     let variable_error = "must be KEY=value";
     let repeat_error = "Duplicate key in";
     for (arguments, variables, rejected, expected_error) in [
-        (vec!["--bar=secret"], vec![], "command_line_arguments[0]", flag_error),
+        (vec!["--bar=secret"], vec![], "override_command_line_arguments[0]", flag_error),
         // Booleans have to be written as --verbose=true or --verbose=false.
-        (vec!["--verbose"], vec![], "command_line_arguments[0]", flag_error),
+        (vec!["--verbose"], vec![], "override_command_line_arguments[0]", flag_error),
         // KEY is allowed only as a variable, and --foo only as a flag.
-        (vec!["KEY=secret"], vec![], "command_line_arguments[0]", flag_error),
-        (vec![], vec!["--foo=secret"], "environment_variables[0]", variable_error),
-        (vec![], vec!["OTHER=secret"], "environment_variables[0]", variable_error),
-        (vec![], vec!["KEY"], "environment_variables[0]", variable_error),
-        (vec![], vec!["KEY=value", "KEY=secret"], "environment_variables[1]", repeat_error),
+        (vec!["KEY=secret"], vec![], "override_command_line_arguments[0]", flag_error),
+        (vec![], vec!["--foo=secret"], "override_environment_variables[0]", variable_error),
+        (vec![], vec!["OTHER=secret"], "override_environment_variables[0]", variable_error),
+        (vec![], vec!["KEY"], "override_environment_variables[0]", variable_error),
+        (
+            vec![],
+            vec!["KEY=value", "KEY=secret"],
+            "override_environment_variables[1]",
+            repeat_error,
+        ),
     ] {
         let mut harness = TestHarness::new_v2(
             "enforcer/manifest_parser/test/testdata/v2_setup.json",
@@ -756,8 +761,8 @@ async fn test_v2_load_workload_manifests_fails_with_disallowed_overrides() {
             vec![
                 setup_startup_parameters(),
                 IsolateStartupParameters {
-                    command_line_arguments: to_strings(&arguments),
-                    environment_variables: to_strings(&variables),
+                    override_command_line_arguments: to_strings(&arguments),
+                    override_environment_variables: to_strings(&variables),
                     ..startup_parameters(HELLOWORLD_DOMAIN, HELLOWORLD_ISOLATE_NAME, 1)
                 },
             ],

@@ -18,7 +18,7 @@
   ],
   "command_line_arguments": ["--mode=setup"],
   "environment_variables": ["SETUP_ENV=1"],
-  "setup": {
+  "setup_controls": {
     "package_filename": "enforcer/container/test_data/test_binary.tar"
   }
 }

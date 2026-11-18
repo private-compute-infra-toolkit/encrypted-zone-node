@@ -167,10 +167,10 @@ async fn test_manifest_validation_errors() {
     }
 
     let missing_identity_cases = [
-        br#"{"ratified": {}}"#.to_vec(),
+        br#"{"ratified_controls": {}}"#.to_vec(),
         create_binary_manifest_json(
             &IsolateType { publisher_id: String::new(), isolate_name: "wl".to_string() },
-            "ratified",
+            "ratified_controls",
             VALID_TAR,
         ),
     ];
@@ -333,7 +333,7 @@ async fn test_package_path_validation_and_disk_errors() {
     for (invalid_type, expected_err) in invalid_identity_cases {
         let manifest = create_endorsed_manifest(create_binary_manifest_json(
             &invalid_type,
-            "ratified",
+            "ratified_controls",
             VALID_TAR,
         ));
         let requester = create_mock_container_manager_requester(Ok(()), Ok(()));
@@ -382,7 +382,7 @@ async fn test_package_digest_mismatch() {
             create_ratified_manifest("wl_a"),
             create_endorsed_manifest(create_binary_manifest_json(
                 &opaque_isolate_type("wl_b"),
-                "opaque",
+                "opaque_controls",
                 &wl_b_package,
             )),
         ]),
@@ -415,11 +415,11 @@ async fn test_missing_or_invalid_isolate_digest_rejected() {
     let uppercase_digest =
         format!(r#""isolateDigest": {{"packageSha256": "{}"}},"#, "A".repeat(64));
     let cases = [
-        (ratified_isolate_type("no_digest"), "ratified", String::new(), missing),
-        (opaque_isolate_type("no_digest"), "opaque", String::new(), missing),
-        (ratified_isolate_type("empty_digest"), "ratified", empty_digest.clone(), invalid),
-        (opaque_isolate_type("empty_digest"), "opaque", empty_digest, invalid),
-        (opaque_isolate_type("uppercase_digest"), "opaque", uppercase_digest, invalid),
+        (ratified_isolate_type("no_digest"), "ratified_controls", String::new(), missing),
+        (opaque_isolate_type("no_digest"), "opaque_controls", String::new(), missing),
+        (ratified_isolate_type("empty_digest"), "ratified_controls", empty_digest.clone(), invalid),
+        (opaque_isolate_type("empty_digest"), "opaque_controls", empty_digest, invalid),
+        (opaque_isolate_type("uppercase_digest"), "opaque_controls", uppercase_digest, invalid),
     ];
     for (isolate_type, kind, isolate_digest, expected_msg) in cases {
         let binary_manifest_json = format!(
@@ -646,6 +646,109 @@ async fn test_manifest_endorsement_validation_errors() {
 }
 
 #[tokio::test]
+async fn test_skip_endorsement_check_skips_all_validation() {
+    // Even a BinaryManifest with endorsements, which would fail validation, loads.
+    let mut endorsed = create_opaque_manifest("endorsed_wl");
+    endorsed.binary_manifest_endorsements = vec![1u8, 2, 3];
+    let responses = vec![
+        create_bundle_response(vec![create_ratified_manifest("unendorsed_wl"), endorsed]),
+        create_single_chunk_response(ratified_isolate_type("unendorsed_wl"), VALID_TAR),
+        create_single_chunk_response(opaque_isolate_type("endorsed_wl"), VALID_TAR),
+        create_all_packages_loaded_response(),
+    ];
+
+    let mock_junction = MockSetupIsolateJunction::new_failure(42, "Untrusted signature");
+    let mut ctx =
+        setup_test_context_skipping_endorsement_check(responses, mock_junction.clone()).await;
+    let indices = ctx.client.load_packages().await.expect("load_packages should succeed");
+    assert_eq!(indices.len(), 2);
+    assert!(mock_junction.get_invoked_requests().is_empty());
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    let results: Vec<_> = ctx
+        .received_requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|req| match &req.request {
+            Some(load_isolates_request::Request::LoadIsolatesResult(res)) => Some(res.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results.len(), 2);
+    for result in &results {
+        assert!(result.success);
+        assert!(result.validate_isolate_endorsement_result.is_none());
+    }
+}
+
+#[tokio::test]
+async fn test_unendorsed_binary_manifest_validated_without_skip() {
+    let responses = vec![create_bundle_response(vec![create_ratified_manifest("unendorsed_wl")])];
+    let mock_junction = MockSetupIsolateJunction::new_failure(42, "Missing endorsement");
+    let mut ctx = setup_test_context_with_junction(responses, mock_junction.clone()).await;
+    assert_load_failed(
+        ctx.client.load_packages().await,
+        LoadIsolatesError::ValidationFailure,
+        "Endorsement validation failed",
+    );
+    let invoked = mock_junction.get_invoked_requests();
+    assert_eq!(invoked.len(), 1);
+    assert!(invoked[0].isolate_package_endorsement.is_empty());
+}
+
+#[tokio::test]
+async fn test_skip_endorsement_check_skips_package_digest_check() {
+    // The BinaryManifest has the digest of other bytes, not of the package.
+    let isolate_type = ratified_isolate_type("mismatched_wl");
+    let manifest = create_endorsed_manifest(create_binary_manifest_json(
+        &isolate_type,
+        "ratified_controls",
+        &[1u8; 1024],
+    ));
+    let responses = vec![
+        create_bundle_response(vec![manifest]),
+        create_single_chunk_response(isolate_type.clone(), VALID_TAR),
+        create_all_packages_loaded_response(),
+    ];
+    let mock_junction = MockSetupIsolateJunction::new_success();
+    let mut ctx =
+        setup_test_context_skipping_endorsement_check(responses, mock_junction.clone()).await;
+    let indices = ctx.client.load_packages().await.expect("load_packages should succeed");
+    assert_eq!(indices.len(), 1);
+    assert!(mock_junction.get_invoked_requests().is_empty());
+    let res = ctx.get_last_load_result().await;
+    assert_eq!(res.isolate_type, Some(isolate_type));
+    assert!(res.success);
+    assert_eq!(res.load_isolates_error, LoadIsolatesError::Unspecified as i32);
+}
+
+#[tokio::test]
+async fn test_skip_endorsement_check_still_requires_isolate_digest() {
+    let isolate_type = ratified_isolate_type("no_digest");
+    let binary_manifest_json = format!(
+        r#"{{
+            "isolateType": {{"isolateName": {:?}, "publisherId": {:?}}},
+            "binaryFilename": "main_wl",
+            "ratified_controls": {{}}
+        }}"#,
+        isolate_type.isolate_name, isolate_type.publisher_id
+    );
+    let mut ctx = setup_test_context_skipping_endorsement_check(
+        vec![create_bundle_response(vec![create_endorsed_manifest(
+            binary_manifest_json.into_bytes(),
+        )])],
+        MockSetupIsolateJunction::new_success(),
+    )
+    .await;
+    assert_load_failed(
+        ctx.client.load_packages().await,
+        LoadIsolatesError::ManifestParsingFailure,
+        "isolate_digest is required for Ratified and Opaque Isolates",
+    );
+}
+
+#[tokio::test]
 async fn test_write_package_to_disk_io_failure() {
     std::env::set_var("EZ_PACKAGE_OUTPUT_DIR", "/dev/null/forbidden_dir");
     let (container_manager_requester, _cm_temp_dir) = create_fake_container_manager(None).await;
@@ -667,7 +770,8 @@ async fn test_write_package_to_disk_io_failure() {
     });
     let address = format!("unix:{}", uds_path.to_str().unwrap());
     let result =
-        EzManagementClient::new(&address, container_manager_requester, MAX_DECODING_SIZE).await;
+        EzManagementClient::new(&address, container_manager_requester, MAX_DECODING_SIZE, false)
+            .await;
     server_handle.abort();
     std::env::remove_var("EZ_PACKAGE_OUTPUT_DIR");
 
@@ -714,7 +818,7 @@ async fn test_invalid_manifest_rejected_before_endorsement_validation() {
     let no_binary_type = ratified_isolate_type("no_binary");
     let cases = [
         (
-            create_binary_manifest_json(&setup_type, "setup", VALID_TAR),
+            create_binary_manifest_json(&setup_type, "setup_controls", VALID_TAR),
             format!("Setup Isolate '{setup_type:?}' is not allowed in the BundleManifest"),
         ),
         (
@@ -730,7 +834,7 @@ async fn test_invalid_manifest_rejected_before_endorsement_validation() {
                 r#"{{
                     "isolateType": {{"isolateName": {:?}, "publisherId": {:?}}},
                     "isolateDigest": {{"packageSha256": {:?}}},
-                    "ratified": {{}}
+                    "ratified_controls": {{}}
                 }}"#,
                 no_binary_type.isolate_name,
                 no_binary_type.publisher_id,
@@ -873,8 +977,8 @@ async fn test_fetch_isolate_startup_parameters_and_errors() {
     let isolate_startup_parameters = &ctx.isolate_startup_parameters;
     let opaque = IsolateStartupParameters {
         identifier: Some(opaque_isolate_type("opaque_wl")),
-        command_line_arguments: vec!["--foo=bar".to_string()],
-        environment_variables: vec!["KEY=value".to_string()],
+        override_command_line_arguments: vec!["--foo=bar".to_string()],
+        override_environment_variables: vec!["KEY=value".to_string()],
         number_of_isolates: 2,
     };
 

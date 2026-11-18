@@ -29,26 +29,26 @@ pub(crate) fn validate(
     allowed_overrides: &[String],
 ) -> Result<()> {
     let allowed: HashSet<&str> = allowed_overrides.iter().map(String::as_str).collect();
-    for (i, argument) in parameters.command_line_arguments.iter().enumerate() {
+    for (i, argument) in parameters.override_command_line_arguments.iter().enumerate() {
         let key = entry_key(argument);
         ensure!(
             argument.contains('=') && key.starts_with("--") && allowed.contains(key),
-            "IsolateStartupParameters.command_line_arguments[{i}] for Opaque Isolate \
+            "IsolateStartupParameters.override_command_line_arguments[{i}] for Opaque Isolate \
              {isolate_type:?} must be --key=value with --key listed in allowed_overrides"
         );
     }
     let mut keys = HashSet::new();
-    for (i, variable) in parameters.environment_variables.iter().enumerate() {
+    for (i, variable) in parameters.override_environment_variables.iter().enumerate() {
         let key = entry_key(variable);
         ensure!(
             variable.contains('=') && !key.starts_with('-') && allowed.contains(key),
-            "IsolateStartupParameters.environment_variables[{i}] for Opaque Isolate \
+            "IsolateStartupParameters.override_environment_variables[{i}] for Opaque Isolate \
              {isolate_type:?} must be KEY=value with KEY listed in allowed_overrides"
         );
         ensure!(
             keys.insert(key),
-            "Duplicate key in IsolateStartupParameters.environment_variables[{i}] for Opaque \
-             Isolate {isolate_type:?}"
+            "Duplicate key in IsolateStartupParameters.override_environment_variables[{i}] for \
+             Opaque Isolate {isolate_type:?}"
         );
     }
     Ok(())
