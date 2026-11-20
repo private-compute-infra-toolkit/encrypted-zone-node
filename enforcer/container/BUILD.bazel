@@ -122,6 +122,7 @@ rust_test(
         "@crates//:anyhow",
         "@crates//:libc",
         "@crates//:log",
+        "@crates//:nix",
         "@crates//:tempfile",
         "@crates//:tokio",
     ],

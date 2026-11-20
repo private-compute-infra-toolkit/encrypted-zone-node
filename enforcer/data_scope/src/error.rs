@@ -16,7 +16,7 @@ use error_detail_proto::enforcer::v1::ez_error_detail::{ErrorReason, ErrorSource
 use error_details_proto::google::rpc::BadRequest;
 use thiserror::Error;
 
-#[derive(Clone, Debug, Error)]
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum DataScopeError {
     // Retryable Errors
     #[error("No Isolates meet the requested DataScope criteria")]
@@ -35,6 +35,10 @@ pub enum DataScopeError {
     DisallowedByManifest,
     #[error("Communication to this Backend Dependency is not allowed as it is not defined in the EzManifest")]
     BackendDependencyNotAllowed,
+    #[error("Invalid target_label in EzBackendDependency: must be 2-63 characters of [a-z0-9-] starting and ending with [a-z0-9]")]
+    InvalidTargetLabel,
+    #[error("Conflicting target_label in EzBackendDependency for the same destination service")]
+    ConflictingTargetLabel,
     #[error("Isolate attempted to escalate scope. Emitted: {emitted}, Current: {current}")]
     PayloadExceedsCurrentDataScope { emitted: String, current: String },
     #[error("Private DataScope emitted via public API. Emitted DataScope: {emitted}")]
@@ -67,6 +71,13 @@ impl ToEzError for DataScopeError {
             DataScopeError::DuplicateBinaryServiceIndex => {
                 let bad_request = create_invalid_isolate_service_bad_request(vec![
                     "enforcer.EzManifest.binary_manifest.ez_backend_dependencies".to_string(),
+                ]);
+                (tonic::Code::InvalidArgument, None, Some(bad_request))
+            }
+            DataScopeError::InvalidTargetLabel | DataScopeError::ConflictingTargetLabel => {
+                let bad_request = create_invalid_isolate_service_bad_request(vec![
+                    "enforcer.EzManifest.binary_manifest.ez_backend_dependencies.target_label"
+                        .to_string(),
                 ]);
                 (tonic::Code::InvalidArgument, None, Some(bad_request))
             }

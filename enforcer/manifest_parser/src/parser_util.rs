@@ -151,6 +151,7 @@ fn convert_backend_dependencies_v2_to_v1(
             service_name: d.service_name,
             method_name: d.method_name,
             route_type: d.route_type,
+            target_label: d.target_label,
         });
     }
     Ok(out)

@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## 0.36.0 (2026-11-20)
+
+
+### EZ Policy Enforcer
+
+* **enforcer:** add target_label to routing protos
+* **enforcer:** attach and forward target_label
+* **enforcer:** Idempotent isolate state updates
+* **enforcer:** include detailed cause in NotifyIsolateState error
+* **enforcer:** Preserve read-only flag on bind remounts
+* **enforcer:** register isolate before starting container
+* **enforcer:** return UNAVAILABLE when isolate is not registered
+
+
+### Documentation
+
+* add gitlinks check to commit_creation skill
+* clarify commit tag and footer formatting
+* clarify role-account attribution in AGENTS.md
+* point unary RPC TODOs in IsolateEzBridge to b/587103635
+* use .versionrc.json for commit types/scopes
+* use single branch for stacked Gerrit CLs
+
 ## 0.35.0 (2026-11-18)
 
 

@@ -22,9 +22,12 @@ pub use container_manager_requester::{
     ContainerManagerRequester, LoadWorkloadIsolatesRequest, LoadWorkloadManifestsRequest,
 };
 use container_test_utils::{FakeContainer, Status};
-use data_scope::error::DataScopeError;
+pub use data_scope::error::DataScopeError;
 use data_scope::manifest_validator::ManifestValidator;
-use data_scope::request::{ValidateManifestInputScopeRequest, ValidateManifestOutputScopeRequest};
+pub use data_scope::request::{
+    ValidateBackendDependencyRequest, ValidateManifestInputScopeRequest,
+    ValidateManifestOutputScopeRequest,
+};
 use data_scope::requester::DataScopeRequester;
 use data_scope_proto::enforcer::v1::DataScopeType;
 use enforcer_proto::enforcer::v1::{
@@ -54,7 +57,7 @@ use payload_proto::enforcer::v1::{
 };
 use shared_memory_manager::SharedMemManager;
 use simple_tonic_stream::SimpleStreamingWrapper;
-use state_manager::{IsolateStateManager, IsolateStateManagerError};
+use state_manager::IsolateStateManager;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use tokio::net::{TcpListener, UnixStream};
@@ -594,21 +597,16 @@ pub async fn ensure_isolate_ready(
 ) -> Result<IsolateEzBridgeClient<Channel>> {
     let client = notify_isolate_ready(isolate_ez_bridge_enforcer_side_uds_path).await?;
 
-    // Assert that Isolate is added in Isolate State Manager via IsolateEZ Bridge
+    // Assert that Isolate is added and Ready in Isolate State Manager
     ensure!(
-        harness.isolate_state_manager.update_state(isolate_id, IsolateState::Ready).await.is_err(),
-        "Expected state update to fail with IsolateStateManagerError::DuplicateStateUpdate."
+        harness.isolate_state_manager.get_isolate_state(isolate_id) == Some(IsolateState::Ready),
+        "Expected isolate state to be Ready in IsolateStateManager"
     );
 
-    let err = harness
-        .isolate_state_manager
-        .update_state(isolate_id, IsolateState::Ready)
-        .await
-        .err()
-        .unwrap();
+    // Duplicate state update should succeed idempotently
     ensure!(
-        matches!(err.downcast().unwrap(), IsolateStateManagerError::DuplicateStateUpdate),
-        "Expected IsolateStateManagerError::DuplicateStateUpdate error"
+        harness.isolate_state_manager.update_state(isolate_id, IsolateState::Ready).await.is_ok(),
+        "Expected duplicate state update to succeed idempotently"
     );
 
     Ok(client)

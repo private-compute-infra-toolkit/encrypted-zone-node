@@ -426,18 +426,17 @@ impl ContainerCustom {
         let dest = dest.to_str().ok_or(anyhow::anyhow!("Failed to convert dest path to string"))?;
         mount::mount(Some(src), dest, fstype, flags, None::<&str>)?;
         if apply_restrictive_flags {
-            mount::mount(
-                None::<&str>,
-                dest,
-                None::<&str>,
-                MsFlags::MS_REMOUNT
-                    | MsFlags::MS_BIND
-                    | MsFlags::MS_REC
-                    | MsFlags::MS_NOEXEC
-                    | MsFlags::MS_NOSUID
-                    | MsFlags::MS_NODEV,
-                None::<&str>,
-            )?;
+            let mut remount_flags = MsFlags::MS_REMOUNT
+                | MsFlags::MS_BIND
+                | MsFlags::MS_REC
+                | MsFlags::MS_NOEXEC
+                | MsFlags::MS_NOSUID
+                | MsFlags::MS_NODEV;
+            // A user namespace cannot clear a locked read-only flag inherited from the source.
+            if statvfs::statvfs(dest)?.flags().contains(statvfs::FsFlags::ST_RDONLY) {
+                remount_flags |= MsFlags::MS_RDONLY;
+            }
+            mount::mount(None::<&str>, dest, None::<&str>, remount_flags, None::<&str>)?;
         }
         Ok(())
     }

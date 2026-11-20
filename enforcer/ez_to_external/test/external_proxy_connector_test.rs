@@ -1076,3 +1076,14 @@ async fn test_stream_proxy_external_propagates_initial_and_midstream_errors() {
     drop(tx2);
     let _ = mid_shutdown_tx.send(());
 }
+
+#[test]
+fn test_translate_to_proxy_request_forwards_target_label() {
+    let mut req = create_generic_test_request(vec![vec![1, 2, 3]]);
+    req.control_plane_metadata.as_mut().unwrap().target_label = "my-external-label".to_string();
+
+    let proxy_req =
+        translate_to_proxy_request(req).expect("translate_to_proxy_request should succeed");
+    let resource = proxy_req.resource.expect("resource should be present");
+    assert_eq!(resource.target_label, "my-external-label");
+}

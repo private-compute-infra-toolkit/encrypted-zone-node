@@ -595,6 +595,7 @@ async fn unary_allows_ez_instance_id_for_self_hosted_peer_service() {
         .add_backend_dependencies(AddBackendDependenciesRequest {
             binary_services_index: harness.isolate_id.get_binary_services_index(),
             dependency_index,
+            target_label: None,
         })
         .await
         .expect("Should be able to add backend dependency in manifest");
@@ -1149,6 +1150,7 @@ async fn test_unary_routes_via_interceptor() {
                 .get_service_index(&interceptor_info)
                 .await
                 .expect("Failed to get service index"),
+            target_label: None,
         })
         .await
         .expect("Should be able to add backend dependency in manifest");
@@ -1383,6 +1385,7 @@ async fn test_interceptor_replacement_skipped_for_ratified_isolate() {
                 .get_service_index(&target_info)
                 .await
                 .expect("Failed to get service index"),
+            target_label: None,
         })
         .await
         .expect("Should be able to add backend dependency in manifest");
@@ -1846,6 +1849,344 @@ async fn test_missing_metadata_and_midstream_route_mismatch_rejected() {
             .expect("route mismatch error should arrive")
             .expect_err("mid-stream route switch must fail");
         assert_eq!(mismatch.code(), tonic::Code::FailedPrecondition);
+    }
+}
+
+#[tokio::test]
+async fn unary_attaches_target_label_from_manifest_dependency() {
+    let mut harness = TestHarness::new().await.expect("Harness should start");
+    let proxy_calls = harness.mock_proxy.call_count.clone();
+    let remote_calls = harness.mock_ez_to_ez.call_count.clone();
+    let junction_calls = harness.mock_junction.call_count.clone();
+
+    let ext_info =
+        IsolateServiceInfo { service_name: TEST_SERVICE_NAME.to_string(), ..Default::default() };
+    let ext_index = harness
+        .mapper
+        .add_backend_dependency_service(&ext_info, RouteType::External)
+        .await
+        .expect("add external dependency");
+    harness
+        .manifest_validator
+        .add_backend_dependencies(AddBackendDependenciesRequest {
+            binary_services_index: harness.isolate_id.get_binary_services_index(),
+            dependency_index: ext_index,
+            target_label: Some("ext-label".to_string()),
+        })
+        .await
+        .expect("register external dependency with label in validator");
+
+    let remote_info = IsolateServiceInfo {
+        operator_domain: TEST_REMOTE_OPERATOR_DOMAIN.to_string(),
+        service_name: TEST_SERVICE_NAME.to_string(),
+        isolate_name: "remote_iso".to_string(),
+        publisher_id: "remote_pub".to_string(),
+    };
+    let remote_index = harness
+        .mapper
+        .add_backend_dependency_service(&remote_info, RouteType::Remote)
+        .await
+        .expect("add remote dependency");
+    harness
+        .manifest_validator
+        .add_backend_dependencies(AddBackendDependenciesRequest {
+            binary_services_index: harness.isolate_id.get_binary_services_index(),
+            dependency_index: remote_index,
+            target_label: Some("remote-label".to_string()),
+        })
+        .await
+        .expect("register remote dependency with label in validator");
+
+    let internal_info = IsolateServiceInfo {
+        operator_domain: TEST_INTERNAL_OPERATOR_DOMAIN.to_string(),
+        service_name: TEST_SERVICE_NAME.to_string(),
+        isolate_name: "internal_iso".to_string(),
+        publisher_id: "internal_pub".to_string(),
+    };
+    add_backend_dependencies(
+        harness.isolate_id,
+        harness.mapper.clone(),
+        harness.manifest_validator.clone(),
+        &internal_info,
+        true,
+        RouteType::Internal,
+    )
+    .await
+    .expect("register internal dependency without label");
+
+    add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
+        .await
+        .expect("add isolate scope");
+
+    // 1. External call without target_label has "ext-label" attached by the Enforcer.
+    let ext_req = create_test_request("", TEST_SERVICE_NAME);
+    let _ = harness
+        .client
+        .invoke_ez(ext_req)
+        .await
+        .expect("external unary call should succeed and attach manifest target_label");
+    assert_eq!(proxy_calls.load(Ordering::SeqCst), 1);
+
+    // 2. External call with a spoofed target_label has it overwritten with "ext-label".
+    let mut spoofed_ext_req = create_test_request("", TEST_SERVICE_NAME);
+    spoofed_ext_req.control_plane_metadata.as_mut().unwrap().target_label =
+        "spoofed-label".to_string();
+    let _ = harness
+        .client
+        .invoke_ez(spoofed_ext_req)
+        .await
+        .expect("external unary call should overwrite spoofed target_label");
+    assert_eq!(proxy_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        *harness.mock_proxy.observed_target_labels.lock().unwrap(),
+        vec!["ext-label".to_string(), "ext-label".to_string()]
+    );
+
+    // 3. Remote call without target_label has "remote-label" attached by the Enforcer.
+    let rem_req = create_test_request_with_qualifiers(
+        TEST_REMOTE_OPERATOR_DOMAIN,
+        TEST_SERVICE_NAME,
+        "remote_iso",
+        "remote_pub",
+    );
+    let _ = harness
+        .client
+        .invoke_ez(rem_req)
+        .await
+        .expect("remote unary call should succeed and attach manifest target_label");
+    assert_eq!(remote_calls.load(Ordering::SeqCst), 1);
+
+    // 4. Remote call with a spoofed target_label has it overwritten with "remote-label".
+    let mut spoofed_rem_req = create_test_request_with_qualifiers(
+        TEST_REMOTE_OPERATOR_DOMAIN,
+        TEST_SERVICE_NAME,
+        "remote_iso",
+        "remote_pub",
+    );
+    spoofed_rem_req.control_plane_metadata.as_mut().unwrap().target_label =
+        "spoofed-label".to_string();
+    let _ = harness
+        .client
+        .invoke_ez(spoofed_rem_req)
+        .await
+        .expect("remote unary call should overwrite spoofed target_label");
+    assert_eq!(remote_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        *harness.mock_ez_to_ez.observed_target_labels.lock().unwrap(),
+        vec!["remote-label".to_string(), "remote-label".to_string()]
+    );
+
+    // 5. Internal call with a spoofed target_label has it overwritten with "".
+    let mut spoofed_int_req = create_test_request_with_qualifiers(
+        TEST_INTERNAL_OPERATOR_DOMAIN,
+        TEST_SERVICE_NAME,
+        "internal_iso",
+        "internal_pub",
+    );
+    spoofed_int_req.control_plane_metadata.as_mut().unwrap().target_label =
+        "spoofed-label".to_string();
+    let _ = harness
+        .client
+        .invoke_ez(spoofed_int_req)
+        .await
+        .expect("internal unary call should overwrite spoofed target_label");
+    assert_eq!(junction_calls.load(Ordering::SeqCst), 1);
+    let invoked_requests = harness.mock_junction.invoked_isolate_requests.lock().unwrap();
+    assert_eq!(
+        invoked_requests.last().unwrap().control_plane_metadata.as_ref().unwrap().target_label,
+        ""
+    );
+}
+
+#[tokio::test]
+async fn stream_attaches_and_overwrites_target_label_for_all_routes() {
+    let mut harness = TestHarness::new().await.expect("Harness should start");
+
+    let ext_info =
+        IsolateServiceInfo { service_name: TEST_SERVICE_NAME.to_string(), ..Default::default() };
+    let ext_index = harness
+        .mapper
+        .add_backend_dependency_service(&ext_info, RouteType::External)
+        .await
+        .expect("add external dependency");
+    harness
+        .manifest_validator
+        .add_backend_dependencies(AddBackendDependenciesRequest {
+            binary_services_index: harness.isolate_id.get_binary_services_index(),
+            dependency_index: ext_index,
+            target_label: Some("ext-label".to_string()),
+        })
+        .await
+        .expect("register external dependency with label");
+
+    let remote_info = IsolateServiceInfo {
+        operator_domain: TEST_REMOTE_OPERATOR_DOMAIN.to_string(),
+        service_name: TEST_SERVICE_NAME.to_string(),
+        isolate_name: "remote_iso".to_string(),
+        publisher_id: "remote_pub".to_string(),
+    };
+    let remote_index = harness
+        .mapper
+        .add_backend_dependency_service(&remote_info, RouteType::Remote)
+        .await
+        .expect("add remote dependency");
+    harness
+        .manifest_validator
+        .add_backend_dependencies(AddBackendDependenciesRequest {
+            binary_services_index: harness.isolate_id.get_binary_services_index(),
+            dependency_index: remote_index,
+            target_label: Some("remote-label".to_string()),
+        })
+        .await
+        .expect("register remote dependency with label");
+
+    let internal_info = IsolateServiceInfo {
+        operator_domain: TEST_INTERNAL_OPERATOR_DOMAIN.to_string(),
+        service_name: TEST_SERVICE_NAME.to_string(),
+        isolate_name: "internal_iso".to_string(),
+        publisher_id: "internal_pub".to_string(),
+    };
+    add_backend_dependencies(
+        harness.isolate_id,
+        harness.mapper.clone(),
+        harness.manifest_validator.clone(),
+        &internal_info,
+        true,
+        RouteType::Internal,
+    )
+    .await
+    .expect("register internal dependency without label");
+
+    add_to_data_scope_requester(harness.data_scope_requester.clone(), harness.isolate_id)
+        .await
+        .expect("add isolate scope");
+
+    // 1. External stream: spoofed labels on both initial and subsequent messages are overwritten.
+    {
+        let (req_tx, req_rx) = mpsc::channel(CHANNEL_SIZE);
+        let mut first_ext = create_test_request("", TEST_SERVICE_NAME);
+        first_ext.control_plane_metadata.as_mut().unwrap().target_label =
+            "spoofed-first".to_string();
+        req_tx.send(first_ext).await.unwrap();
+
+        let mut ext_stream = harness
+            .client
+            .stream_invoke_ez(ReceiverStream::new(req_rx))
+            .await
+            .expect("external stream invoke should succeed")
+            .into_inner();
+
+        let mut second_ext = create_test_request("", TEST_SERVICE_NAME);
+        second_ext.control_plane_metadata.as_mut().unwrap().target_label =
+            "spoofed-second".to_string();
+        req_tx.send(second_ext).await.unwrap();
+        let ext_resp = timeout(Duration::from_secs(5), ext_stream.message())
+            .await
+            .expect("external stream response should arrive within timeout")
+            .expect("external stream response should be Ok");
+        assert!(ext_resp.is_some());
+        assert_eq!(harness.mock_proxy.received_from_bridge_count.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            *harness.mock_proxy.observed_target_labels.lock().unwrap(),
+            vec!["ext-label".to_string(), "ext-label".to_string()]
+        );
+    }
+
+    // 2. Remote stream: spoofed labels on both initial and subsequent messages are overwritten.
+    {
+        let (req_tx, req_rx) = mpsc::channel(CHANNEL_SIZE);
+        let mut first_rem = create_test_request_with_qualifiers(
+            TEST_REMOTE_OPERATOR_DOMAIN,
+            TEST_SERVICE_NAME,
+            "remote_iso",
+            "remote_pub",
+        );
+        first_rem.control_plane_metadata.as_mut().unwrap().target_label =
+            "spoofed-first".to_string();
+        req_tx.send(first_rem).await.unwrap();
+
+        let mut rem_stream = harness
+            .client
+            .stream_invoke_ez(ReceiverStream::new(req_rx))
+            .await
+            .expect("remote stream invoke should succeed")
+            .into_inner();
+        let first_resp = timeout(Duration::from_secs(5), rem_stream.message())
+            .await
+            .expect("first remote stream response should arrive within timeout")
+            .expect("first remote stream response should be Ok");
+        assert!(first_resp.is_some());
+
+        let mut second_rem = create_test_request_with_qualifiers(
+            TEST_REMOTE_OPERATOR_DOMAIN,
+            TEST_SERVICE_NAME,
+            "remote_iso",
+            "remote_pub",
+        );
+        second_rem.control_plane_metadata.as_mut().unwrap().target_label =
+            "spoofed-second".to_string();
+        req_tx.send(second_rem).await.unwrap();
+        let second_resp = timeout(Duration::from_secs(5), rem_stream.message())
+            .await
+            .expect("second remote stream response should arrive within timeout")
+            .expect("second remote stream response should be Ok");
+        assert!(second_resp.is_some());
+
+        assert_eq!(
+            *harness.mock_ez_to_ez.connect_target_labels.lock().unwrap(),
+            vec!["remote-label".to_string()]
+        );
+        assert_eq!(
+            *harness.mock_ez_to_ez.observed_target_labels.lock().unwrap(),
+            vec!["remote-label".to_string(), "remote-label".to_string()]
+        );
+    }
+
+    // 3. Internal stream: spoofed labels on both initial and subsequent messages are cleared to "".
+    {
+        let (req_tx, req_rx) = mpsc::channel(CHANNEL_SIZE);
+        let mut first_int = create_test_request_with_qualifiers(
+            TEST_INTERNAL_OPERATOR_DOMAIN,
+            TEST_SERVICE_NAME,
+            "internal_iso",
+            "internal_pub",
+        );
+        first_int.control_plane_metadata.as_mut().unwrap().target_label =
+            "spoofed-first".to_string();
+        req_tx.send(first_int).await.unwrap();
+
+        let mut int_stream = harness
+            .client
+            .stream_invoke_ez(ReceiverStream::new(req_rx))
+            .await
+            .expect("internal stream invoke should succeed")
+            .into_inner();
+        let first_resp = timeout(Duration::from_secs(5), int_stream.message())
+            .await
+            .expect("first internal stream response should arrive within timeout")
+            .expect("first internal stream response should be Ok");
+        assert!(first_resp.is_some());
+
+        let mut second_int = create_test_request_with_qualifiers(
+            TEST_INTERNAL_OPERATOR_DOMAIN,
+            TEST_SERVICE_NAME,
+            "internal_iso",
+            "internal_pub",
+        );
+        second_int.control_plane_metadata.as_mut().unwrap().target_label =
+            "spoofed-second".to_string();
+        req_tx.send(second_int).await.unwrap();
+        let second_resp = timeout(Duration::from_secs(5), int_stream.message())
+            .await
+            .expect("second internal stream response should arrive within timeout")
+            .expect("second internal stream response should be Ok");
+        assert!(second_resp.is_some());
+
+        let invoked_requests = harness.mock_junction.invoked_isolate_requests.lock().unwrap();
+        assert_eq!(invoked_requests.len(), 2);
+        for req in invoked_requests.iter() {
+            assert_eq!(req.control_plane_metadata.as_ref().unwrap().target_label, "");
+        }
     }
 }
 

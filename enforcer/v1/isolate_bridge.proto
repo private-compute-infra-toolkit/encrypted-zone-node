@@ -106,6 +106,14 @@ message ControlPlaneMetadata {
   // Note: this is different than request_metadata intended for HTTP-style
   // headers which are naturally key-value pairs.
   bytes extensions = 15;
+
+  // Optional logical label identifying the target endpoint for outbound
+  // routing (e.g., via `EzCallRequest` for `EzToEzApi` or internal forwarding
+  // to the external proxy connector). The Enforcer populates this field from
+  // the validated `EzBackendDependency.target_label` declared in the Manifest;
+  // the Isolate and SDK do not need to set it, and any Isolate-supplied value
+  // is overwritten by the Enforcer after manifest validation.
+  string target_label = 16;
 }
 
 // Analogous to EzPayloadScope, but with IsolateDataScope instead of

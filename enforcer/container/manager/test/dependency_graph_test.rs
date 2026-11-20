@@ -35,6 +35,7 @@ fn create_backend_dep(
         service_name: service_name.to_string(),
         method_name: "test_method".to_string(),
         route_type: route_type as i32,
+        target_label: String::new(),
     }
 }
 

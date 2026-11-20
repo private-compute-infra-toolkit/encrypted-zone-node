@@ -795,6 +795,97 @@ async fn test_v2_load_workload_manifests_fails_with_disallowed_overrides() {
     }
 }
 
+#[tokio::test]
+async fn test_v2_load_workload_manifests_clears_earlier_dependencies_on_label_conflict() {
+    let mut harness = TestHarness::new_v2(
+        "enforcer/manifest_parser/test/testdata/v2_setup.json",
+        &IsolateRuntimeConfigs::default(),
+        "test_operator".to_string(),
+        vec![
+            setup_startup_parameters(),
+            startup_parameters(V2_RATIFIED_PUBLISHER_ID, PUBSUB_BROKER_ISOLATE_NAME, 1),
+        ],
+    )
+    .await
+    .expect("ContainerManager should start with v2 setup manifest");
+
+    let setup_containers =
+        check_container_started(vec![SETUP_BINARY]).await.expect("Setup container should start");
+    let (fake_container_id, isolate_ez_bridge_enforcer_side_uds_path) = setup_containers[0].clone();
+    let _client = notify_isolate_ready(isolate_ez_bridge_enforcer_side_uds_path)
+        .await
+        .expect("Setup isolate should be ready");
+
+    let mut workload_manifests = load_workload_manifests_from_paths(&[
+        "enforcer/manifest_parser/test/testdata/v2_ratified_pubsub_broker.json",
+    ])
+    .expect("Should parse workload manifest");
+
+    let base_dep = workload_manifests.binary_manifests[0].ez_backend_dependencies[0].clone();
+    let mut dep_a = base_dep.clone();
+    dep_a.service_name = "ServiceA".to_string();
+    dep_a.method_name = "Method1".to_string();
+    dep_a.target_label = "label-a".to_string();
+
+    let mut dep_b1 = base_dep.clone();
+    dep_b1.service_name = "ServiceB".to_string();
+    dep_b1.method_name = "Method1".to_string();
+    dep_b1.target_label = "label-b".to_string();
+
+    let mut dep_b2 = base_dep;
+    dep_b2.service_name = "ServiceB".to_string();
+    dep_b2.method_name = "Method2".to_string();
+    dep_b2.target_label = "label-c".to_string();
+
+    workload_manifests.binary_manifests[0].ez_backend_dependencies = vec![dep_a, dep_b1, dep_b2];
+
+    let err = harness
+        .container_manager_requester
+        .load_workload_manifests(LoadWorkloadManifestsRequest { workload_manifests })
+        .await
+        .expect_err("Conflicting target_label on ServiceB should fail manifest loading");
+    assert!(
+        format!("{err:#}").contains("Failed to add backend dependency in Manifest Scope Validator"),
+        "{err:#}"
+    );
+
+    let binary_services_index = harness
+        .isolate_service_mapper
+        .get_binary_index(&IsolateServiceInfo {
+            operator_domain: V2_RATIFIED_PUBLISHER_ID.to_string(),
+            service_name: PUBSUB_BROKER_SERVICE.to_string(),
+            isolate_name: PUBSUB_BROKER_ISOLATE_NAME.to_string(),
+            publisher_id: V2_RATIFIED_PUBLISHER_ID.to_string(),
+        })
+        .await
+        .expect("Binary index should exist");
+    let service_a_index = harness
+        .isolate_service_mapper
+        .get_service_index(&IsolateServiceInfo {
+            operator_domain: "cdpush".to_string(),
+            service_name: "ServiceA".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("ServiceA index should exist in mapper");
+
+    let validation_result = harness
+        .manifest_validator
+        .validate_backend_dependency(ValidateBackendDependencyRequest {
+            binary_services_index,
+            destination_isolate_service: service_a_index,
+        })
+        .await;
+    assert_eq!(
+        validation_result,
+        Err(DataScopeError::InvalidIsolateServiceIndex),
+        "Earlier dependency ServiceA should be cleared after conflict failure"
+    );
+
+    harness.stop().await;
+    ensure_isolate_stopped(fake_container_id).await.expect("Container should stop");
+}
+
 /// Returns the environment variables without the EZ_ ones added by the Enforcer.
 fn manifest_variables(env: &[String]) -> Vec<String> {
     env.iter().filter(|e| !e.starts_with("EZ_")).cloned().collect()

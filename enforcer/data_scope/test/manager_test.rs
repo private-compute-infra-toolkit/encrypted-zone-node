@@ -505,6 +505,7 @@ async fn test_add_backend_dependencies() {
     let request = AddBackendDependenciesRequest {
         binary_services_index: BinaryServicesIndex::new(false),
         dependency_index: *TEST_REMOTE_ISOLATE_SERVICE_INDEX,
+        target_label: None,
     };
     let result = validator.add_backend_dependencies(request).await;
     assert!(result.is_ok());
@@ -518,6 +519,7 @@ async fn test_validate_backend_dependency_success() {
     let add_request = AddBackendDependenciesRequest {
         binary_services_index,
         dependency_index: *TEST_REMOTE_ISOLATE_SERVICE_INDEX,
+        target_label: None,
     };
     validator.add_backend_dependencies(add_request).await.unwrap();
     let validate_request = ValidateBackendDependencyRequest {
@@ -525,7 +527,7 @@ async fn test_validate_backend_dependency_success() {
         destination_isolate_service: *TEST_REMOTE_ISOLATE_SERVICE_INDEX,
     };
     let result = validator.validate_backend_dependency(validate_request).await;
-    assert!(result.is_ok());
+    assert_eq!(result.unwrap().target_label, None);
 }
 
 // Tests that validating a backend dependency that is not added fails with `BackendDependencyNotAllowed`.
@@ -536,6 +538,7 @@ async fn test_validate_backend_dependency_not_allowed() {
     let add_request = AddBackendDependenciesRequest {
         binary_services_index,
         dependency_index: *TEST_REMOTE_ISOLATE_SERVICE_INDEX,
+        target_label: None,
     };
     validator
         .add_backend_dependencies(add_request)
@@ -562,7 +565,134 @@ async fn test_validate_backend_dependency_invalid_index() {
         destination_isolate_service: *TEST_REMOTE_ISOLATE_SERVICE_INDEX,
     };
     let result = validator.validate_backend_dependency(validate_request).await;
-    assert!(matches!(result, Err(DataScopeError::InvalidIsolateServiceIndex)));
+    assert_eq!(result, Err(DataScopeError::InvalidIsolateServiceIndex));
+}
+
+#[tokio::test]
+async fn test_validate_backend_dependency_returns_target_label() {
+    let validator = ManifestValidator::default();
+    let binary_services_index = BinaryServicesIndex::new(false);
+    validator
+        .add_backend_dependencies(AddBackendDependenciesRequest {
+            binary_services_index,
+            dependency_index: *TEST_REMOTE_ISOLATE_SERVICE_INDEX,
+            target_label: Some("expected-label".to_string()),
+        })
+        .await
+        .unwrap();
+
+    let result = validator
+        .validate_backend_dependency(ValidateBackendDependencyRequest {
+            binary_services_index,
+            destination_isolate_service: *TEST_REMOTE_ISOLATE_SERVICE_INDEX,
+        })
+        .await
+        .unwrap();
+    assert_eq!(result.target_label.as_deref(), Some("expected-label"));
+}
+
+#[tokio::test]
+async fn test_add_backend_dependencies_rejects_oversized_target_label() {
+    let validator = ManifestValidator::default();
+    let result = validator
+        .add_backend_dependencies(AddBackendDependenciesRequest {
+            binary_services_index: BinaryServicesIndex::new(false),
+            dependency_index: *TEST_REMOTE_ISOLATE_SERVICE_INDEX,
+            target_label: Some("a".repeat(64)),
+        })
+        .await;
+    assert_eq!(result, Err(DataScopeError::InvalidTargetLabel));
+}
+
+#[tokio::test]
+async fn test_add_backend_dependencies_rejects_undersized_target_label() {
+    let validator = ManifestValidator::default();
+    let result = validator
+        .add_backend_dependencies(AddBackendDependenciesRequest {
+            binary_services_index: BinaryServicesIndex::new(false),
+            dependency_index: *TEST_REMOTE_ISOLATE_SERVICE_INDEX,
+            target_label: Some("a".to_string()),
+        })
+        .await;
+    assert_eq!(result, Err(DataScopeError::InvalidTargetLabel));
+}
+
+#[tokio::test]
+async fn test_add_backend_dependencies_rejects_malformed_target_label() {
+    let validator = ManifestValidator::default();
+    for bad_label in ["-ab", "ab-", "--", "UPPERCASE", "under_score", "with.dot", "invalid label!"]
+    {
+        let result = validator
+            .add_backend_dependencies(AddBackendDependenciesRequest {
+                binary_services_index: BinaryServicesIndex::new(false),
+                dependency_index: *TEST_REMOTE_ISOLATE_SERVICE_INDEX,
+                target_label: Some(bad_label.to_string()),
+            })
+            .await;
+        assert_eq!(
+            result,
+            Err(DataScopeError::InvalidTargetLabel),
+            "expected InvalidTargetLabel for '{bad_label}'"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_add_backend_dependencies_rejects_conflicting_target_label() {
+    let validator = ManifestValidator::default();
+    let binary_services_index = BinaryServicesIndex::new(false);
+    validator
+        .add_backend_dependencies(AddBackendDependenciesRequest {
+            binary_services_index,
+            dependency_index: *TEST_REMOTE_ISOLATE_SERVICE_INDEX,
+            target_label: Some("label-a".to_string()),
+        })
+        .await
+        .unwrap();
+
+    // Registering another method for the same destination with the same label succeeds.
+    validator
+        .add_backend_dependencies(AddBackendDependenciesRequest {
+            binary_services_index,
+            dependency_index: *TEST_REMOTE_ISOLATE_SERVICE_INDEX,
+            target_label: Some("label-a".to_string()),
+        })
+        .await
+        .unwrap();
+
+    // Registering the same destination with a different label fails.
+    let conflict_result = validator
+        .add_backend_dependencies(AddBackendDependenciesRequest {
+            binary_services_index,
+            dependency_index: *TEST_REMOTE_ISOLATE_SERVICE_INDEX,
+            target_label: Some("label-b".to_string()),
+        })
+        .await;
+    assert_eq!(conflict_result, Err(DataScopeError::ConflictingTargetLabel));
+}
+
+#[tokio::test]
+async fn test_clear_backend_dependencies_removes_registered_entries() {
+    let validator = ManifestValidator::default();
+    let binary_services_index = BinaryServicesIndex::new(false);
+    validator
+        .add_backend_dependencies(AddBackendDependenciesRequest {
+            binary_services_index,
+            dependency_index: *TEST_REMOTE_ISOLATE_SERVICE_INDEX,
+            target_label: Some("label-a".to_string()),
+        })
+        .await
+        .unwrap();
+
+    validator.clear_backend_dependencies(binary_services_index).await;
+
+    let result = validator
+        .validate_backend_dependency(ValidateBackendDependencyRequest {
+            binary_services_index,
+            destination_isolate_service: *TEST_REMOTE_ISOLATE_SERVICE_INDEX,
+        })
+        .await;
+    assert_eq!(result, Err(DataScopeError::InvalidIsolateServiceIndex));
 }
 
 // Tests that validating an input scope that is within the allowed manifest scope succeeds.

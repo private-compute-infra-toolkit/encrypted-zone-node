@@ -172,6 +172,17 @@ message EzBackendDependency {
   // (i.e., outside the encrypted zone) endpoints. For other route types, this
   // field is optional.
   RouteType route_type = 4;
+
+  // Optional logical label identifying the target endpoint for outbound
+  // routing (e.g., for ROUTE_TYPE_REMOTE or ROUTE_TYPE_EXTERNAL calls).
+  // Must be 2 to 63 characters of [a-z0-9-] starting and ending with
+  // [a-z0-9]. All entries for the same destination service within a manifest
+  // must declare the same target_label (at most one label per destination
+  // service). When set, the Enforcer attaches this label to validated
+  // outbound requests for this dependency; the Isolate and SDK do not need to
+  // supply it at call time.
+  string target_label = 7;
+
   // TODO: Add additional metadata describing the expected interaction types,
   // e.g., load balancing strategies, streaming or not, chaffing related
   // knobs, etc.

@@ -119,6 +119,8 @@ pub struct AddBackendDependenciesRequest {
     pub binary_services_index: BinaryServicesIndex,
     /// The index of the dependency service.
     pub dependency_index: IsolateServiceIndex,
+    /// Optional logical target label declared in the manifest for this dependency.
+    pub target_label: Option<String>,
 }
 
 /// A request to validate if a binary is allowed to call a backend dependency.
@@ -128,6 +130,13 @@ pub struct ValidateBackendDependencyRequest {
     pub binary_services_index: BinaryServicesIndex,
     /// The index of the destination service being called.
     pub destination_isolate_service: IsolateServiceIndex,
+}
+
+/// A response for a `ValidateBackendDependencyRequest`.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ValidateBackendDependencyResponse {
+    /// Optional logical target label configured in the manifest's backend dependency.
+    pub target_label: Option<String>,
 }
 
 /// A request to validate if a requested input scope is allowed by the manifest.

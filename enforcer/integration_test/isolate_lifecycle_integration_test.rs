@@ -106,6 +106,7 @@ impl IntegrationTestHarness {
             .add_backend_dependencies(AddBackendDependenciesRequest {
                 binary_services_index: caller_binary_index,
                 dependency_index,
+                target_label: None,
             })
             .await
             .expect("Backend dependency should be added to ManifestValidator");

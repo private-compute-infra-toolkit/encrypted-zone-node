@@ -666,7 +666,7 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
                 .unwrap_or(RouteType::Unspecified);
             // TODO(b/325466997): Service indexing will eventually be based on
             // (publisher_id, operator_domain, workload_id).
-            let backend_isolate_services_index = self
+            let backend_isolate_services_index = match self
                 .isolate_service_mapper
                 .add_backend_dependency_service(
                     &IsolateServiceInfo {
@@ -678,14 +678,27 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
                     route_type,
                 )
                 .await
-                .context("Failed to add backend dependency in Isolate Service Mapper")?;
-            self.manifest_validator
+            {
+                Ok(idx) => idx,
+                Err(e) => {
+                    self.manifest_validator.clear_backend_dependencies(binary_services_index).await;
+                    return Err(e)
+                        .context("Failed to add backend dependency in Isolate Service Mapper");
+                }
+            };
+            if let Err(e) = self
+                .manifest_validator
                 .add_backend_dependencies(AddBackendDependenciesRequest {
                     binary_services_index,
                     dependency_index: backend_isolate_services_index,
+                    target_label: Some(backend_dependency.target_label.clone()),
                 })
                 .await
-                .context("Failed to add backend dependency in Manifest Scope Validator")?;
+            {
+                self.manifest_validator.clear_backend_dependencies(binary_services_index).await;
+                return Err(e)
+                    .context("Failed to add backend dependency in Manifest Scope Validator");
+            }
         }
         Ok(())
     }
@@ -893,6 +906,8 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
                 })
                 .await?;
 
+            self.add_isolate_to_state_mngr(isolate_id, request.allowed_data_scope_type).await?;
+
             container.start(&opts).await?;
 
             self.isolate_container_map.insert(
@@ -903,7 +918,6 @@ impl<ContainerT: Container + 'static> ContainerManager<ContainerT> {
                     restart_count,
                 },
             );
-            self.add_isolate_to_state_mngr(isolate_id, request.allowed_data_scope_type).await?;
             self.add_isolate_to_junction(isolate_id, ez_isolate_bridge_enforcer_side_uds_path)
                 .await
                 .context("IsolateJunction addIsolate failed")?;

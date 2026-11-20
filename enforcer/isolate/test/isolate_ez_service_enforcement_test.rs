@@ -140,21 +140,53 @@ async fn notify_isolate_state_failure() {
         .await
         .expect("Should be able to setup notify state stream");
 
-    // Send the same state twice to trigger a DuplicateStateUpdate error.
+    // Send Ready state update.
     tx.send(NotifyIsolateStateRequest { new_isolate_state: IsolateState::Ready.into() })
         .await
         .expect("Should be able to send state update");
     let response = rx.message().await;
     assert!(response.is_ok(), "Expected a successful state update response");
 
+    // Send the same state twice. The duplicate update should succeed idempotently.
     tx.send(NotifyIsolateStateRequest { new_isolate_state: IsolateState::Ready.into() })
         .await
         .expect("Should be able to send state update");
 
-    // The service sends an error, then a success. We check for the error.
     let response = rx.message().await;
-    assert!(response.is_err(), "Expected a state update failure");
+    assert!(response.is_ok(), "Expected a successful duplicate state update response");
+
+    // Send an invalid state transition (Ready -> Starting) to verify invalid transitions fail.
+    tx.send(NotifyIsolateStateRequest { new_isolate_state: IsolateState::Starting.into() })
+        .await
+        .expect("Should be able to send state update");
+
+    let response = rx.message().await;
+    assert!(response.is_err(), "Expected a state update failure on invalid transition");
     assert_eq!(response.expect_err("Expected an error response").code(), tonic::Code::Aborted);
+}
+
+#[tokio::test]
+async fn notify_isolate_state_returns_unavailable_when_isolate_unrecognized() {
+    let mut harness = TestHarness::new().await.expect("Harness should start");
+    // Do NOT call add_isolate, simulating an isolate sending state before registration completes.
+
+    let (tx, mut rx) = setup_notify_state_stream(&mut harness.client)
+        .await
+        .expect("Should be able to setup notify state stream");
+
+    tx.send(NotifyIsolateStateRequest { new_isolate_state: IsolateState::Ready.into() })
+        .await
+        .expect("Should be able to send state update");
+
+    let response = rx.message().await;
+    assert!(response.is_err(), "Expected an error response for unrecognized isolate");
+    let err_status = response.expect_err("Expected an error response");
+    assert_eq!(err_status.code(), tonic::Code::Unavailable);
+    assert!(
+        err_status.message().contains("not found in state manager"),
+        "Expected error message to indicate isolate was not found, got: {}",
+        err_status.message()
+    );
 }
 
 #[tokio::test]

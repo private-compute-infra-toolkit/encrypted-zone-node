@@ -631,6 +631,7 @@ impl TestHarness {
             .add_backend_dependencies(AddBackendDependenciesRequest {
                 binary_services_index: self.isolate_id.get_binary_services_index(),
                 dependency_index: self.mapper.get_service_index(service_info).await.unwrap(),
+                target_label: None,
             })
             .await?;
         Ok(())

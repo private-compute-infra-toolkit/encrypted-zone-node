@@ -423,6 +423,7 @@ fn create_invoke_isolate_request(
             metadata_headers,
             request_metadata,
             extensions,
+            target_label: String::new(),
         }),
         isolate_input_iscope,
         isolate_input: isolate_input.map(|data| EzHybridPayload {

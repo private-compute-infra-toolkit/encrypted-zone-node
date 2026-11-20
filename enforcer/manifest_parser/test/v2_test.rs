@@ -80,6 +80,7 @@ fn test_v2_binary_manifest_ratified() {
     assert_eq!(isolate.service_specs[0].service_name, "PubSubBroker");
     assert_eq!(isolate.ez_backend_dependencies.len(), 1);
     assert_eq!(isolate.ez_backend_dependencies[0].operator_domain, "cdpush");
+    assert_eq!(isolate.ez_backend_dependencies[0].target_label, "");
     let metrics_policy = isolate.metrics_policy.expect("Ratified metrics_policy should be parsed");
     assert_eq!(
         metrics_policy.allowed_metrics[0].name,

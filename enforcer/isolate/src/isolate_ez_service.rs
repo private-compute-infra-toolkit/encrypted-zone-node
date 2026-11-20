@@ -49,7 +49,7 @@ use outbound_ez_to_ez_client::OutboundEzToEzClient;
 use payload_proto::enforcer::v1::{ez_hybrid_payload::DeliveryMethod, EzPayloadData, ShmSlotData};
 use shared_memory_manager::SharedMemManager;
 use simple_tonic_stream::SimpleStreamingWrapper;
-use state_manager::IsolateStateManager;
+use state_manager::{IsolateStateManager, IsolateStateManagerError};
 use std::time::Instant;
 use tokio::sync::mpsc::{channel, Sender};
 use tokio_stream::wrappers::ReceiverStream;
@@ -216,14 +216,28 @@ impl IsolateEzBridge for IsolateEzBridgeService {
                 let state_update_result =
                     state_manager_clone.update_state(isolate_id, new_state).await;
 
-                if state_update_result.is_err() {
-                    log::warn!("Warning: {:?}", state_update_result.err());
-                    let _ = notify_state_response_tx
-                        .send(Err(Status::aborted("Failed to update isolate state")))
-                        .await;
+                if let Err(err) = state_update_result {
+                    log::warn!(
+                        "Failed to update isolate state for isolate {:?} to {:?}: {err:#}",
+                        isolate_id,
+                        new_state
+                    );
+                    // If the isolate is not yet registered (e.g. during a startup race
+                    // between container turnup and state manager registration), return
+                    // UNAVAILABLE so client channels can retry with backoff. Invalid
+                    // lifecycle transitions remain non-retryable ABORTED.
+                    let status =
+                        if err.downcast_ref::<IsolateStateManagerError>().is_some_and(|e| {
+                            matches!(e, IsolateStateManagerError::UnrecognizedIsolateId(_))
+                        }) {
+                            Status::unavailable(format!("Failed to update isolate state: {err:#}"))
+                        } else {
+                            Status::aborted(format!("Failed to update isolate state: {err:#}"))
+                        };
+                    let _ = notify_state_response_tx.send(Err(status)).await;
+                } else {
+                    let _ = notify_state_response_tx.send(Ok(NotifyIsolateStateResponse {})).await;
                 }
-
-                let _ = notify_state_response_tx.send(Ok(NotifyIsolateStateResponse {})).await;
             }
         });
 
@@ -962,7 +976,7 @@ impl RestrictionsEnforcer {
             }
         }
 
-        let metadata = match req.control_plane_metadata.as_ref() {
+        let metadata = match req.control_plane_metadata.as_mut() {
             Some(meta) => meta,
             None => {
                 return Err(Status::failed_precondition(
@@ -1000,7 +1014,7 @@ impl RestrictionsEnforcer {
             }
         };
 
-        if let Err(err) = self
+        let validation_response = match self
             .manifest_validator
             .validate_backend_dependency(ValidateBackendDependencyRequest {
                 binary_services_index: self.isolate_id.get_binary_services_index(),
@@ -1008,16 +1022,20 @@ impl RestrictionsEnforcer {
             })
             .await
         {
-            let detailed_err_msg = format!(
-                "Communication to the target backend dependency {}.{}.{} is not allowed as it is not defined in the EzManifest (Error: {}). Isolate attempting communication: {}",
-                metadata.destination_operator_domain,
-                metadata.destination_service_name,
-                metadata.destination_method_name,
-                err,
-                self.isolate_id
-            );
-            return Err(Status::failed_precondition(detailed_err_msg));
-        }
+            Ok(response) => response,
+            Err(err) => {
+                let detailed_err_msg = format!(
+                    "Communication to the target backend dependency {}.{}.{} is not allowed as it is not defined in the EzManifest (Error: {}). Isolate attempting communication: {}",
+                    metadata.destination_operator_domain,
+                    metadata.destination_service_name,
+                    metadata.destination_method_name,
+                    err,
+                    self.isolate_id
+                );
+                return Err(Status::failed_precondition(detailed_err_msg));
+            }
+        };
+        metadata.target_label = validation_response.target_label.unwrap_or_default();
 
         let route = destination_isolate_service.get_request_route();
 
@@ -1065,6 +1083,8 @@ impl RestrictionsEnforcer {
                 return Err(status);
             }
         };
+        // TODO(b/582855288): Pin destination service and target_label per stream so subsequent
+        // messages cannot switch to another declared dependency mid-stream.
         if let Some(expected) = expected_route {
             if route != expected {
                 let detailed_err_msg = format!(

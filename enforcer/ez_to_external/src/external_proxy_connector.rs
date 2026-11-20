@@ -367,7 +367,10 @@ impl ExternalProxyChannel for ExternalProxyConnector {
     }
 }
 
-/// Translates an InvokeEzRequest into the format required by the ez_external_proxy.
+/// Translates an [`InvokeEzRequest`] into the format required by `ez_external_proxy`.
+///
+/// Precondition: `req.control_plane_metadata.target_label` is copied verbatim and must already
+/// have been validated and overwritten from the declared `EzBackendDependency` by the caller.
 pub fn translate_to_proxy_request(
     req: InvokeEzRequest,
 ) -> Result<EzExternalProxyRequest, ExternalProxyConnectorError> {
@@ -400,6 +403,7 @@ pub fn translate_to_proxy_request(
         target: target_domain.to_string(),
         service_name: metadata.destination_service_name,
         method_name: metadata.destination_method_name,
+        target_label: metadata.target_label,
     };
 
     Ok(EzExternalProxyRequest {

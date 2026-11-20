@@ -73,4 +73,9 @@ message EzExternalResource {
   string service_name = 2; // Required.
   // An RPC method name on the service named in service_name.
   string method_name = 3; // Required.
+  // Optional logical label identifying the external target endpoint to resolve
+  // at runtime. The Enforcer populates this field from the validated
+  // `EzBackendDependency.target_label` declared in the Isolate's Manifest
+  // (never copied directly from an unvalidated Isolate request).
+  string target_label = 4;
 }

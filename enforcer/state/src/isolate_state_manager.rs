@@ -56,6 +56,8 @@ pub enum IsolateStateManagerError {
     DuplicateStateUpdate,
     #[error("The state transition is not valid")]
     InvalidStateTransition,
+    #[error("Isolate {0:?} not found in state manager (Unrecognized IsolateId)")]
+    UnrecognizedIsolateId(IsolateId),
 }
 
 /// RAII guard that holds an in-flight request count for an Isolate.
@@ -282,7 +284,8 @@ impl IsolateStateManager {
     /// # Errors
     ///
     /// Returns an error if the Isolate ID is not recognized or if the state transition is invalid
-    /// (e.g., duplicate update or an illegal transition like `Ready` -> `Starting`).
+    /// (e.g., an illegal transition like `Ready` -> `Starting`). Duplicate state updates are
+    /// treated idempotently as a no-op.
     pub async fn update_state(
         &self,
         isolate_id: IsolateId,
@@ -291,9 +294,17 @@ impl IsolateStateManager {
         let mut isolate_id_current_state_ref_mut = self
             .isolate_state_map
             .get_mut(&isolate_id)
-            .context("Unrecognized IsolateId received for update_state")?;
+            .ok_or(IsolateStateManagerError::UnrecognizedIsolateId(isolate_id))?;
 
         let old_state = *isolate_id_current_state_ref_mut.value();
+        if old_state == isolate_state {
+            log::info!(
+                "Isolate {:?} is already in state {:?}, ignoring duplicate state update",
+                isolate_id,
+                isolate_state
+            );
+            return Ok(());
+        }
         validate_state_transition(old_state, isolate_state)?;
 
         if isolate_state != IsolateState::Ready {
@@ -421,11 +432,7 @@ impl IsolateStateManager {
 
 fn validate_state_transition(current_state: IsolateState, new_state: IsolateState) -> Result<()> {
     if new_state == current_state {
-        log::warn!(
-            "Invalid state transition detected. Already in following state: {:?}",
-            new_state
-        );
-        return Err(IsolateStateManagerError::DuplicateStateUpdate.into());
+        return Ok(());
     }
     // TODO Convert this into a static Map defining allowed transitions
     match new_state {

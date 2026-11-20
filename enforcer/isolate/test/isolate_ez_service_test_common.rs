@@ -74,6 +74,7 @@ pub struct MockExternalProxy {
     pub call_count: Arc<AtomicUsize>,
     pub received_from_bridge_count: Arc<AtomicUsize>,
     pub delay: Arc<Mutex<Duration>>,
+    pub observed_target_labels: Arc<Mutex<Vec<String>>>,
 }
 
 #[tonic::async_trait]
@@ -95,9 +96,9 @@ impl ExternalProxyChannel for MockExternalProxy {
         }
         let delay = *self.delay.lock().unwrap();
         sleep(delay).await;
-        if request.control_plane_metadata.unwrap().destination_service_name
-            == TEST_ERROR_SERVICE_NAME
-        {
+        let metadata = request.control_plane_metadata.unwrap();
+        self.observed_target_labels.lock().unwrap().push(metadata.target_label);
+        if metadata.destination_service_name == TEST_ERROR_SERVICE_NAME {
             return Err(ExternalProxyConnectorError::UnaryCallFailed(Status::new(
                 TEST_ERROR_CODE.into(),
                 TEST_ERROR_MESSAGE,
@@ -114,12 +115,13 @@ impl ExternalProxyChannel for MockExternalProxy {
     ) -> Result<Receiver<Result<InvokeEzResponse, Status>>, ExternalProxyConnectorError> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
         let received_from_bridge_count = self.received_from_bridge_count.clone();
+        let observed_target_labels = self.observed_target_labels.clone();
         let (to_bridge_tx, to_bridge_rx) = mpsc::channel(1);
         let ret = if let Some(first_request) = from_bridge_rx.recv().await {
             received_from_bridge_count.fetch_add(1, Ordering::SeqCst);
-            if first_request.control_plane_metadata.unwrap().destination_service_name
-                == TEST_ERROR_SERVICE_NAME
-            {
+            let metadata = first_request.control_plane_metadata.unwrap();
+            observed_target_labels.lock().unwrap().push(metadata.target_label);
+            if metadata.destination_service_name == TEST_ERROR_SERVICE_NAME {
                 return Err(ExternalProxyConnectorError::StreamFailed(Box::new(Status::new(
                     TEST_ERROR_CODE.into(),
                     TEST_ERROR_MESSAGE,
@@ -132,8 +134,11 @@ impl ExternalProxyChannel for MockExternalProxy {
             ))
         };
         tokio::spawn(async move {
-            while from_bridge_rx.recv().await.is_some() {
+            while let Some(req) = from_bridge_rx.recv().await {
                 received_from_bridge_count.fetch_add(1, Ordering::SeqCst);
+                if let Some(metadata) = req.control_plane_metadata {
+                    observed_target_labels.lock().unwrap().push(metadata.target_label);
+                }
                 to_bridge_tx
                     .send(Ok(get_sample_invoke_ez_response()))
                     .await
@@ -153,6 +158,8 @@ impl ExternalProxyChannel for MockExternalProxy {
 pub struct MockEzToEzOutboundHandler {
     pub call_count: Arc<AtomicUsize>,
     pub delay: Arc<Mutex<Duration>>,
+    pub connect_target_labels: Arc<Mutex<Vec<String>>>,
+    pub observed_target_labels: Arc<Mutex<Vec<String>>>,
 }
 
 #[tonic::async_trait]
@@ -171,9 +178,9 @@ impl OutboundEzToEzClient for MockEzToEzOutboundHandler {
         }
         let delay = *self.delay.lock().unwrap();
         sleep(delay).await;
-        if request.control_plane_metadata.unwrap().destination_service_name
-            == TEST_ERROR_SERVICE_NAME
-        {
+        let metadata = request.control_plane_metadata.unwrap();
+        self.observed_target_labels.lock().unwrap().push(metadata.target_label);
+        if metadata.destination_service_name == TEST_ERROR_SERVICE_NAME {
             return Err(Status::new(TEST_ERROR_CODE.into(), TEST_ERROR_MESSAGE).into());
         }
         Ok(InvokeEzResponse::default())
@@ -181,17 +188,21 @@ impl OutboundEzToEzClient for MockEzToEzOutboundHandler {
 
     async fn remote_streaming_connect(
         &self,
-        _first_request_metadata: Option<&ControlPlaneMetadata>,
+        first_request_metadata: Option<&ControlPlaneMetadata>,
         mut from_local_rx: Receiver<InvokeEzRequest>,
         _timeout: Option<std::time::Duration>,
     ) -> anyhow::Result<Receiver<Result<InvokeEzResponse>>> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
+        if let Some(meta) = first_request_metadata {
+            self.connect_target_labels.lock().unwrap().push(meta.target_label.clone());
+        }
+        let observed_target_labels = self.observed_target_labels.clone();
         let (to_caller_tx, to_caller_rx) = mpsc::channel(1);
         tokio::spawn(async move {
             while let Some(request) = from_local_rx.recv().await {
-                if request.control_plane_metadata.unwrap().destination_service_name
-                    == TEST_ERROR_SERVICE_NAME
-                {
+                let metadata = request.control_plane_metadata.unwrap();
+                observed_target_labels.lock().unwrap().push(metadata.target_label);
+                if metadata.destination_service_name == TEST_ERROR_SERVICE_NAME {
                     to_caller_tx
                         .send(Err(Status::new(TEST_ERROR_CODE.into(), TEST_ERROR_MESSAGE).into()))
                         .await
@@ -426,6 +437,7 @@ pub async fn add_backend_dependencies(
         .add_backend_dependencies(AddBackendDependenciesRequest {
             binary_services_index: isolate_id.get_binary_services_index(),
             dependency_index,
+            target_label: None,
         })
         .await
         .context("Should be able to add backend dependency in manifest")?;

@@ -15,11 +15,12 @@
 use crate::error::DataScopeError;
 use crate::request::{
     AddBackendDependenciesRequest, AddManifestScopeRequest, ValidateBackendDependencyRequest,
-    ValidateManifestInputScopeRequest, ValidateManifestOutputScopeRequest,
+    ValidateBackendDependencyResponse, ValidateManifestInputScopeRequest,
+    ValidateManifestOutputScopeRequest,
 };
 use data_scope_proto::enforcer::v1::DataScopeType;
 use isolate_info::{BinaryServicesIndex, IsolateServiceIndex};
-use std::collections::{hash_map::Entry, HashMap, HashSet};
+use std::collections::{hash_map::Entry, HashMap};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -27,6 +28,22 @@ use tokio::sync::RwLock;
 struct ManifestScopeInfo {
     max_input_scope: DataScopeType,
     max_output_scope: DataScopeType,
+}
+
+/// Maps each allowed backend dependency service index to the optional `target_label`
+/// configured for that dependency in the manifest.
+type BackendDependencyMap = HashMap<IsolateServiceIndex, Option<String>>;
+
+/// Minimum and maximum allowed length (in bytes) for a non-empty `target_label`.
+const MIN_TARGET_LABEL_LEN: usize = 2;
+const MAX_TARGET_LABEL_LEN: usize = 63;
+
+fn is_valid_target_label(label: &str) -> bool {
+    label.is_empty()
+        || ((MIN_TARGET_LABEL_LEN..=MAX_TARGET_LABEL_LEN).contains(&label.len())
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label.bytes().all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-')))
 }
 
 /// Validates data scopes and backend dependencies based on the information provided in the manifest.
@@ -37,7 +54,7 @@ struct ManifestScopeInfo {
 #[derive(Debug, Default, Clone)]
 pub struct ManifestValidator {
     scope_info: Arc<RwLock<HashMap<BinaryServicesIndex, ManifestScopeInfo>>>,
-    backend_dependencies: Arc<RwLock<HashMap<BinaryServicesIndex, HashSet<IsolateServiceIndex>>>>,
+    backend_dependencies: Arc<RwLock<HashMap<BinaryServicesIndex, BackendDependencyMap>>>,
 }
 
 impl ManifestValidator {
@@ -65,34 +82,67 @@ impl ManifestValidator {
         Ok(())
     }
 
-    /// Registers a backend dependency for a given binary.
+    /// Registers a backend dependency and its optional `target_label` for a given binary.
     ///
     /// This allows the binary to make calls to the specified dependency.
+    /// Returns [`DataScopeError::InvalidTargetLabel`] if `target_label` is not 2-63 characters of
+    /// `[a-z0-9-]` starting and ending with `[a-z0-9]`.
+    /// Returns [`DataScopeError::ConflictingTargetLabel`] if the same destination dependency is
+    /// already registered for the binary with a different `target_label`.
     pub async fn add_backend_dependencies(
         &self,
         req: AddBackendDependenciesRequest,
     ) -> Result<(), DataScopeError> {
+        if let Some(ref label) = req.target_label {
+            if !is_valid_target_label(label) {
+                return Err(DataScopeError::InvalidTargetLabel);
+            }
+        }
+
         let mut backend_dependencies = self.backend_dependencies.write().await;
-        backend_dependencies
-            .entry(req.binary_services_index)
-            .or_insert_with(HashSet::new)
-            .insert(req.dependency_index);
+        let dependencies =
+            backend_dependencies.entry(req.binary_services_index).or_insert_with(HashMap::new);
+        match dependencies.entry(req.dependency_index) {
+            Entry::Occupied(existing) => {
+                if existing.get().as_deref().unwrap_or("")
+                    != req.target_label.as_deref().unwrap_or("")
+                {
+                    return Err(DataScopeError::ConflictingTargetLabel);
+                }
+            }
+            Entry::Vacant(vacant) => {
+                vacant.insert(req.target_label);
+            }
+        }
 
         Ok(())
     }
 
-    /// Validates if a binary is allowed to call a specific backend dependency.
+    /// Removes all registered backend dependencies for a given binary.
+    ///
+    /// Isolates are only loaded once during manifest registration (with a fresh
+    /// [`BinaryServicesIndex`]) before any replicas run, so clearing on registration failure
+    /// cannot affect live replicas.
+    pub async fn clear_backend_dependencies(&self, binary_services_index: BinaryServicesIndex) {
+        let mut backend_dependencies = self.backend_dependencies.write().await;
+        backend_dependencies.remove(&binary_services_index);
+    }
+
+    /// Validates if a binary is allowed to call a specific backend dependency and returns the
+    /// response containing the optional `target_label` configured in the manifest.
     ///
     /// Returns [DataScopeError::BackendDependencyNotAllowed] if the dependency is not registered for the binary.
     /// Returns [DataScopeError::InvalidIsolateServiceIndex] if the binary is not recognized.
     pub async fn validate_backend_dependency(
         &self,
         req: ValidateBackendDependencyRequest,
-    ) -> Result<(), DataScopeError> {
+    ) -> Result<ValidateBackendDependencyResponse, DataScopeError> {
         let backend_dependencies = self.backend_dependencies.read().await;
         if let Some(dependencies) = backend_dependencies.get(&req.binary_services_index) {
-            if dependencies.contains(&req.destination_isolate_service) {
-                return Ok(());
+            if let Some(target_label) = dependencies.get(&req.destination_isolate_service) {
+                return Ok(ValidateBackendDependencyResponse {
+                    target_label: target_label.clone(),
+                });
             } else {
                 return Err(DataScopeError::BackendDependencyNotAllowed);
             }

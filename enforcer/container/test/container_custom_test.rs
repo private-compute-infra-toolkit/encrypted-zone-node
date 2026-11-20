@@ -21,9 +21,11 @@ use container::{
     SeccompAction, SeccompProfile, SeccompRule, StateResetEngine, StateResetSession,
 };
 use container_custom::ContainerCustom;
+use nix::mount::{self, MntFlags, MsFlags};
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::Write;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -38,6 +40,8 @@ const BUNDLE_PATH: &str = "enforcer/container/test_data/test_bundle.tar";
 // enforcer/container/test_data/BUILD.
 const BINARY_FILENAME: &str = "/usr/local/bin/main";
 const INSTANCE_NAME: &str = "test_ez1";
+// Set when a test re-runs itself inside a new user and mount namespace.
+const IN_USER_NS_ENV: &str = "CONTAINER_CUSTOM_TEST_IN_USER_NS";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn container_start_does_not_starve_spawned_uds_server() {
@@ -483,9 +487,53 @@ async fn container_restrictive_flags_mount() {
     let data = String::from_utf8(server_handle.await.unwrap()).unwrap();
     assert_ne!(data, "not found", "/ez mount not found");
     let options: Vec<&str> = data.split(',').collect();
+    assert!(options.contains(&"rw"), "missing rw: {}", data);
     assert!(options.contains(&"nosuid"), "missing nosuid: {}", data);
     assert!(options.contains(&"nodev"), "missing nodev: {}", data);
     assert!(options.contains(&"noexec"), "missing noexec: {}", data);
+}
+
+#[tokio::test]
+async fn container_restrictive_flags_mount_keeps_readonly_source_readonly() {
+    if std::env::var_os(IN_USER_NS_ENV).is_none() {
+        rerun_in_new_user_and_mount_ns(
+            "container_restrictive_flags_mount_keeps_readonly_source_readonly",
+        );
+        return;
+    }
+    mount::mount(
+        None::<&str>,
+        "/",
+        None::<&str>,
+        MsFlags::MS_REC | MsFlags::MS_PRIVATE,
+        None::<&str>,
+    )
+    .unwrap();
+    let uds_dir = tempfile::Builder::new().prefix("test_uds").tempdir().unwrap();
+    mount::mount(Some("tmpfs"), uds_dir.path(), Some("tmpfs"), MsFlags::empty(), None::<&str>)
+        .unwrap();
+    let server_handle =
+        handle(UnixListener::bind(uds_dir.path().join("isolate_ipc")).unwrap(), 100);
+    // A read-only source mount becomes locked read-only in the container's user namespace.
+    mount::mount(
+        None::<&str>,
+        uds_dir.path(),
+        None::<&str>,
+        MsFlags::MS_REMOUNT | MsFlags::MS_BIND | MsFlags::MS_RDONLY,
+        None::<&str>,
+    )
+    .unwrap();
+    let mut opts = default_container_opts("verify-ez-mount", Some(uds_dir.path().to_path_buf()));
+    opts.mounts[0].apply_restrictive_flags = true;
+
+    let mut container = default_container();
+    container.start(&opts).await.unwrap();
+    let data = String::from_utf8(server_handle.await.unwrap()).unwrap();
+    let options: Vec<&str> = data.split(',').collect();
+    for flag in ["ro", "nosuid", "nodev", "noexec"] {
+        assert!(options.contains(&flag), "missing {flag}: {data}");
+    }
+    mount::umount2(uds_dir.path(), MntFlags::MNT_DETACH).unwrap();
 }
 
 #[tokio::test]
@@ -919,6 +967,38 @@ async fn run_seccomp_test(action: SeccompAction) -> (ContainerRunStatus, String)
 
     sleep(Duration::from_millis(500)).await;
     (container.get_run_status().unwrap(), response)
+}
+
+/// Re-runs `test_name` in a fresh process that owns a new user and mount namespace. The test
+/// harness is multi-threaded, and `unshare(CLONE_NEWUSER)` requires a single-threaded process.
+fn rerun_in_new_user_and_mount_ns(test_name: &str) {
+    let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+    let uid_map = format!("0 {uid} 1");
+    let gid_map = format!("0 {gid} 1");
+    let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+    cmd.args(["--exact", test_name, "--nocapture"]).env(IN_USER_NS_ENV, "1");
+    // SAFETY: The closure only makes async-signal-safe syscalls between fork and exec.
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNS) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            for (path, contents) in [
+                (c"/proc/self/setgroups", "deny".as_bytes()),
+                (c"/proc/self/uid_map", uid_map.as_bytes()),
+                (c"/proc/self/gid_map", gid_map.as_bytes()),
+            ] {
+                let fd = libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
+                let written = libc::write(fd, contents.as_ptr().cast(), contents.len());
+                libc::close(fd);
+                if written != contents.len() as isize {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+    assert!(cmd.status().unwrap().success(), "{test_name} failed in a new user namespace");
 }
 
 #[derive(Debug, Default)]

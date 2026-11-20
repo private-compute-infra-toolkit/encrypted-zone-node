@@ -93,6 +93,20 @@ fn test_to_ez_error_conversion() {
         panic!("Expected EnforcerError");
     }
 
+    for err in [DataScopeError::InvalidTargetLabel, DataScopeError::ConflictingTargetLabel] {
+        if let ez_error::EzError::EnforcerError(ez_err) = err.to_ez_error() {
+            assert_eq!(ez_err.error_code, Code::InvalidArgument);
+            let bad_request = ez_err.bad_request.expect("Expected BadRequest details");
+            assert_eq!(bad_request.field_violations.len(), 1);
+            assert_eq!(
+                bad_request.field_violations[0].field,
+                "enforcer.EzManifest.binary_manifest.ez_backend_dependencies.target_label"
+            );
+        } else {
+            panic!("Expected EnforcerError");
+        }
+    }
+
     // Test MissingControlPlaneMetadata conversion
     let err = DataScopeError::MissingControlPlaneMetadata;
     let ez_err = err.to_ez_error();

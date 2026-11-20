@@ -213,11 +213,11 @@ async fn test_final_inflight_decrement_triggers_idle_state(
     tokio::time::timeout(tokio::time::Duration::from_secs(2), listener_task).await??;
 
     let result = harness.state_manager.update_state(harness.isolate_id, IsolateState::Idle).await;
-    assert!(result.is_err(), "Transition from auto-Idle -> Idle should fail");
-    assert!(matches!(
-        result.unwrap_err().downcast_ref::<IsolateStateManagerError>(),
-        Some(IsolateStateManagerError::DuplicateStateUpdate)
-    ));
+    assert!(result.is_ok(), "Duplicate transition to Idle should succeed as a no-op");
+    assert_eq!(
+        harness.state_manager.get_isolate_state(harness.isolate_id),
+        Some(IsolateState::Idle)
+    );
 
     Ok(())
 }
@@ -351,17 +351,17 @@ async fn test_invalid_transition_starting_to_idle() -> Result<(), Box<dyn std::e
 }
 
 #[tokio::test]
-async fn test_error_on_duplicate_state_update() -> Result<(), Box<dyn std::error::Error>> {
+async fn test_duplicate_state_update_is_idempotent() -> Result<(), Box<dyn std::error::Error>> {
     let mut harness = TestHarness::new().await;
     harness.advance_to_state(IsolateState::Ready).await;
 
     let result = harness.state_manager.update_state(harness.isolate_id, IsolateState::Ready).await;
 
-    assert!(result.is_err(), "Duplicate state update should result in an error");
-    assert!(matches!(
-        result.unwrap_err().downcast_ref::<IsolateStateManagerError>(),
-        Some(IsolateStateManagerError::DuplicateStateUpdate)
-    ));
+    assert!(result.is_ok(), "Duplicate state update should succeed as a no-op");
+    assert_eq!(
+        harness.state_manager.get_isolate_state(harness.isolate_id),
+        Some(IsolateState::Ready)
+    );
     Ok(())
 }
 
@@ -439,11 +439,8 @@ async fn test_concurrent_increments_are_handled_safely() -> Result<(), Box<dyn s
     tokio::time::timeout(tokio::time::Duration::from_secs(2), listener_task).await??;
 
     let result = harness.state_manager.update_state(isolate_id, IsolateState::Idle).await;
-    assert!(result.is_err(), "Transition to Idle should fail as it's already Idle");
-    assert!(matches!(
-        result.unwrap_err().downcast_ref::<IsolateStateManagerError>(),
-        Some(IsolateStateManagerError::DuplicateStateUpdate)
-    ));
+    assert!(result.is_ok(), "Duplicate transition to Idle should succeed as a no-op");
+    assert_eq!(harness.state_manager.get_isolate_state(isolate_id), Some(IsolateState::Idle));
 
     Ok(())
 }

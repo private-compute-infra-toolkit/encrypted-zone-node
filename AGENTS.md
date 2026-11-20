@@ -199,11 +199,16 @@ message can also use the unscoped format:
 ```
 
 Use concise Conventional Commit titles (`<= 72` characters), followed by one blank line and concise
-`<= 80`-character body lines updated whenever patchset scope shifts. Keep all commit footers
-(`Bug: b/<bug-identifier>` or `Bug: N/A`, `ORIGINAL_AUTHOR=<username>`, `Change-Id: ...`) strictly
-contiguous at the bottom with zero blank lines between trailers, and explicitly attribute the human
-requester. Ask the user to specify the Bug ID when none is known. The `Change-Id` footer is added by
-the git `commit-msg` hook when creating a commit. Read the last 3 commit messages for examples.
+`<= 80`-character body lines updated whenever patchset scope shifts. Place any `KEY=value` agent
+tags (`TAG=agy`, `CONV=<conversation-id>`, and `ORIGINAL_AUTHOR=<username>` when applicable) in
+their own paragraph separated by a blank line above the `Key: value` footer block, and keep all
+commit footers (`Bug: b/<bug-identifier>` or `Bug: N/A`, `Change-Id: ...`) strictly contiguous at
+the bottom with zero blank lines between trailers. When committing under a shared bot or role
+account rather than the human requester's own Git identity, explicitly attribute the human requester
+(`Requested by ...` and `ORIGINAL_AUTHOR=<username>`); omit both when the human requester is already
+the Git `Author`. Ask the user to specify the Bug ID when none is known. The `Change-Id` footer is
+added by the git `commit-msg` hook when creating a commit. Read the last 3 commit messages for
+examples.
 
 ## Open Source Codebase
 
